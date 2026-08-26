@@ -16,9 +16,18 @@ Every pound gets equal weight (CME's own wording). Using a single day
 instead of the 7-day window was an earlier bug here — with ~60 sale-barn
 locations, many reporting only weekly, a single day's sample is thin
 (sometimes 1 location), which produced day-to-day noise far larger than
-CME's real index shows. Note: this still excludes the Direct/Video/
-Internet trade component of CME's sample (see reference_usda_mars_api
-memory — that data isn't available as structured rows via this API).
+CME's real index shows.
+
+Also pulls Direct Cattle Report PDFs (see direct_reports.py) for the
+Direct/Video/Internet trade component of CME's sample -- NOT exposed as
+structured data via the MARS API (narrative text only for that report
+family), so these are fetched and parsed directly from
+ams.usda.gov/mnreports/. Only "Current"-timing, FOB-freight rows qualify
+(CME's 14-day pickup / FOB rule); forward-month contracts and delivered
+(non-FOB) rows are excluded. These PDFs always show the current week only
+(no historical-date parameter), so this component only extends the
+dataset forward from whenever it's first run -- it doesn't backfill past
+dates the way the auction data's initial run did.
 
 Run manually or on a schedule:
     python update_index.py [--since YYYY-MM-DD]
@@ -34,6 +43,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import requests
+
+from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
 
 HERE = Path(__file__).parent
 DATA_DIR = HERE / "data"
@@ -144,6 +155,32 @@ def run_update(since: date, verbose=True):
         total_inserted += len(qrows)
         if verbose and qrows:
             print(f"  {loc['state']:>2} {loc['city'] or loc['title']:<28} +{len(qrows)} rows")
+
+    # Direct/Video/Internet trade (Direct Cattle Report family). These PDFs
+    # always show the CURRENT week only -- there's no historical-date param,
+    # so this only extends the dataset forward from whenever it's first run,
+    # same limitation the original auction backfill had. Weekly, not daily:
+    # every qualifying row gets that week's Friday date (CME's own rule
+    # treats direct-trade reports as Friday sales).
+    if verbose:
+        print("\nDirect trade reports (this week only):")
+    direct_results = fetch_all_direct_rows(verbose=verbose)
+    direct_inserted = 0
+    for state, (report_date_, rows) in direct_results.items():
+        if report_date_ is None:
+            continue
+        iso_date = report_date_.isoformat()
+        for r in rows:
+            conn.execute(
+                "INSERT OR IGNORE INTO mars_sales "
+                "(report_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (iso_date, DIRECT_REPORT_SLUGS[state], f"{state} DIRECT", state,
+                 r["weight_break_low"], r["muscle_grade"],
+                 r["head_count"], r["avg_weight"], r["avg_price"]),
+            )
+        direct_inserted += len(rows)
+    total_inserted += direct_inserted
     conn.commit()
 
     # Recompute the FULL fci_daily table from ALL stored mars_sales, using a
@@ -206,7 +243,8 @@ def run_update(since: date, verbose=True):
     conn.commit()
 
     if verbose:
-        print(f"\nInserted/kept {total_inserted} sale rows across {len(roster)} locations.")
+        print(f"\nInserted/kept {total_inserted} sale rows across {len(roster)} auction locations "
+              f"+ {direct_inserted} direct-trade rows across {len(direct_results)} states.")
         print(f"Recomputed FCI (7-day rolling window) for {n_written} dates "
               f"({first_date if all_dates else '—'} to {last_date if all_dates else '—'}).")
         recent = conn.execute(

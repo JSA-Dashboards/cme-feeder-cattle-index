@@ -73,7 +73,10 @@ def init_db(conn):
             report_date TEXT PRIMARY KEY,
             fci_value REAL NOT NULL,
             n_locations INTEGER NOT NULL,
-            total_head INTEGER NOT NULL
+            total_head INTEGER NOT NULL,
+            same_day_price REAL,
+            same_day_head INTEGER,
+            same_day_avg_weight REAL
         )
     """)
     conn.commit()
@@ -177,10 +180,26 @@ def run_update(since: date, verbose=True):
                 num += dollars
                 n_locs += 1
                 total_head += head
+
+        # Same-day-only snapshot (not rolling) -- matches the "Daily: $X on Y
+        # head and Z lbs average" figure CME's own subscriber reports quote
+        # alongside the 7-day index. None when no report landed that date
+        # (weekends etc.), same as the report showing no standalone row then.
+        sd_den = sd_num = 0.0
+        sd_head = 0
+        for w, dollars, head in by_day.get(d.isoformat(), []):
+            sd_den += w
+            sd_num += dollars
+            sd_head += head
+        sd_price = (sd_num / sd_den) if sd_den > 0 else None
+        sd_avg_weight = (sd_den / sd_head) if sd_head > 0 else None
+
         if den > 0:
             conn.execute(
-                "INSERT INTO fci_daily (report_date, fci_value, n_locations, total_head) VALUES (?,?,?,?)",
-                (d.isoformat(), num / den, n_locs, total_head),
+                "INSERT INTO fci_daily "
+                "(report_date, fci_value, n_locations, total_head, same_day_price, same_day_head, same_day_avg_weight) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (d.isoformat(), num / den, n_locs, total_head, sd_price, sd_head or None, sd_avg_weight),
             )
             n_written += 1
         d += timedelta(days=1)

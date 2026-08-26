@@ -122,6 +122,10 @@ def _load_workbook():
         .reset_index(drop=True)
     )
     fci["source"] = "workbook"
+    # same-day (non-rolling) snapshot isn't in this sheet either
+    fci["same_day_price"] = pd.NA
+    fci["same_day_head"] = pd.NA
+    fci["same_day_avg_weight"] = pd.NA
 
     loc = raw[raw["location"] != "FCI"].copy()
     loc = loc.merge(fci[["date", "fci_value"]], on="date", how="left")
@@ -150,12 +154,16 @@ def _load_mars_reconstruction():
     Internet trade volume, which this sale-barn-only roster doesn't capture).
     Run `python update_index.py` to refresh.
     """
+    fci_cols = ["date", "fci_value", "source", "same_day_price", "same_day_head", "same_day_avg_weight"]
     loc_cols = ["date", "location", "state", "price", "head", "avg_weight", "fci_value", "basis", "source"]
     if not MARS_DB_PATH.exists():
-        return pd.DataFrame(columns=["date", "fci_value", "source"]), pd.DataFrame(columns=loc_cols)
+        return pd.DataFrame(columns=fci_cols), pd.DataFrame(columns=loc_cols)
 
     conn = sqlite3.connect(MARS_DB_PATH)
-    fci_raw = pd.read_sql("SELECT report_date AS date, fci_value FROM fci_daily", conn)
+    fci_raw = pd.read_sql(
+        "SELECT report_date AS date, fci_value, same_day_price, same_day_head, same_day_avg_weight "
+        "FROM fci_daily", conn,
+    )
     sales = pd.read_sql(
         "SELECT report_date AS date, location, state, weight_low, head_count, avg_weight, avg_price "
         "FROM mars_sales", conn,
@@ -331,6 +339,24 @@ with cols[2]:
     st.markdown(tile("Week Change", fmt_price(week_chg), delta_html(week_chg)), unsafe_allow_html=True)
 with cols[3]:
     st.markdown(tile("Month Change", fmt_price(month_chg), delta_html(month_chg)), unsafe_allow_html=True)
+
+# ── Daily (same-day, non-rolling) snapshot ─────────────────────────────────────
+# Mirrors the "Daily: $X on Y head and Z lbs average" line under CME subscriber
+# reports — the single date's own weighted average, distinct from the 7-day
+# rolling Current Index above it.
+last_row = fci_df.iloc[-1]
+sd_price = last_row.get("same_day_price")
+sd_head = last_row.get("same_day_head")
+sd_weight = last_row.get("same_day_avg_weight")
+if pd.notna(sd_price) and pd.notna(sd_head):
+    weight_part = f" and <b style='color:{TEXT}'>{sd_weight:.0f} lbs</b> average" if pd.notna(sd_weight) else ""
+    st.markdown(
+        f"<div style='color:{MUTED};font-size:0.82rem;margin-top:10px;'>"
+        f"Daily: <b style='color:{TEXT}'>${sd_price:.2f}</b> on "
+        f"<b style='color:{TEXT}'>{int(sd_head):,}</b> head{weight_part}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── FCI Trend Chart ───────────────────────────────────────────────────────────

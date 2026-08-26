@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secrets — MARS_API_KEY is only ever set as an env var, never committed
+.env
+.env.*
+.streamlit/secrets.toml
+.streamlit/secrets.local.toml
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Excel lock files
+~$*.xlsx
+
+*.log
+
+# NOTE: data/Feeder Cattle Info Ross.xlsx and data/mars_history.db are
+# intentionally NOT ignored — they ARE the app's data and must be committed
+# for the Streamlit Cloud deployment to have anything to show.

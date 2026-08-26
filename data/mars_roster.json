@@ -1,0 +1,380 @@
+[
+  {
+    "slug_id": 2162,
+    "title": "Bloomfield Livestock Feeder Cattle - Bloomfield, IA",
+    "state": "IA",
+    "city": "Bloomfield"
+  },
+  {
+    "slug_id": 2166,
+    "title": "Clarinda Livestock Feeder Cattle - Clarinda, IA",
+    "state": "IA",
+    "city": "Clarinda"
+  },
+  {
+    "slug_id": 2160,
+    "title": "Creston Livestock Feeder Cattle - Creston, IA",
+    "state": "IA",
+    "city": "Creston"
+  },
+  {
+    "slug_id": 2150,
+    "title": "Denison Livestock Feeder Cattle - Denison, IA",
+    "state": "IA",
+    "city": "Denison"
+  },
+  {
+    "slug_id": 2155,
+    "title": "Dunlap Livestock Feeder Cattle - Dunlap, IA",
+    "state": "IA",
+    "city": "Dunlap"
+  },
+  {
+    "slug_id": 2158,
+    "title": "Lamoni Livestock Feeder Cattle - Lamoni, IA",
+    "state": "IA",
+    "city": "Lamoni"
+  },
+  {
+    "slug_id": 2159,
+    "title": "Russell Livestock Feeder Cattle - Russell, IA",
+    "state": "IA",
+    "city": "Russell"
+  },
+  {
+    "slug_id": 2157,
+    "title": "Sheldon Livestock Feeder Cattle Special - Sheldon, IA",
+    "state": "IA",
+    "city": "Sheldon"
+  },
+  {
+    "slug_id": 1889,
+    "title": "Winter Livestock - Dodge City, KS",
+    "state": "KS",
+    "city": "Dodge City"
+  },
+  {
+    "slug_id": 1891,
+    "title": "Winter Livestock - Pratt, KS",
+    "state": "KS",
+    "city": "Pratt"
+  },
+  {
+    "slug_id": 1892,
+    "title": "Farmers and Ranchers Livestock Commission Co. - Salina, KS",
+    "state": "KS",
+    "city": "Salina"
+  },
+  {
+    "slug_id": 3654,
+    "title": "Mid Missouri Stockyards Cattle Auction - Phillipsburg, MO",
+    "state": "MO",
+    "city": null
+  },
+  {
+    "slug_id": 1811,
+    "title": "MO-Kan Livestock Market - Butler, MO",
+    "state": "MO",
+    "city": "Butler"
+  },
+  {
+    "slug_id": 1245,
+    "title": "Joplin Regional Stockyards Feeder Cattle - Carthage, MO",
+    "state": "MO",
+    "city": "Carthage"
+  },
+  {
+    "slug_id": 1814,
+    "title": "Interstate Regional Stockyards - Cuba, MO",
+    "state": "MO",
+    "city": "Cuba"
+  },
+  {
+    "slug_id": 3916,
+    "title": "Four State Stockyards \u2013 Cattle Auction - Exeter, MO",
+    "state": "MO",
+    "city": "Exeter"
+  },
+  {
+    "slug_id": 1812,
+    "title": "Farmington Regional Stockyards - Farmington, MO",
+    "state": "MO",
+    "city": "Farmington"
+  },
+  {
+    "slug_id": 1254,
+    "title": "Green City Livestock Auction - Green City, MO",
+    "state": "MO",
+    "city": "Green City"
+  },
+  {
+    "slug_id": 3484,
+    "title": "SEMO Livestock Sales Cattle Auction - Jackson, MO",
+    "state": "MO",
+    "city": "Jackson"
+  },
+  {
+    "slug_id": 1819,
+    "title": "Callaway Livestock Center - Kingdom City, MO",
+    "state": "MO",
+    "city": "Kingdom City"
+  },
+  {
+    "slug_id": 1815,
+    "title": "Kingsville Livestock Auction - Kingsville, MO",
+    "state": "MO",
+    "city": "Kingsville"
+  },
+  {
+    "slug_id": 1813,
+    "title": "Lolli Brothers Livestock Market - Macon, MO",
+    "state": "MO",
+    "city": "Macon"
+  },
+  {
+    "slug_id": 1248,
+    "title": "New Cambria Livestock Market - New Cambria, MO",
+    "state": "MO",
+    "city": "New Cambria"
+  },
+  {
+    "slug_id": 3917,
+    "title": "Wheeler Livestock Auction - Cattle Auction - Osceola, MO",
+    "state": "MO",
+    "city": "Osceola"
+  },
+  {
+    "slug_id": 1816,
+    "title": "F and T Livestock Market Feeder/Replacement Cattle - Palmyra, MO",
+    "state": "MO",
+    "city": "Palmyra"
+  },
+  {
+    "slug_id": 3635,
+    "title": "Tina Livestock Market Cattle Auction - Tina, MO",
+    "state": "MO",
+    "city": "Tina"
+  },
+  {
+    "slug_id": 1237,
+    "title": "Unionville Livestock Market  - Unionville, MO",
+    "state": "MO",
+    "city": "Unionville"
+  },
+  {
+    "slug_id": 1817,
+    "title": "South Central Regional Stockyards - Vienna, MO",
+    "state": "MO",
+    "city": "Vienna"
+  },
+  {
+    "slug_id": 1774,
+    "title": "Public Auction Yards Livestock Cattle Auction - Billings, MT (Wed)",
+    "state": "MT",
+    "city": "Billings"
+  },
+  {
+    "slug_id": 1777,
+    "title": "Billings Livestock Commission Cattle Auction - Billings, MT (Thu)",
+    "state": "MT",
+    "city": "Billings"
+  },
+  {
+    "slug_id": 1852,
+    "title": "Bassett Livestock Auction - Bassett, NE",
+    "state": "NE",
+    "city": "Bassett"
+  },
+  {
+    "slug_id": 1851,
+    "title": "Burwell Livestock Market - Burwell, NE",
+    "state": "NE",
+    "city": "Burwell"
+  },
+  {
+    "slug_id": 1857,
+    "title": "Crawford Livestock Market - Crawford, NE",
+    "state": "NE",
+    "city": "Crawford"
+  },
+  {
+    "slug_id": 1853,
+    "title": "Ericson Livestock Market - Ericson, NE",
+    "state": "NE",
+    "city": "Ericson"
+  },
+  {
+    "slug_id": 1848,
+    "title": "Huss Livestock Market - Kearney, NE",
+    "state": "NE",
+    "city": "Kearney"
+  },
+  {
+    "slug_id": 1849,
+    "title": "Lexington Livestock Market - Lexington, NE",
+    "state": "NE",
+    "city": "Lexington"
+  },
+  {
+    "slug_id": 1850,
+    "title": "Ogallala Livestock Auction - Ogallala, NE",
+    "state": "NE",
+    "city": "Ogallala"
+  },
+  {
+    "slug_id": 1856,
+    "title": "Valentine Livestock Auction - Valentine, NE",
+    "state": "NE",
+    "city": "Valentine"
+  },
+  {
+    "slug_id": 2248,
+    "title": "West Point Livestock Feeder Cattle - West Point, NE",
+    "state": "NE",
+    "city": "West Point"
+  },
+  {
+    "slug_id": 1783,
+    "title": "Cattlemen's Livestock Auction - Belen, NM",
+    "state": "NM",
+    "city": "Belen"
+  },
+  {
+    "slug_id": 1781,
+    "title": "Clovis Livestock Auction - Clovis, NM",
+    "state": "NM",
+    "city": "Clovis"
+  },
+  {
+    "slug_id": 1782,
+    "title": "Roswell Livestock Auction - Roswell, NM",
+    "state": "NM",
+    "city": "Roswell"
+  },
+  {
+    "slug_id": 1830,
+    "title": "Southern Oklahoma Livestock Auction Feeder Cattle- Ada, OK",
+    "state": "OK",
+    "city": "Ada"
+  },
+  {
+    "slug_id": 1829,
+    "title": "Apache Livestock Auction - Apache, OK",
+    "state": "OK",
+    "city": "Apache"
+  },
+  {
+    "slug_id": 3794,
+    "title": "Beaver Livestock Auction Feeder Cattle - Beaver, OK",
+    "state": "OK",
+    "city": "Beaver"
+  },
+  {
+    "slug_id": 1827,
+    "title": "McAlester Union Livestock Auction - McAlester, OK",
+    "state": "OK",
+    "city": "McAlester"
+  },
+  {
+    "slug_id": 1832,
+    "title": "Tulsa Livestock Auction - Tulsa, OK",
+    "state": "OK",
+    "city": "Tulsa"
+  },
+  {
+    "slug_id": 1828,
+    "title": "Woodward Livestock Auction Feeder Cattle - Woodward, OK",
+    "state": "OK",
+    "city": "Woodward"
+  },
+  {
+    "slug_id": 2020,
+    "title": "Hub City Livestock Auction - Aberdeen, SD",
+    "state": "SD",
+    "city": "Aberdeen"
+  },
+  {
+    "slug_id": 2021,
+    "title": "Ft. Pierre Livestock Auction (Friday) - Ft. Pierre, SD",
+    "state": "SD",
+    "city": "Fort Pierre"
+  },
+  {
+    "slug_id": 2024,
+    "title": "Herreid Livestock Market - Herreid, SD",
+    "state": "SD",
+    "city": "Herreid"
+  },
+  {
+    "slug_id": 2022,
+    "title": "Mitchell Livestock Auction - Mitchell, SD",
+    "state": "SD",
+    "city": "Mitchell"
+  },
+  {
+    "slug_id": 2023,
+    "title": "Philip Livestock Auction - Philip, SD",
+    "state": "SD",
+    "city": "Philip"
+  },
+  {
+    "slug_id": 2019,
+    "title": "St. Onge Livestock Auction - St. Onge, SD",
+    "state": "SD",
+    "city": "Saint Onge"
+  },
+  {
+    "slug_id": 2026,
+    "title": "Sioux Falls Regional Cattle Auction - Worthing, SD",
+    "state": "SD",
+    "city": "Worthing"
+  },
+  {
+    "slug_id": 1953,
+    "title": "Cattlemen's Livestock Auction - Dalhart, TX",
+    "state": "TX",
+    "city": "Dalhart"
+  },
+  {
+    "slug_id": 3724,
+    "title": "Giddings Livestock Auction - Giddings, TX",
+    "state": "TX",
+    "city": "Giddings"
+  },
+  {
+    "slug_id": 2015,
+    "title": "Producers Livestock Cattle Auction - San Angelo, TX",
+    "state": "TX",
+    "city": "San Angelo"
+  },
+  {
+    "slug_id": 1954,
+    "title": "Tulia Livestock Auction - Tulia, TX",
+    "state": "TX",
+    "city": "Tulia"
+  },
+  {
+    "slug_id": 3365,
+    "title": "Lonestar Stockyards - Wildorado, TX",
+    "state": "TX",
+    "city": "Wildorado"
+  },
+  {
+    "slug_id": 2104,
+    "title": "Winter Livestock Auction - Riverton, WY",
+    "state": "WY",
+    "city": "Riverton"
+  },
+  {
+    "slug_id": 2101,
+    "title": "Torrington Livestock Auction - Torrington, WY",
+    "state": "WY",
+    "city": "Torrington"
+  },
+  {
+    "slug_id": 2103,
+    "title": "Torrington Livestock Feeder Cattle Auction - Torrington, WY",
+    "state": "WY",
+    "city": "Torrington"
+  }
+]

@@ -277,6 +277,11 @@ with st.sidebar:
     )
 
 loc_filtered = loc_df[loc_df["state"].isin(state_filter)] if state_filter else loc_df
+# Guards against a stale cached load_data() result from before these columns
+# existed surviving a Streamlit Cloud soft-redeploy (in-memory cache, ttl=1hr).
+for _col in ("head", "avg_weight"):
+    if _col not in loc_filtered.columns:
+        loc_filtered[_col] = pd.NA
 
 
 # ── Header ────────────────────────────────────────────────────────────────────

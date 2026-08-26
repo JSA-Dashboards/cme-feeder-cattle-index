@@ -45,6 +45,7 @@ from pathlib import Path
 import requests
 
 from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
+from video_reports import VIDEO_REPORT_SLUGS, fetch_all_video_rows
 
 HERE = Path(__file__).parent
 DATA_DIR = HERE / "data"
@@ -181,6 +182,35 @@ def run_update(since: date, verbose=True):
             )
         direct_inserted += len(rows)
     total_inserted += direct_inserted
+
+    # Video/internet auction trade (currently just Superior Livestock --
+    # by far the largest platform, ~200k head/week vs. a few thousand/week
+    # for the rest of the sample combined; see video_reports.py for other
+    # companies not yet built). Same current-week-only limitation as the
+    # direct reports. Rows are attributed to a REGION (North Central /
+    # South Central), not a single state -- video sales aren't broken out
+    # by state within a region -- so `state` here is the region name
+    # itself, not a real 2-letter code; that's intentional, not a bug.
+    if verbose:
+        print("\nVideo auction reports (this week only):")
+    video_results = fetch_all_video_rows(verbose=verbose)
+    video_inserted = 0
+    for name, (report_date_, rows) in video_results.items():
+        if report_date_ is None:
+            continue
+        iso_date = report_date_.isoformat()
+        slug_id = VIDEO_REPORT_SLUGS[name]
+        for r in rows:
+            conn.execute(
+                "INSERT OR IGNORE INTO mars_sales "
+                "(report_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (iso_date, slug_id, f"{name} VIDEO ({r['region']})", r["region"],
+                 r["weight_break_low"], r["muscle_grade"],
+                 r["head_count"], r["avg_weight"], r["avg_price"]),
+            )
+        video_inserted += len(rows)
+    total_inserted += video_inserted
     conn.commit()
 
     # Recompute the FULL fci_daily table from ALL stored mars_sales, using a
@@ -243,8 +273,9 @@ def run_update(since: date, verbose=True):
     conn.commit()
 
     if verbose:
-        print(f"\nInserted/kept {total_inserted} sale rows across {len(roster)} auction locations "
-              f"+ {direct_inserted} direct-trade rows across {len(direct_results)} states.")
+        print(f"\nInserted/kept {total_inserted} sale rows: {total_inserted - direct_inserted - video_inserted} "
+              f"auction rows across {len(roster)} locations, {direct_inserted} direct-trade rows across "
+              f"{len(direct_results)} states, {video_inserted} video-auction rows across {len(video_results)} reports.")
         print(f"Recomputed FCI (7-day rolling window) for {n_written} dates "
               f"({first_date if all_dates else '—'} to {last_date if all_dates else '—'}).")
         recent = conn.execute(

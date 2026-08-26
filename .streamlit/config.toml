@@ -1,0 +1,16 @@
+# JPSI brand theme (jpsi.com): dark #32373c, blue #0693e3
+# Pins the whole app to light mode regardless of the viewer's browser/OS
+# dark-mode preference — without this, Streamlit's native chrome (buttons,
+# widgets, dataframes) follows the client's system theme while the custom
+# CSS in app.py stays light, producing a jarring mixed look.
+[theme]
+base = "light"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#eef4f8"
+primaryColor = "#0693e3"
+textColor = "#32373c"
+font = "sans serif"
+
+[server]
+headless = true
+runOnSave = true

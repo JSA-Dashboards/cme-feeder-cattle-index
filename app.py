@@ -128,6 +128,9 @@ def _load_workbook():
     loc["basis"] = loc["price"] - loc["fci_value"]
     loc = loc.dropna(subset=["fci_value"])
     loc["source"] = "workbook"
+    # head count / avg weight aren't in this sheet — the location table shows "—" for these dates
+    loc["head"] = pd.NA
+    loc["avg_weight"] = pd.NA
 
     return fci, loc
 
@@ -147,9 +150,9 @@ def _load_mars_reconstruction():
     Internet trade volume, which this sale-barn-only roster doesn't capture).
     Run `python update_index.py` to refresh.
     """
+    loc_cols = ["date", "location", "state", "price", "head", "avg_weight", "fci_value", "basis", "source"]
     if not MARS_DB_PATH.exists():
-        return pd.DataFrame(columns=["date", "fci_value", "source"]), \
-               pd.DataFrame(columns=["date", "location", "state", "price", "fci_value", "basis", "source"])
+        return pd.DataFrame(columns=["date", "fci_value", "source"]), pd.DataFrame(columns=loc_cols)
 
     conn = sqlite3.connect(MARS_DB_PATH)
     fci_raw = pd.read_sql("SELECT report_date AS date, fci_value FROM fci_daily", conn)
@@ -165,7 +168,7 @@ def _load_mars_reconstruction():
     fci = fci.sort_values("date").reset_index(drop=True)
 
     if sales.empty:
-        loc = pd.DataFrame(columns=["date", "location", "state", "price", "fci_value", "basis", "source"])
+        loc = pd.DataFrame(columns=loc_cols)
         return fci, loc
 
     sales["date"] = pd.to_datetime(sales["date"])
@@ -173,14 +176,16 @@ def _load_mars_reconstruction():
     sales["wp"] = sales["w"] * sales["avg_price"]
     daily_loc = (
         sales.groupby(["date", "location", "state"])
-        .agg(w=("w", "sum"), wp=("wp", "sum"))
+        .agg(w=("w", "sum"), wp=("wp", "sum"), head=("head_count", "sum"))
         .reset_index()
     )
     daily_loc["price"] = daily_loc["wp"] / daily_loc["w"]
+    # weighted-average weight across whatever brackets/grades a location reported that day
+    daily_loc["avg_weight"] = daily_loc["w"] / daily_loc["head"]
     loc = daily_loc.merge(fci[["date", "fci_value"]], on="date", how="left")
     loc["basis"] = loc["price"] - loc["fci_value"]
     loc["source"] = "usda_mars"
-    loc = loc.dropna(subset=["fci_value"])[["date", "location", "state", "price", "fci_value", "basis", "source"]]
+    loc = loc.dropna(subset=["fci_value"])[loc_cols]
 
     return fci, loc
 
@@ -444,11 +449,14 @@ if day_rows.empty:
 else:
     left, right = st.columns([3, 2])
     with left:
-        disp = day_rows[["location", "state", "price", "basis"]].rename(columns={
-            "location": "Location", "state": "State", "price": "Price", "basis": "Basis vs FCI",
+        disp = day_rows[["location", "state", "head", "avg_weight", "price", "basis"]].rename(columns={
+            "location": "Location", "state": "State", "head": "Head", "avg_weight": "Weight",
+            "price": "Price", "basis": "Basis vs FCI",
         })
         st.dataframe(
-            disp.style.format({"Price": "${:.2f}", "Basis vs FCI": "{:+.2f}"}).map(
+            disp.style.format({
+                "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}", "Basis vs FCI": "{:+.2f}",
+            }, na_rep="—").map(
                 lambda v: f"color: {POS}" if isinstance(v, (int, float)) and v > 0
                 else (f"color: {NEG}" if isinstance(v, (int, float)) and v < 0 else ""),
                 subset=["Basis vs FCI"],
@@ -528,14 +536,16 @@ with st.expander("📋  Raw Data Table"):
             use_container_width=True, hide_index=True, height=320,
         )
     with tab_loc:
-        d = loc_filtered.copy()
+        d = loc_filtered[["date", "location", "state", "head", "avg_weight", "price", "fci_value", "basis"]].copy()
         d["date"] = d["date"].dt.strftime("%Y-%m-%d")
         st.dataframe(
             d.rename(columns={
-                "date": "Date", "location": "Location", "state": "State",
-                "price": "Price", "fci_value": "FCI", "basis": "Basis",
+                "date": "Date", "location": "Location", "state": "State", "head": "Head",
+                "avg_weight": "Weight", "price": "Price", "fci_value": "FCI", "basis": "Basis",
             }).sort_values("Date", ascending=False)
-            .style.format({"Price": "${:.2f}", "FCI": "${:.2f}", "Basis": "{:+.2f}"}),
+            .style.format({
+                "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}", "FCI": "${:.2f}", "Basis": "{:+.2f}",
+            }, na_rep="—"),
             use_container_width=True, hide_index=True, height=320,
         )
 

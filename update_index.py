@@ -2,12 +2,23 @@
 Extends the CME Feeder Cattle Index dashboard's history past where the Ross
 workbook stops (2026-01-23) using USDA AMS MARS API data.
 
-Methodology mirrors the workbook's own 'FCI Estimation' sheet: for each
-report date, pull every qualifying sale row (Steers, Medium & Large frame,
-grade #1 or #1-2, 700-899 lb weight brackets) from a fixed roster of ~60
-sale-barn reports across the CME 12-state region, then compute
+Methodology matches CME's own published definition (cmegroup.com): the
+index is a rolling SEVEN-CALENDAR-DAY volume-weighted average, not a
+same-day snapshot. Every qualifying sale row (Steers, Medium & Large
+frame, grade #1 or #1-2, 700-899 lb weight brackets, final reports only —
+preliminary excluded) is pulled from a fixed roster of ~60 sale-barn
+reports across the CME 12-state region. For each date D:
 
-    FCI(date) = sum(head_count * avg_weight * avg_price) / sum(head_count * avg_weight)
+    FCI(D) = sum(head*weight*price for report_date in [D-6, D])
+             / sum(head*weight for report_date in [D-6, D])
+
+Every pound gets equal weight (CME's own wording). Using a single day
+instead of the 7-day window was an earlier bug here — with ~60 sale-barn
+locations, many reporting only weekly, a single day's sample is thin
+(sometimes 1 location), which produced day-to-day noise far larger than
+CME's real index shows. Note: this still excludes the Direct/Video/
+Internet trade component of CME's sample (see reference_usda_mars_api
+memory — that data isn't available as structured rows via this API).
 
 Run manually or on a schedule:
     python update_index.py [--since YYYY-MM-DD]
@@ -86,6 +97,7 @@ def qualifying_rows(rows):
                 and r.get("frame") == "Medium and Large"
                 and r.get("muscle_grade") in TARGET_GRADES
                 and r.get("weight_break_low") in TARGET_BRACKETS
+                and r.get("final_ind") == "Final"
                 and r.get("head_count") and r.get("avg_weight") and r.get("avg_price")):
             out.append(r)
     return out
@@ -131,35 +143,53 @@ def run_update(since: date, verbose=True):
             print(f"  {loc['state']:>2} {loc['city'] or loc['title']:<28} +{len(qrows)} rows")
     conn.commit()
 
-    # Recompute daily FCI from scratch over the affected window (idempotent).
-    cur = conn.execute(
-        "SELECT report_date, head_count, avg_weight, avg_price FROM mars_sales WHERE report_date >= ?",
-        (since.isoformat(),),
-    )
-    by_date = {}
-    for report_date, head, wt, price in cur.fetchall():
-        num, den, n = by_date.get(report_date, (0.0, 0.0, 0))
-        w = head * wt
-        by_date[report_date] = (num + w * price, den + w, n + 1)
+    # Recompute the FULL fci_daily table from ALL stored mars_sales, using a
+    # rolling 7-calendar-day trailing window per CME's published methodology
+    # (each date's window can reach up to 6 days before `since`, so this is
+    # NOT limited to the affected date range — it's cheap given table size).
+    all_rows = conn.execute(
+        "SELECT report_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
+    ).fetchall()
 
-    for report_date, (num, den, n) in by_date.items():
-        if den <= 0:
-            continue
-        fci = num / den
-        total_head = conn.execute(
-            "SELECT COALESCE(SUM(head_count),0) FROM mars_sales WHERE report_date = ?", (report_date,)
-        ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO fci_daily (report_date, fci_value, n_locations, total_head) VALUES (?,?,?,?) "
-            "ON CONFLICT(report_date) DO UPDATE SET fci_value=excluded.fci_value, "
-            "n_locations=excluded.n_locations, total_head=excluded.total_head",
-            (report_date, fci, n, total_head),
-        )
+    by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
+    for report_date, head, wt, price in all_rows:
+        w = head * wt
+        by_day.setdefault(report_date, []).append((w, w * price, head))
+
+    all_dates = sorted(date.fromisoformat(d) for d in by_day)
+    if all_dates:
+        first_date, last_date = all_dates[0], all_dates[-1]
+    conn.execute("DELETE FROM fci_daily")
+
+    n_written = 0
+    d = first_date if all_dates else None
+    while d is not None and d <= last_date:
+        window_start = d - timedelta(days=6)
+        window_days = [
+            (window_start + timedelta(days=i)).isoformat() for i in range(7)
+        ]
+        den = num = 0.0
+        n_locs = 0
+        total_head = 0
+        for wd in window_days:
+            for w, dollars, head in by_day.get(wd, []):
+                den += w
+                num += dollars
+                n_locs += 1
+                total_head += head
+        if den > 0:
+            conn.execute(
+                "INSERT INTO fci_daily (report_date, fci_value, n_locations, total_head) VALUES (?,?,?,?)",
+                (d.isoformat(), num / den, n_locs, total_head),
+            )
+            n_written += 1
+        d += timedelta(days=1)
     conn.commit()
 
     if verbose:
         print(f"\nInserted/kept {total_inserted} sale rows across {len(roster)} locations.")
-        print(f"Recomputed FCI for {len(by_date)} dates since {since.isoformat()}.")
+        print(f"Recomputed FCI (7-day rolling window) for {n_written} dates "
+              f"({first_date if all_dates else '—'} to {last_date if all_dates else '—'}).")
         recent = conn.execute(
             "SELECT report_date, fci_value, n_locations FROM fci_daily ORDER BY report_date DESC LIMIT 8"
         ).fetchall()

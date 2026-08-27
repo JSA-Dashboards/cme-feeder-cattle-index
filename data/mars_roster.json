@@ -376,5 +376,23 @@
     "title": "Torrington Livestock Feeder Cattle Auction - Torrington, WY",
     "state": "WY",
     "city": "Torrington"
+  },
+  {
+    "slug_id": 1255,
+    "title": "Springfield Livestock Marketing Center Feeder Cattle - Springfield, MO",
+    "state": "MO",
+    "city": "Springfield"
+  },
+  {
+    "slug_id": 1281,
+    "title": "OKC West Livestock Auction - El Reno, OK",
+    "state": "OK",
+    "city": "El Reno"
+  },
+  {
+    "slug_id": 1622,
+    "title": "Windsor Livestock Auction - Windsor, MO",
+    "state": "MO",
+    "city": "Windsor"
   }
 ]

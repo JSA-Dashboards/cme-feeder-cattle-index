@@ -18,6 +18,7 @@ NEG       = "#c00000"
 NEU       = "#6b7280"
 
 JSA_LOGO = "https://www.jpsi.com/wp-content/themes/gate39media/img/logo-full.png"
+FAVICON_PATH = Path(__file__).parent / "assets" / "jsa_favicon.png"
 DATA_PATH = Path(__file__).parent / "data" / "Feeder Cattle Info Ross.xlsx"
 MARS_DB_PATH = Path(__file__).parent / "data" / "mars_history.db"
 
@@ -26,7 +27,7 @@ VALID_STATES = {"CO", "IA", "KS", "MO", "MT", "NE", "NM", "ND", "OK", "SD", "TX"
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="JSA CME Feeder Cattle Index",
-    page_icon="🐂",
+    page_icon=str(FAVICON_PATH),
     layout="wide",
     initial_sidebar_state="expanded",
 )

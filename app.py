@@ -64,6 +64,15 @@ st.markdown(f"""
   hr {{ border-color:{BORDER}; }}
   #MainMenu, footer {{ visibility:hidden; }}
   .stDeployButton {{ display:none; }}
+  div[class*="st-key-wm-"] {{ position:relative; }}
+  div[class*="st-key-wm-"]::after {{
+    content:"";
+    position:absolute; inset:0; margin:auto;
+    width:50%; height:110px; max-width:320px;
+    background-image:url('{JSA_LOGO}');
+    background-size:contain; background-repeat:no-repeat; background-position:center;
+    opacity:0.05; pointer-events:none; z-index:3;
+  }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -95,6 +104,17 @@ def value_on_or_before(df, target_date):
     """Latest fci_value at or before target_date."""
     sub = df[df["date"] <= target_date]
     return sub.iloc[-1]["fci_value"] if not sub.empty else None
+
+
+def add_watermark(fig, size=0.32, opacity=0.06):
+    fig.add_layout_image(dict(
+        source=JSA_LOGO,
+        xref="paper", yref="paper", x=0.5, y=0.5,
+        xanchor="center", yanchor="middle",
+        sizex=size, sizey=size,
+        opacity=opacity, layer="below",
+    ))
+    return fig
 
 
 # ── Data Loading ──────────────────────────────────────────────────────────────
@@ -420,6 +440,7 @@ fig.update_layout(
     yaxis=dict(**AXIS, title="$/cwt", tickprefix="$"),
     height=380,
 )
+add_watermark(fig, size=0.34, opacity=0.055)
 st.plotly_chart(fig, use_container_width=True)
 if not mars_seg.empty:
     st.caption(
@@ -452,17 +473,18 @@ display_wk = display_wk.rename(columns={
     "week_high": "Week High", "week_low": "Week Low", "week_chg": "Week Chg",
 })[["Week Ending", "Week Avg", "Week Last", "Week High", "Week Low", "Week Chg"]]
 
-st.dataframe(
-    display_wk.style.format({
-        "Week Avg": "${:.2f}", "Week Last": "${:.2f}",
-        "Week High": "${:.2f}", "Week Low": "${:.2f}", "Week Chg": "{:+.2f}",
-    }, na_rep="—").map(
-        lambda v: f"color: {POS}" if isinstance(v, (int, float)) and v > 0
-        else (f"color: {NEG}" if isinstance(v, (int, float)) and v < 0 else ""),
-        subset=["Week Chg"],
-    ),
-    use_container_width=True, hide_index=True, height=340,
-)
+with st.container(key="wm-weekly"):
+    st.dataframe(
+        display_wk.style.format({
+            "Week Avg": "${:.2f}", "Week Last": "${:.2f}",
+            "Week High": "${:.2f}", "Week Low": "${:.2f}", "Week Chg": "{:+.2f}",
+        }, na_rep="—").map(
+            lambda v: f"color: {POS}" if isinstance(v, (int, float)) and v > 0
+            else (f"color: {NEG}" if isinstance(v, (int, float)) and v < 0 else ""),
+            subset=["Week Chg"],
+        ),
+        use_container_width=True, hide_index=True, height=340,
+    )
 
 
 # ── Location Detail ───────────────────────────────────────────────────────────
@@ -485,16 +507,17 @@ else:
             "location": "Location", "state": "State", "head": "Head", "avg_weight": "Weight",
             "price": "Price", "basis": "Basis vs FCI",
         })
-        st.dataframe(
-            disp.style.format({
-                "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}", "Basis vs FCI": "{:+.2f}",
-            }, na_rep="—").map(
-                lambda v: f"color: {POS}" if isinstance(v, (int, float)) and v > 0
-                else (f"color: {NEG}" if isinstance(v, (int, float)) and v < 0 else ""),
-                subset=["Basis vs FCI"],
-            ),
-            use_container_width=True, hide_index=True, height=380,
-        )
+        with st.container(key="wm-locations"):
+            st.dataframe(
+                disp.style.format({
+                    "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}", "Basis vs FCI": "{:+.2f}",
+                }, na_rep="—").map(
+                    lambda v: f"color: {POS}" if isinstance(v, (int, float)) and v > 0
+                    else (f"color: {NEG}" if isinstance(v, (int, float)) and v < 0 else ""),
+                    subset=["Basis vs FCI"],
+                ),
+                use_container_width=True, hide_index=True, height=380,
+            )
     with right:
         fig_b = go.Figure()
         bar_colors = [POS if v >= 0 else NEG for v in day_rows["basis"]]
@@ -511,6 +534,7 @@ else:
             yaxis=dict(**AXIS, autorange="reversed"),
             height=380, showlegend=False,
         )
+        add_watermark(fig_b, size=0.4, opacity=0.06)
         st.plotly_chart(fig_b, use_container_width=True)
     if day_fci is not None:
         st.caption(f"Index value used for basis: **${day_fci:.2f}**")
@@ -551,6 +575,7 @@ else:
         yaxis=dict(**AXIS),
         height=440, showlegend=False,
     )
+    add_watermark(fig_lb, size=0.3, opacity=0.06)
     st.plotly_chart(fig_lb, use_container_width=True)
     st.caption("Locations with at least 3 reported sales in the trailing 90 days, strongest and weakest basis shown.")
 
@@ -562,24 +587,26 @@ with st.expander("📋  Raw Data Table"):
     with tab_fci:
         d = fci_df.copy()
         d["date"] = d["date"].dt.strftime("%Y-%m-%d")
-        st.dataframe(
-            d.rename(columns={"date": "Date", "fci_value": "FCI"}).sort_values("Date", ascending=False)
-            .style.format({"FCI": "${:.2f}"}),
-            use_container_width=True, hide_index=True, height=320,
-        )
+        with st.container(key="wm-raw-fci"):
+            st.dataframe(
+                d.rename(columns={"date": "Date", "fci_value": "FCI"}).sort_values("Date", ascending=False)
+                .style.format({"FCI": "${:.2f}"}),
+                use_container_width=True, hide_index=True, height=320,
+            )
     with tab_loc:
         d = loc_filtered[["date", "location", "state", "head", "avg_weight", "price", "fci_value", "basis"]].copy()
         d["date"] = d["date"].dt.strftime("%Y-%m-%d")
-        st.dataframe(
-            d.rename(columns={
-                "date": "Date", "location": "Location", "state": "State", "head": "Head",
-                "avg_weight": "Weight", "price": "Price", "fci_value": "FCI", "basis": "Basis",
-            }).sort_values("Date", ascending=False)
-            .style.format({
-                "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}", "FCI": "${:.2f}", "Basis": "{:+.2f}",
-            }, na_rep="—"),
-            use_container_width=True, hide_index=True, height=320,
-        )
+        with st.container(key="wm-raw-loc"):
+            st.dataframe(
+                d.rename(columns={
+                    "date": "Date", "location": "Location", "state": "State", "head": "Head",
+                    "avg_weight": "Weight", "price": "Price", "fci_value": "FCI", "basis": "Basis",
+                }).sort_values("Date", ascending=False)
+                .style.format({
+                    "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}", "FCI": "${:.2f}", "Basis": "{:+.2f}",
+                }, na_rep="—"),
+                use_container_width=True, hide_index=True, height=320,
+            )
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────

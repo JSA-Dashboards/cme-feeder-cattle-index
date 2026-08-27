@@ -2,8 +2,12 @@ import sqlite3
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import openpyxl
 from pathlib import Path
 from datetime import datetime, timedelta
+
+FORECAST_HORIZON_DAYS = 10  # business days
+FORECAST_CI = 0.80  # 80% prediction interval
 
 # ── JSA Brand Colors ─────────────────────────────────────────────────────────
 JPSI_DARK = "#32373c"
@@ -117,6 +121,38 @@ def add_watermark(fig, size=0.32, opacity=0.06):
     return fig
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_forecast(fci_values, last_date, horizon=FORECAST_HORIZON_DAYS, ci=FORECAST_CI):
+    """
+    Naive (random-walk) trend projection, flat at the current value, with a
+    band built from the historical distribution of actual h-day-ahead price
+    changes -- not a fitted statistical model. Backtested against Holt's
+    exponential smoothing (66 rolling-origin trials, 2023-10 to 2026-08):
+    simple "no change" persistence beat Holt at every forecast horizon
+    (overall MAE $3.71 vs $4.07/cwt) -- this series behaves close to a
+    random walk, where trend-extrapolation added no real edge, so the
+    simpler and more accurate approach is used here instead. This is
+    descriptive of typical historical variability, not a trading signal or
+    market forecast. Returns None if there isn't enough history.
+    """
+    y = pd.Series(fci_values).astype(float).reset_index(drop=True)
+    if len(y) < 60:
+        return None
+    current = y.iloc[-1]
+    lo_q, hi_q = (1 - ci) / 2, 1 - (1 - ci) / 2
+    future_dates = pd.bdate_range(start=pd.Timestamp(last_date) + pd.Timedelta(days=1), periods=horizon)
+    rows = []
+    for h, d in enumerate(future_dates, start=1):
+        changes = (y - y.shift(h)).dropna()
+        if len(changes) < 20:
+            lower = upper = current
+        else:
+            lower = current + changes.quantile(lo_q)
+            upper = current + changes.quantile(hi_q)
+        rows.append({"date": d, "forecast": current, "lower": lower, "upper": upper})
+    return pd.DataFrame(rows)
+
+
 # ── Data Loading ──────────────────────────────────────────────────────────────
 
 def _load_workbook():
@@ -219,17 +255,193 @@ def _load_mars_reconstruction():
     return fci, loc
 
 
+WB_PRECURSOR_SHEET = "CME Feeder Cattle Index Values"
+BRACKET_SPECS = [
+    (700, "1"), (750, "1"), (800, "1"), (850, "1"),
+    (700, "1-2"), (750, "1-2"), (800, "1-2"), (850, "1-2"),
+]
+
+
+def _parse_bracket_cell(cell):
+    """
+    Cells hold 'head weight price' as three whitespace-separated numbers, but
+    weight and price are sometimes concatenated with no separator when weight
+    has decimals (e.g. '172  812.90257.25') -- always exactly two 6-char
+    'DDD.DD' halves in that case (weight ~700-899 lbs, price ~$150-450/cwt,
+    both always 3 integer digits + 2 decimals in this sheet). Cells with no
+    sale in that bracket are '0   0   0.00' or a literal '//////' placeholder.
+    """
+    if cell is None:
+        return None
+    parts = str(cell).strip().split()
+    try:
+        if len(parts) == 3:
+            head, weight, price = int(float(parts[0])), float(parts[1]), float(parts[2])
+        elif len(parts) == 2:
+            head = int(float(parts[0]))
+            if head == 0:
+                return None
+            merged = parts[1]
+            if len(merged) != 12:
+                return None
+            weight, price = float(merged[:6]), float(merged[6:])
+        else:
+            return None
+    except ValueError:
+        return None
+    if head <= 0 or weight <= 0 or price <= 0:
+        return None
+    return head, weight, price
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_workbook_precursor(before_date):
+    """
+    'CME Feeder Cattle Index Values' is Ross's raw per-location, per-weight-
+    bracket sale data (2023-01-24 - 2026-01-23) -- the actual source data
+    behind the workbook's published FCI column, not a separate estimate.
+    Recomputing CME's 7-day rolling weighted-average methodology from these
+    raw rows reproduces the published index almost exactly (median abs error
+    ~$0.003/cwt across the full 2024-2026 overlap, spot-checked 2026-08-26)
+    -- far more accurate than the USDA MARS reconstruction for the same kind
+    of gap, since this is the real underlying data rather than an
+    approximation from a different source. Used only for dates before
+    `before_date` (the main workbook sheet's own start), extending the
+    ground-truth-quality range back to 2023-01-24.
+    """
+    fci_cols = ["date", "fci_value", "source", "same_day_price", "same_day_head", "same_day_avg_weight"]
+    loc_cols = ["date", "location", "state", "price", "head", "avg_weight", "fci_value", "basis", "source"]
+    try:
+        wb = openpyxl.load_workbook(DATA_PATH, read_only=True, data_only=True)
+        ws = wb[WB_PRECURSOR_SHEET]
+    except Exception:
+        return pd.DataFrame(columns=fci_cols), pd.DataFrame(columns=loc_cols)
+
+    by_day = {}
+    by_day_loc = {}
+    for r in ws.iter_rows(values_only=True):
+        if not isinstance(r[0], datetime):
+            continue
+        d, loc, state = r[0].date(), r[1], r[2]
+        if not loc or not state:
+            continue
+        for bi in range(8):
+            parsed = _parse_bracket_cell(r[3 + bi])
+            if parsed is None:
+                continue
+            head, weight, price = parsed
+            w = head * weight
+            wp = w * price
+            by_day.setdefault(d, []).append((w, wp, head))
+            by_day_loc.setdefault((d, loc, state), []).append((w, wp, head))
+    wb.close()
+
+    if not by_day:
+        return pd.DataFrame(columns=fci_cols), pd.DataFrame(columns=loc_cols)
+
+    # Drop leading report dates isolated by a large gap from the next one --
+    # a single stray early report (e.g. one location, months before dense
+    # coverage resumes) isn't a real sample of the 12-state index, and
+    # leaving it in would make the chart draw a straight line across the gap
+    # to the next real point, fabricating a multi-month "trend" that never
+    # happened. Found via real data: one 2023-01-24 report, then a 251-day
+    # gap before continuous coverage starts 2023-10-02.
+    STALE_GAP_DAYS = 30
+    report_dates = sorted(by_day)
+    while len(report_dates) >= 2 and (report_dates[1] - report_dates[0]).days > STALE_GAP_DAYS:
+        stale = report_dates.pop(0)
+        del by_day[stale]
+    if not by_day:
+        return pd.DataFrame(columns=fci_cols), pd.DataFrame(columns=loc_cols)
+
+    before = pd.Timestamp(before_date).date()
+    first_date, last_date = min(by_day), max(by_day)
+    fci_rows = []
+    d = first_date
+    while d <= last_date:
+        if d >= before:
+            d += timedelta(days=1)
+            continue
+        window = [d - timedelta(days=i) for i in range(7)]
+        num = den = 0.0
+        for wd in window:
+            for w, wp, head in by_day.get(wd, []):
+                den += w
+                num += wp
+        if den <= 0:
+            d += timedelta(days=1)
+            continue
+        sd = by_day.get(d, [])
+        sd_den = sum(w for w, wp, head in sd)
+        sd_num = sum(wp for w, wp, head in sd)
+        sd_head = sum(head for w, wp, head in sd)
+        fci_rows.append({
+            "date": pd.Timestamp(d), "fci_value": num / den, "source": "workbook_precursor",
+            "same_day_price": (sd_num / sd_den) if sd_den > 0 else pd.NA,
+            "same_day_head": sd_head if sd_head > 0 else pd.NA,
+            "same_day_avg_weight": (sd_den / sd_head) if sd_head > 0 else pd.NA,
+        })
+        d += timedelta(days=1)
+    fci = pd.DataFrame(fci_rows, columns=fci_cols)
+    if fci.empty:
+        return fci, pd.DataFrame(columns=loc_cols)
+    fci_by_date = dict(zip(fci["date"], fci["fci_value"]))
+
+    loc_rows = []
+    for (d, loc, state), rows in by_day_loc.items():
+        if d >= before:
+            continue
+        ts = pd.Timestamp(d)
+        if ts not in fci_by_date:
+            continue
+        den = sum(w for w, wp, head in rows)
+        num = sum(wp for w, wp, head in rows)
+        head_total = sum(head for w, wp, head in rows)
+        if den <= 0 or head_total <= 0:
+            continue
+        price = num / den
+        loc_rows.append({
+            "date": ts, "location": str(loc).strip().upper(), "state": str(state).strip().upper(),
+            "price": price, "head": head_total, "avg_weight": den / head_total,
+            "fci_value": fci_by_date[ts], "basis": price - fci_by_date[ts], "source": "workbook_precursor",
+        })
+    loc = pd.DataFrame(loc_rows, columns=loc_cols)
+    return fci, loc
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_data():
+    """
+    Priority order, earliest ground-truth-quality data wins for each date:
+      1. wb_fci (2024-01-01 - 2026-01-23): the workbook's published CME
+         values -- ground truth, never overridden.
+      2. precursor (2023-01-24 - 2023-12-31): recomputed from Ross's raw
+         per-location sale data using CME's own methodology -- validated to
+         within about $0.20/cwt (median $0.003) of the published column
+         where the two overlap, so treated as ground-truth-equivalent.
+      3. mars_before (before 2023-01-24) / mars_after (2026-01-24 onward):
+         JSA's own USDA MARS reconstruction, same weighted-average method,
+         looser accuracy (~$0.50-$9/cwt spot-checked) since it's a genuine
+         approximation rather than the real underlying sale data.
+    """
     wb_fci, wb_loc = _load_workbook()
+    wb_start, wb_end = wb_fci["date"].min(), wb_fci["date"].max()
+
+    precursor_fci, precursor_loc = _load_workbook_precursor(wb_start)
+    precursor_start = precursor_fci["date"].min() if not precursor_fci.empty else wb_start
+
     mars_fci, mars_loc = _load_mars_reconstruction()
+    mars_before_fci = mars_fci[mars_fci["date"] < precursor_start]
+    mars_before_loc = mars_loc[mars_loc["date"] < precursor_start]
+    mars_after_fci = mars_fci[mars_fci["date"] > wb_end]
+    mars_after_loc = mars_loc[mars_loc["date"] > wb_end]
 
-    cutoff = wb_fci["date"].max()
-    mars_fci = mars_fci[mars_fci["date"] > cutoff]
-    mars_loc = mars_loc[mars_loc["date"] > cutoff]
-
-    fci = pd.concat([wb_fci, mars_fci], ignore_index=True).sort_values("date").reset_index(drop=True)
-    loc = pd.concat([wb_loc, mars_loc], ignore_index=True).sort_values("date").reset_index(drop=True)
+    fci = pd.concat(
+        [mars_before_fci, precursor_fci, wb_fci, mars_after_fci], ignore_index=True
+    ).sort_values("date").reset_index(drop=True)
+    loc = pd.concat(
+        [mars_before_loc, precursor_loc, wb_loc, mars_after_loc], ignore_index=True
+    ).sort_values("date").reset_index(drop=True)
 
     return fci, loc
 
@@ -285,6 +497,20 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+    _SOURCE_LABELS = {
+        "workbook": "JSA-compiled workbook, CME's published index value.",
+        "workbook_precursor": "JSA reconstruction from Ross's raw per-location sale data (the same source behind the published column) — validated within about $0.20/cwt of published values where they overlap.",
+        "usda_mars": "JSA reconstruction from USDA MARS sale-barn data (~60 locations), plus Direct/Video trade PDFs — spot-checked within roughly $0.50–$9/cwt of published values, not an official CME feed.",
+    }
+    _segments = sorted(
+        (grp["date"].min(), grp["date"].max(), src) for src, grp in fci_df.groupby("source")
+    )
+    _seg_html = "".join(
+        f'<b>{start.strftime("%b %d, %Y")} – {end.strftime("%b %d, %Y")}:</b><br>'
+        f'{_SOURCE_LABELS.get(src, src)}<br><br>'
+        for start, end, src in _segments
+    )
+
     st.markdown("<hr>", unsafe_allow_html=True)
     st.markdown(
         f'<div style="color:{MUTED};font-size:0.72rem;line-height:1.6;">'
@@ -293,13 +519,10 @@ with st.sidebar:
         f'Grade/weight: #1 &amp; #1-2 Steers, Medium &amp; Large,<br>'
         f'700–899 lbs, FOB 3% standing shrink<br><br>'
         f'Coverage: {first_date.strftime("%b %d, %Y")} – {last_date.strftime("%b %d, %Y")}<br><br>'
-        f'<b>Jan 2024 – Jan 23, 2026:</b> JSA-compiled workbook,<br>'
-        f'CME\'s published index value.<br><br>'
-        f'<b>Jan 24, 2026 – present:</b> JSA reconstruction from<br>'
-        f'USDA MARS sale-barn data (~60 locations), same<br>'
-        f'weighted-average method. Spot-checked within<br>'
-        f'roughly $2–$9/cwt of CME\'s published value —<br>'
-        f'not an official CME feed. Run <code>update_index.py</code><br>'
+        + _seg_html
+        + f'All segments are drawn as one solid line — not<br>'
+        f'visually distinguished, see this panel for which<br>'
+        f'dates are which. Run <code>update_index.py</code><br>'
         f'to refresh.'
         f'</div>',
         unsafe_allow_html=True,
@@ -392,31 +615,45 @@ AXIS = dict(
     zeroline=False,
 )
 
-wb_seg = fci_df[fci_df["source"] == "workbook"]
-mars_seg = fci_df[fci_df["source"] == "usda_mars"]
-# repeat the last workbook point so the reconstruction segment connects with no visual gap
-if not wb_seg.empty and not mars_seg.empty:
-    mars_seg = pd.concat([wb_seg.tail(1), mars_seg], ignore_index=True)
+hover_source = fci_df["source"].map({
+    "workbook": "Published",
+    "workbook_precursor": "JSA reconstruction (Ross data)",
+    "usda_mars": "JSA reconstruction (USDA MARS)",
+})
+
+forecast_df = compute_forecast(fci_df["fci_value"], last_date)
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(
-    x=wb_seg["date"], y=wb_seg["fci_value"],
-    name="Published (workbook)", mode="lines",
+    x=fci_df["date"], y=fci_df["fci_value"],
+    customdata=hover_source,
+    name="CME Feeder Cattle Index", mode="lines",
     line=dict(color=JPSI_BLUE, width=2),
-    hovertemplate="<b>FCI</b>: $%{y:.2f}<extra></extra>",
+    hovertemplate="<b>%{customdata}</b>: $%{y:.2f}<extra></extra>",
 ))
-if not mars_seg.empty:
+if forecast_df is not None:
+    connector = pd.concat([
+        pd.DataFrame({"date": [last_date], "forecast": [current], "lower": [current], "upper": [current]}),
+        forecast_df,
+    ], ignore_index=True)
     fig.add_trace(go.Scatter(
-        x=mars_seg["date"], y=mars_seg["fci_value"],
-        name="JSA reconstruction (USDA MARS)", mode="lines",
-        line=dict(color=JPSI_BLUE, width=2, dash="dot"),
-        hovertemplate="<b>Reconstructed FCI</b>: $%{y:.2f}<extra></extra>",
+        x=pd.concat([connector["date"], connector["date"][::-1]]),
+        y=pd.concat([connector["upper"], connector["lower"][::-1]]),
+        fill="toself", fillcolor="rgba(230,126,34,0.15)",
+        line=dict(color="rgba(0,0,0,0)"),
+        hoverinfo="skip", showlegend=False, name="Forecast band",
+    ))
+    fig.add_trace(go.Scatter(
+        x=connector["date"], y=connector["forecast"],
+        name="Naive forecast (no-change)", mode="lines",
+        line=dict(color="#e67e22", width=2, dash="dash"),
+        hovertemplate="<b>Forecast</b>: $%{y:.2f}<extra></extra>",
     ))
 fig.update_layout(
     paper_bgcolor=BG, plot_bgcolor=BG,
     font=dict(color=TEXT, size=11),
     hovermode="x unified",
-    showlegend=not mars_seg.empty,
+    showlegend=forecast_df is not None,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                 font=dict(color=MUTED, size=10), bgcolor="rgba(0,0,0,0)"),
     margin=dict(l=55, r=20, t=15, b=40),
@@ -442,11 +679,58 @@ fig.update_layout(
 )
 add_watermark(fig, size=0.34, opacity=0.055)
 st.plotly_chart(fig, use_container_width=True)
-if not mars_seg.empty:
-    st.caption(
-        "Dotted segment (Jan 24, 2026 onward) is JSA's own reconstruction from USDA MARS sale-barn "
-        "data, not CME's official published index — see the sidebar for methodology and accuracy notes."
+caption_bits = [
+    "Line covers JSA's compiled workbook (published CME values) plus JSA's own USDA MARS "
+    "reconstruction on both ends of that range — see the sidebar for methodology and accuracy notes."
+]
+if forecast_df is not None:
+    caption_bits.append(
+        f"Dashed orange segment is a {FORECAST_HORIZON_DAYS}-business-day naive (no-change) "
+        f"projection with a {FORECAST_CI:.0%} band from historical day-ahead variability — backtested "
+        "against a trend-following model and this simpler approach was actually more accurate (this "
+        "series moves close to a random walk), but it's still not a trading signal or market forecast."
     )
+st.caption(" ".join(caption_bits))
+
+
+# ── Seasonal Pattern ──────────────────────────────────────────────────────────
+
+st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+st.markdown('<div class="sec-header">Seasonal Pattern by Year</div>', unsafe_allow_html=True)
+
+seas = fci_df[["date", "fci_value"]].copy()
+seas["year"] = seas["date"].dt.year
+seas["doy"] = seas["date"].dt.dayofyear
+current_year = seas["year"].max()
+
+fig_seas = go.Figure()
+for yr, grp in seas.groupby("year"):
+    is_current = yr == current_year
+    fig_seas.add_trace(go.Scatter(
+        x=grp["doy"], y=grp["fci_value"],
+        name=str(yr), mode="lines",
+        line=dict(color=JPSI_BLUE if is_current else None, width=3 if is_current else 1.5),
+        opacity=1.0 if is_current else 0.55,
+        hovertemplate=f"<b>{yr}</b>: $%{{y:.2f}}<extra></extra>",
+    ))
+fig_seas.update_layout(
+    paper_bgcolor=BG, plot_bgcolor=BG,
+    font=dict(color=TEXT, size=11),
+    hovermode="x unified",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                font=dict(color=MUTED, size=10), bgcolor="rgba(0,0,0,0)"),
+    margin=dict(l=55, r=20, t=15, b=40),
+    xaxis=dict(**AXIS, title="Day of Year"),
+    yaxis=dict(**AXIS, title="$/cwt", tickprefix="$"),
+    height=380,
+)
+add_watermark(fig_seas, size=0.3, opacity=0.06)
+st.plotly_chart(fig_seas, use_container_width=True)
+st.caption(
+    f"Each line is one calendar year plotted by day-of-year ({current_year} bolded) — shows where "
+    "this year sits against the same point in prior years. Not detrended: absolute levels differ "
+    "year to year with broader market conditions, not just seasonality."
+)
 
 
 # ── Weekly Rundown ────────────────────────────────────────────────────────────

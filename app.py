@@ -171,10 +171,25 @@ def _load_workbook():
     raw["location"] = raw["location"].astype(str).str.strip().str.upper()
     raw["state"] = raw["state"].astype(str).str.strip().str.upper()
 
+    raw_fci = raw[raw["location"] == "FCI"][["date", "price"]].sort_values("date")
+    # The sheet has exactly one duplicate-dated FCI row (2024-07-23: 258.39 vs
+    # a clearly erroneous 326.18, a lone data-entry duplicate, not a pattern)
+    # -- picking blindly via keep="first"/"last" is a coin flip on which one
+    # survives, so instead keep whichever candidate is closest to the median
+    # of the surrounding +/-5 days' (non-duplicate) values.
+    dupe_dates = raw_fci[raw_fci.duplicated(subset="date", keep=False)]["date"].unique()
+    if len(dupe_dates):
+        single = raw_fci[~raw_fci["date"].isin(dupe_dates)].set_index("date")["price"]
+        keep_rows = []
+        for d in dupe_dates:
+            candidates = raw_fci[raw_fci["date"] == d]
+            window = single[(single.index >= d - pd.Timedelta(days=5)) & (single.index <= d + pd.Timedelta(days=5))]
+            ref = window.median() if not window.empty else candidates["price"].median()
+            keep_rows.append((candidates["price"] - ref).abs().idxmin())
+        raw_fci = pd.concat([raw_fci[~raw_fci["date"].isin(dupe_dates)], raw_fci.loc[keep_rows]])
+
     fci = (
-        raw[raw["location"] == "FCI"][["date", "price"]]
-        .rename(columns={"price": "fci_value"})
-        .drop_duplicates(subset="date", keep="last")
+        raw_fci.rename(columns={"price": "fci_value"})
         .sort_values("date")
         .reset_index(drop=True)
     )

@@ -319,7 +319,7 @@ c1, c2 = st.columns([7, 3])
 with c1:
     st.markdown(
         f"<h1 style='color:{TEXT};margin:0;padding:0;font-size:1.9rem;'>"
-        "CME Feeder Cattle Index</h1>"
+        "JSA - CME Feeder Cattle Index</h1>"
         f"<div style='color:{MUTED};font-size:0.8rem;margin-top:2px;'>"
         "12-State Feeder Steer Sample · #1 &amp; #1-2 Medium &amp; Large, 700–899 lbs</div>",
         unsafe_allow_html=True,

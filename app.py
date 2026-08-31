@@ -580,6 +580,15 @@ current = fci_df.iloc[-1]["fci_value"]
 prev_point = fci_df.iloc[-2]["fci_value"] if len(fci_df) > 1 else None
 day_chg = current - prev_point if prev_point is not None else None
 
+# "Current Index" is only accurate when the latest date is CME's actual
+# published value (source == "workbook"). Every other date is JSA's own
+# reconstruction -- label it as an estimate so it's never mistaken for the
+# real published figure, which is what actually confused the user here.
+current_label = (
+    "Current Index" if fci_df.iloc[-1]["source"] == "workbook"
+    else f"FCI Estimate {last_date.month}/{last_date.day}/{last_date.strftime('%y')}"
+)
+
 week_ago = value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=7))
 week_chg = current - week_ago if week_ago is not None else None
 
@@ -591,7 +600,7 @@ year_chg = current - year_ago if year_ago is not None else None
 
 cols = st.columns(4)
 with cols[0]:
-    st.markdown(tile("Current Index", fmt_price(current)), unsafe_allow_html=True)
+    st.markdown(tile(current_label, fmt_price(current)), unsafe_allow_html=True)
 with cols[1]:
     st.markdown(tile("Day Change", fmt_price(day_chg), delta_html(day_chg)), unsafe_allow_html=True)
 with cols[2]:

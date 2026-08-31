@@ -811,7 +811,22 @@ if day_rows.empty:
 else:
     left, right = st.columns([3, 2])
     with left:
-        disp = day_rows[["location", "state", "head", "avg_weight", "price", "basis"]].rename(columns={
+        # Weighted totals row (matches how Compass's own report closes each
+        # day's location table) -- weighted by head*weight, same formula as
+        # the FCI itself, not a plain average of the Price column.
+        total_head = day_rows["head"].sum()
+        w = day_rows["head"] * day_rows["avg_weight"]
+        total_weight = (w.sum() / total_head) if total_head else None
+        total_price = ((w * day_rows["price"]).sum() / w.sum()) if w.sum() else None
+        totals_row = pd.DataFrame([{
+            "location": "TOTAL", "state": "",
+            "head": total_head if total_head else pd.NA,
+            "avg_weight": total_weight, "price": total_price,
+            "basis": (total_price - day_fci) if (total_price is not None and day_fci is not None) else None,
+        }])
+        day_rows_with_total = pd.concat([day_rows, totals_row], ignore_index=True)
+
+        disp = day_rows_with_total[["location", "state", "head", "avg_weight", "price", "basis"]].rename(columns={
             "location": "Location", "state": "State", "head": "Head", "avg_weight": "Weight",
             "price": "Price", "basis": "Basis vs FCI",
         })
@@ -823,6 +838,10 @@ else:
                     lambda v: f"color: {POS}" if isinstance(v, (int, float)) and v > 0
                     else (f"color: {NEG}" if isinstance(v, (int, float)) and v < 0 else ""),
                     subset=["Basis vs FCI"],
+                ).apply(
+                    lambda row: ["font-weight:700;border-top:2px solid " + BORDER] * len(row)
+                    if row["Location"] == "TOTAL" else [""] * len(row),
+                    axis=1,
                 ),
                 use_container_width=True, hide_index=True, height=380,
             )

@@ -627,6 +627,55 @@ if pd.notna(sd_price) and pd.notna(sd_head):
     )
 
 
+# ── 7-Day Window (rolling index composition) ──────────────────────────────────
+# Mirrors the top "Daily Totals" box in Compass's own report -- shows the
+# individual days feeding the rolling Current Index above, so it's clear
+# how that single number was built. Always unfiltered by state, same as
+# the KPI tiles it explains.
+
+st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+st.markdown('<div class="sec-header">7-Day Window (Rolling Index Composition)</div>', unsafe_allow_html=True)
+
+window_start = last_date - timedelta(days=6)
+window_fci = fci_df[(fci_df["date"] >= window_start) & (fci_df["date"] <= last_date)][
+    ["date", "same_day_price", "same_day_head", "same_day_avg_weight"]
+].copy()
+window_fci["Day"] = window_fci["date"].dt.strftime("%a %m/%d")
+
+window_loc = loc_df[(loc_df["date"] >= window_start) & (loc_df["date"] <= last_date)]
+window_w = window_loc["head"] * window_loc["avg_weight"]
+window_total_head = window_loc["head"].sum()
+window_total_weight = (window_w.sum() / window_total_head) if window_total_head else None
+
+window_totals_row = pd.DataFrame([{
+    "Day": "7-DAY TOTAL",
+    "same_day_head": window_total_head if window_total_head else pd.NA,
+    "same_day_avg_weight": window_total_weight,
+    "same_day_price": current,
+}])
+window_disp = pd.concat(
+    [window_fci[["Day", "same_day_head", "same_day_avg_weight", "same_day_price"]], window_totals_row],
+    ignore_index=True,
+).rename(columns={"same_day_head": "Head", "same_day_avg_weight": "Weight", "same_day_price": "Price"})
+
+with st.container(key="wm-window"):
+    st.dataframe(
+        window_disp.style.format({
+            "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}",
+        }, na_rep="—").apply(
+            lambda row: ["font-weight:700;border-top:2px solid " + BORDER] * len(row)
+            if row["Day"] == "7-DAY TOTAL" else [""] * len(row),
+            axis=1,
+        ),
+        use_container_width=True, hide_index=True, height=320,
+    )
+st.caption(
+    "Each row is that single day's own weighted average (not rolling) — together they're the raw "
+    "material behind the rolling Current Index above. A blank row had no fresh same-day report "
+    "(weekend, or that location's next scheduled sale hadn't landed yet)."
+)
+
+
 # ── FCI Trend Chart ───────────────────────────────────────────────────────────
 
 st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)

@@ -53,6 +53,13 @@ VIDEO_REPORT_SLUGS = {
     "CMS": 3907,  # CMS Video/Internet Livestock Auction - Amarillo, TX (Monthly)
     "LIVEAG": 3892,  # LiveAg Video Auction - Fort Worth, TX (Monthly)
     "NORTHERN_LIVESTOCK": 2772,  # Northern Livestock Video/Internet Auction - Billings, MT (Seasonal)
+    "CATTLE_DRIVE": 3791,  # Cattle Drive Livestock Video/Internet Auction - Salina, UT (Tue)
+    # Based in UT (outside the 12-state region) but its own sales are
+    # region-tagged like the others, and CME's real published report does
+    # include it under "North Central" -- confirmed via a live Compass Ag
+    # report showing a "CATTLE DRIVE (NC)" line item. Frequently reports
+    # zero qualifying feeder-steer rows (many weeks are slaughter cows /
+    # replacement cattle only), same as CMS.
 }
 
 REPORT_PDF_URL = "https://www.ams.usda.gov/mnreports/ams_{slug}.pdf"

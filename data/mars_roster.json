@@ -478,5 +478,11 @@
     "title": "Tri-State Livestock Auction - McCook, NE",
     "state": "NE",
     "city": "McCook"
+  },
+  {
+    "slug_id": 1810,
+    "title": "Eastern MO Commission Company - Bowling Green, MO",
+    "state": "MO",
+    "city": "Bowling Green"
   }
 ]

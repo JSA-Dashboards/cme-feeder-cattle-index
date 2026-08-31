@@ -484,5 +484,11 @@
     "title": "Eastern MO Commission Company - Bowling Green, MO",
     "state": "MO",
     "city": "Bowling Green"
+  },
+  {
+    "slug_id": 1249,
+    "title": "Ozarks Regional Stockyards Feeder Cattle - West Plains, MO",
+    "state": "MO",
+    "city": "West Plains"
   }
 ]

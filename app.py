@@ -27,6 +27,11 @@ DATA_PATH = Path(__file__).parent / "data" / "Feeder Cattle Info Ross.xlsx"
 MARS_DB_PATH = Path(__file__).parent / "data" / "mars_history.db"
 
 VALID_STATES = {"CO", "IA", "KS", "MO", "MT", "NE", "NM", "ND", "OK", "SD", "TX", "WY"}
+# Video-auction rows are tagged with a sale region ("North Central"/"South
+# Central") instead of a real state code -- without these, they're silently
+# excluded from the default Sale Locations/Basis Leaderboard filter even
+# though they correctly contribute to fci_value upstream.
+VALID_STATES |= {"North Central", "South Central"}
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -854,17 +859,15 @@ st.markdown(
 
 day_fci = value_on_or_before(fci_df, detail_date)
 
-# Each location's MOST RECENT report within the trailing 7-day window ending
-# on detail_date -- not strictly same-day. A location that only sells
-# Wednesdays (e.g. Clovis NM) still shows here on Thursday/Friday, carrying
-# its Wednesday sale forward, because it's still inside the current rolling
-# window and Compass's own report does the same thing (confirmed against a
-# live Compass report showing exactly this for Clovis). Basis is recomputed
-# against detail_date's own FCI, not the stale sale-day's, since the point is
-# "how does this contribution compare to today's index."
-window_start = detail_date - timedelta(days=6)
-window_loc = loc_filtered[(loc_filtered["date"] >= window_start) & (loc_filtered["date"] <= detail_date)]
-day_rows = window_loc.sort_values("date").groupby("location", as_index=False).last()
+# Strictly same-day: only locations with an actual report dated detail_date.
+# (A carry-forward version of this table was tried -- showing each location's
+# most recent report within the trailing 7-day window -- to mirror how a
+# Wednesday-only auction like Clovis NM still appears on Compass's later
+# reports. It was reverted: summed across the full roster the carry-forward
+# total ballooned into a "total receipts"-looking number (e.g. 11,589 head)
+# that didn't correspond to any real day's volume and didn't reconcile with
+# Compass either. This table should show what actually reported today.)
+day_rows = loc_filtered[loc_filtered["date"] == detail_date].copy()
 if not day_rows.empty and day_fci is not None:
     day_rows["basis"] = day_rows["price"] - day_fci
 day_rows = day_rows.sort_values("basis", ascending=False)
@@ -888,11 +891,8 @@ else:
             "basis": (total_price - day_fci) if (total_price is not None and day_fci is not None) else None,
         }])
         day_rows_with_total = pd.concat([day_rows, totals_row], ignore_index=True)
-        day_rows_with_total["Sold"] = day_rows_with_total["date"].apply(
-            lambda d: d.strftime("%m/%d") if pd.notna(d) else ""
-        )
 
-        disp = day_rows_with_total[["location", "state", "Sold", "head", "avg_weight", "price", "basis"]].rename(columns={
+        disp = day_rows_with_total[["location", "state", "head", "avg_weight", "price", "basis"]].rename(columns={
             "location": "Location", "state": "State", "head": "Head", "avg_weight": "Weight",
             "price": "Price", "basis": "Basis vs FCI",
         })

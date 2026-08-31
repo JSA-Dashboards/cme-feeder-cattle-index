@@ -852,8 +852,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-day_rows = loc_filtered[loc_filtered["date"] == detail_date].sort_values("basis", ascending=False)
 day_fci = value_on_or_before(fci_df, detail_date)
+
+# Each location's MOST RECENT report within the trailing 7-day window ending
+# on detail_date -- not strictly same-day. A location that only sells
+# Wednesdays (e.g. Clovis NM) still shows here on Thursday/Friday, carrying
+# its Wednesday sale forward, because it's still inside the current rolling
+# window and Compass's own report does the same thing (confirmed against a
+# live Compass report showing exactly this for Clovis). Basis is recomputed
+# against detail_date's own FCI, not the stale sale-day's, since the point is
+# "how does this contribution compare to today's index."
+window_start = detail_date - timedelta(days=6)
+window_loc = loc_filtered[(loc_filtered["date"] >= window_start) & (loc_filtered["date"] <= detail_date)]
+day_rows = window_loc.sort_values("date").groupby("location", as_index=False).last()
+if not day_rows.empty and day_fci is not None:
+    day_rows["basis"] = day_rows["price"] - day_fci
+day_rows = day_rows.sort_values("basis", ascending=False)
 
 if day_rows.empty:
     st.info("No reporting sale locations on this date. Pick another date in the sidebar.")
@@ -868,14 +882,17 @@ else:
         total_weight = (w.sum() / total_head) if total_head else None
         total_price = ((w * day_rows["price"]).sum() / w.sum()) if w.sum() else None
         totals_row = pd.DataFrame([{
-            "location": "TOTAL", "state": "",
+            "location": "TOTAL", "state": "", "date": pd.NaT,
             "head": total_head if total_head else pd.NA,
             "avg_weight": total_weight, "price": total_price,
             "basis": (total_price - day_fci) if (total_price is not None and day_fci is not None) else None,
         }])
         day_rows_with_total = pd.concat([day_rows, totals_row], ignore_index=True)
+        day_rows_with_total["Sold"] = day_rows_with_total["date"].apply(
+            lambda d: d.strftime("%m/%d") if pd.notna(d) else ""
+        )
 
-        disp = day_rows_with_total[["location", "state", "head", "avg_weight", "price", "basis"]].rename(columns={
+        disp = day_rows_with_total[["location", "state", "Sold", "head", "avg_weight", "price", "basis"]].rename(columns={
             "location": "Location", "state": "State", "head": "Head", "avg_weight": "Weight",
             "price": "Price", "basis": "Basis vs FCI",
         })
@@ -912,8 +929,35 @@ else:
         )
         add_watermark(fig_b, size=0.4, opacity=0.06)
         st.plotly_chart(fig_b, use_container_width=True)
+
+    # Two distinct numbers, same distinction as the KPI section above but for
+    # whichever date is being browsed here: the true same-day figure (this
+    # date's own fresh sales only) and the rolling FCI (7-day window) used
+    # for the Basis column -- labeled "Published Index" instead of "FCI
+    # Estimate" on dates where that rolling value is CME's real published
+    # number, not JSA's reconstruction.
+    detail_rows = fci_df[fci_df["date"] == detail_date]
+    detail_is_published = not detail_rows.empty and detail_rows.iloc[0]["source"] == "workbook"
+    fci_label = "Published Index" if detail_is_published else "FCI Estimate"
+    sd_price_d = detail_rows.iloc[0]["same_day_price"] if not detail_rows.empty else None
+    sd_head_d = detail_rows.iloc[0]["same_day_head"] if not detail_rows.empty else None
+    sd_weight_d = detail_rows.iloc[0]["same_day_avg_weight"] if not detail_rows.empty else None
+
+    caption_parts = []
+    if pd.notna(sd_price_d) and pd.notna(sd_head_d):
+        weight_part_d = f" and <b style='color:{TEXT}'>{sd_weight_d:.0f} lbs</b> average" if pd.notna(sd_weight_d) else ""
+        caption_parts.append(
+            f"Daily: <b style='color:{TEXT}'>${sd_price_d:.2f}</b> on "
+            f"<b style='color:{TEXT}'>{int(sd_head_d):,}</b> head{weight_part_d}"
+        )
     if day_fci is not None:
-        st.caption(f"Index value used for basis: **${day_fci:.2f}**")
+        caption_parts.append(f"{fci_label}: <b style='color:{TEXT}'>${day_fci:.2f}</b>")
+    if caption_parts:
+        st.markdown(
+            f"<div style='color:{MUTED};font-size:0.82rem;margin-top:8px;'>"
+            + " &nbsp;·&nbsp; ".join(caption_parts) + "</div>",
+            unsafe_allow_html=True,
+        )
 
 
 # ── Basis Leaderboard ─────────────────────────────────────────────────────────

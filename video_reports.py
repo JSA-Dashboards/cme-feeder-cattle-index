@@ -1,12 +1,23 @@
 """
-Parses USDA AMS "Feeder Cattle Internet & Video Reports" PDFs -- currently
-just Superior Livestock Video/Internet Auction (Fort Worth, TX), by far the
-largest video-auction platform (~200k head/week vs. a few thousand/week for
-the whole existing sale-barn roster combined). Other companies listed at
-https://www.ams.usda.gov/market-news/feeder-cattle-internet-video-reports
-(Cattle Country Video, CMS, LiveAg, Northern Livestock, Western Video
-Market, etc.) are a documented future expansion, not yet built/verified --
-each may have its own layout quirks like the Direct Cattle Reports did.
+Parses USDA AMS "Feeder Cattle Internet & Video Reports" PDFs: Superior
+Livestock Video/Internet Auction (Fort Worth, TX), by far the largest
+video-auction platform (~200k head/week vs. a few thousand/week for the
+whole sale-barn roster combined), plus Cattle Country Video (Torrington,
+WY), CMS (Amarillo, TX), LiveAg (Fort Worth, TX), and Northern Livestock
+(Billings, MT) -- confirmed 2026-08-29 to use the identical AMS report
+template (same region headers, same weight-bracket table layout), so no
+parser changes were needed to add them, just their slugs below. The
+smaller per-city video add-ons listed on that same page (for cities
+already in the auction roster -- Carthage MO, West Plains MO, Bassett/
+Burwell/Crawford/Ericson/Valentine/Kearney NE, Apache/Beaver OK, Wildorado
+TX, a 2nd Billings MT company) were checked too and skipped: their MARS
+API rows are narrative-only stubs (all fields None, same limitation the
+Direct Cattle Reports had before PDF-parsing), and spot-checking their
+actual PDFs showed tiny, often non-feeder-steer volume (e.g. West Plains'
+report that week was a 90-head bred-heifer replacement sale in the
+Southeast region) -- not worth building out unless one of them turns out
+to matter later. Western Video Market and Overland/Producers (CA/FL) are
+outside the 12-state region, not relevant regardless.
 
 Same position-based parsing technique as direct_reports.py (no visible
 table structure -- clusters pdfplumber word coordinates into rows/columns),
@@ -38,6 +49,10 @@ import requests
 
 VIDEO_REPORT_SLUGS = {
     "SUPERIOR": 2713,  # Superior Livestock Video/Internet Auction - Fort Worth, TX (Mon)
+    "CATTLE_COUNTRY": 3241,  # Cattle Country Livestock Video/Internet Auction - Torrington, WY (Monthly)
+    "CMS": 3907,  # CMS Video/Internet Livestock Auction - Amarillo, TX (Monthly)
+    "LIVEAG": 3892,  # LiveAg Video Auction - Fort Worth, TX (Monthly)
+    "NORTHERN_LIVESTOCK": 2772,  # Northern Livestock Video/Internet Auction - Billings, MT (Seasonal)
 }
 
 REPORT_PDF_URL = "https://www.ams.usda.gov/mnreports/ams_{slug}.pdf"

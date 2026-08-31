@@ -122,6 +122,91 @@ def mdY(d: date) -> str:
     return d.strftime("%m/%d/%Y")
 
 
+def shift_weekend_to_monday(d: date) -> date:
+    """
+    CME's own methodology: Saturday and Sunday sales are treated as the
+    following Monday's transactions for the rolling 7-day window (confirmed
+    against CME's published rules). A handful of our roster locations
+    genuinely sell on Saturday (Ericson NE is a fixed Saturday auction; a
+    few others show up as occasional Saturday makeup sales), so this isn't
+    a hypothetical edge case -- without it, those sales fall in the wrong
+    week's window entirely. Weekday dates pass through unchanged.
+    """
+    if d.weekday() == 5:  # Saturday
+        return d + timedelta(days=2)
+    if d.weekday() == 6:  # Sunday
+        return d + timedelta(days=1)
+    return d
+
+
+def recompute_fci_daily(conn):
+    """
+    Recomputes the FULL fci_daily table from ALL stored mars_sales, using a
+    rolling 7-calendar-day trailing window per CME's published methodology
+    (each date's window can reach up to 6 days before any given `since`, so
+    this is NOT limited to a recently-affected date range -- it's cheap
+    given table size). Returns (n_written, first_date, last_date | None).
+    """
+    all_rows = conn.execute(
+        "SELECT report_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
+    ).fetchall()
+
+    by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
+    for report_date, head, wt, price in all_rows:
+        w = head * wt
+        by_day.setdefault(report_date, []).append((w, w * price, head))
+
+    all_dates = sorted(date.fromisoformat(d) for d in by_day)
+    if not all_dates:
+        conn.execute("DELETE FROM fci_daily")
+        conn.commit()
+        return 0, None, None
+    first_date, last_date = all_dates[0], all_dates[-1]
+    conn.execute("DELETE FROM fci_daily")
+
+    n_written = 0
+    d = first_date
+    while d <= last_date:
+        window_start = d - timedelta(days=6)
+        window_days = [
+            (window_start + timedelta(days=i)).isoformat() for i in range(7)
+        ]
+        den = num = 0.0
+        n_locs = 0
+        total_head = 0
+        for wd in window_days:
+            for w, dollars, head in by_day.get(wd, []):
+                den += w
+                num += dollars
+                n_locs += 1
+                total_head += head
+
+        # Same-day-only snapshot (not rolling) -- matches the "Daily: $X on Y
+        # head and Z lbs average" figure CME's own subscriber reports quote
+        # alongside the 7-day index. None when no report landed that date
+        # (weekends etc.), same as the report showing no standalone row then.
+        sd_den = sd_num = 0.0
+        sd_head = 0
+        for w, dollars, head in by_day.get(d.isoformat(), []):
+            sd_den += w
+            sd_num += dollars
+            sd_head += head
+        sd_price = (sd_num / sd_den) if sd_den > 0 else None
+        sd_avg_weight = (sd_den / sd_head) if sd_head > 0 else None
+
+        if den > 0:
+            conn.execute(
+                "INSERT INTO fci_daily "
+                "(report_date, fci_value, n_locations, total_head, same_day_price, same_day_head, same_day_avg_weight) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (d.isoformat(), num / den, n_locs, total_head, sd_price, sd_head or None, sd_avg_weight),
+            )
+            n_written += 1
+        d += timedelta(days=1)
+    conn.commit()
+    return n_written, first_date, last_date
+
+
 def run_update(since: date, verbose=True):
     auth = get_auth()
     roster = json.loads(ROSTER_PATH.read_text(encoding="utf-8"))
@@ -144,7 +229,8 @@ def run_update(since: date, verbose=True):
         for r in qrows:
             rd = r["report_date"]  # MM/DD/YYYY
             m, d, y = rd.split("/")
-            iso_date = f"{y}-{int(m):02d}-{int(d):02d}"
+            sale_date = date(int(y), int(m), int(d))
+            iso_date = shift_weekend_to_monday(sale_date).isoformat()
             conn.execute(
                 "INSERT OR IGNORE INTO mars_sales "
                 "(report_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
@@ -183,11 +269,12 @@ def run_update(since: date, verbose=True):
         direct_inserted += len(rows)
     total_inserted += direct_inserted
 
-    # Video/internet auction trade (currently just Superior Livestock --
-    # by far the largest platform, ~200k head/week vs. a few thousand/week
-    # for the rest of the sample combined; see video_reports.py for other
-    # companies not yet built). Same current-week-only limitation as the
-    # direct reports. Rows are attributed to a REGION (North Central /
+    # Video/internet auction trade: Superior Livestock (by far the largest
+    # platform, ~200k head/week), plus Cattle Country Video, CMS, LiveAg,
+    # and Northern Livestock (see video_reports.py for the smaller per-city
+    # add-ons checked and skipped as not worth building). Same
+    # current-week-only limitation as the direct reports. Rows are
+    # attributed to a REGION (North Central /
     # South Central), not a single state -- video sales aren't broken out
     # by state within a region -- so `state` here is the region name
     # itself, not a real 2-letter code; that's intentional, not a bug.
@@ -198,7 +285,7 @@ def run_update(since: date, verbose=True):
     for name, (report_date_, rows) in video_results.items():
         if report_date_ is None:
             continue
-        iso_date = report_date_.isoformat()
+        iso_date = shift_weekend_to_monday(report_date_).isoformat()
         slug_id = VIDEO_REPORT_SLUGS[name]
         for r in rows:
             conn.execute(
@@ -213,71 +300,14 @@ def run_update(since: date, verbose=True):
     total_inserted += video_inserted
     conn.commit()
 
-    # Recompute the FULL fci_daily table from ALL stored mars_sales, using a
-    # rolling 7-calendar-day trailing window per CME's published methodology
-    # (each date's window can reach up to 6 days before `since`, so this is
-    # NOT limited to the affected date range — it's cheap given table size).
-    all_rows = conn.execute(
-        "SELECT report_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
-    ).fetchall()
-
-    by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
-    for report_date, head, wt, price in all_rows:
-        w = head * wt
-        by_day.setdefault(report_date, []).append((w, w * price, head))
-
-    all_dates = sorted(date.fromisoformat(d) for d in by_day)
-    if all_dates:
-        first_date, last_date = all_dates[0], all_dates[-1]
-    conn.execute("DELETE FROM fci_daily")
-
-    n_written = 0
-    d = first_date if all_dates else None
-    while d is not None and d <= last_date:
-        window_start = d - timedelta(days=6)
-        window_days = [
-            (window_start + timedelta(days=i)).isoformat() for i in range(7)
-        ]
-        den = num = 0.0
-        n_locs = 0
-        total_head = 0
-        for wd in window_days:
-            for w, dollars, head in by_day.get(wd, []):
-                den += w
-                num += dollars
-                n_locs += 1
-                total_head += head
-
-        # Same-day-only snapshot (not rolling) -- matches the "Daily: $X on Y
-        # head and Z lbs average" figure CME's own subscriber reports quote
-        # alongside the 7-day index. None when no report landed that date
-        # (weekends etc.), same as the report showing no standalone row then.
-        sd_den = sd_num = 0.0
-        sd_head = 0
-        for w, dollars, head in by_day.get(d.isoformat(), []):
-            sd_den += w
-            sd_num += dollars
-            sd_head += head
-        sd_price = (sd_num / sd_den) if sd_den > 0 else None
-        sd_avg_weight = (sd_den / sd_head) if sd_head > 0 else None
-
-        if den > 0:
-            conn.execute(
-                "INSERT INTO fci_daily "
-                "(report_date, fci_value, n_locations, total_head, same_day_price, same_day_head, same_day_avg_weight) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (d.isoformat(), num / den, n_locs, total_head, sd_price, sd_head or None, sd_avg_weight),
-            )
-            n_written += 1
-        d += timedelta(days=1)
-    conn.commit()
+    n_written, first_date, last_date = recompute_fci_daily(conn)
 
     if verbose:
         print(f"\nInserted/kept {total_inserted} sale rows: {total_inserted - direct_inserted - video_inserted} "
               f"auction rows across {len(roster)} locations, {direct_inserted} direct-trade rows across "
               f"{len(direct_results)} states, {video_inserted} video-auction rows across {len(video_results)} reports.")
         print(f"Recomputed FCI (7-day rolling window) for {n_written} dates "
-              f"({first_date if all_dates else '—'} to {last_date if all_dates else '—'}).")
+              f"({first_date or '—'} to {last_date or '—'}).")
         recent = conn.execute(
             "SELECT report_date, fci_value, n_locations FROM fci_daily ORDER BY report_date DESC LIMIT 8"
         ).fetchall()

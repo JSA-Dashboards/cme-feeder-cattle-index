@@ -394,5 +394,89 @@
     "title": "Windsor Livestock Auction - Windsor, MO",
     "state": "MO",
     "city": "Windsor"
+  },
+  {
+    "slug_id": 1901,
+    "title": "Winter Livestock Feeder Cattle Sale (Seasonal) - La Junta, CO",
+    "state": "CO",
+    "city": "La Junta"
+  },
+  {
+    "slug_id": 1903,
+    "title": "La Junta Livestock Commission - La Junta, CO",
+    "state": "CO",
+    "city": "La Junta"
+  },
+  {
+    "slug_id": 1900,
+    "title": "Sterling Livestock Commission Company - Sterling, CO",
+    "state": "CO",
+    "city": "Sterling"
+  },
+  {
+    "slug_id": 2097,
+    "title": "Kist Livestock Auction - Mandan, ND",
+    "state": "ND",
+    "city": "Mandan"
+  },
+  {
+    "slug_id": 2098,
+    "title": "Napoleon Livestock Auction - Napoleon, ND",
+    "state": "ND",
+    "city": "Napoleon"
+  },
+  {
+    "slug_id": 2099,
+    "title": "Stockmen's Livestock Exchange - Dickinson, ND",
+    "state": "ND",
+    "city": "Dickinson"
+  },
+  {
+    "slug_id": 2163,
+    "title": "Appanoose County Livestock Feeder Cattle - Centerville, IA",
+    "state": "IA",
+    "city": "Centerville"
+  },
+  {
+    "slug_id": 2152,
+    "title": "Keoco Feeder Cattle Auction - Sigourney, IA",
+    "state": "IA",
+    "city": "Sigourney"
+  },
+  {
+    "slug_id": 2151,
+    "title": "Knoxville Regional Feeder Cattle - Knoxville, IA",
+    "state": "IA",
+    "city": "Knoxville"
+  },
+  {
+    "slug_id": 2156,
+    "title": "Tama Livestock Feeder Cattle - Tama, IA",
+    "state": "IA",
+    "city": "Tama"
+  },
+  {
+    "slug_id": 1858,
+    "title": "Gordon Livestock Market - Gordon, NE",
+    "state": "NE",
+    "city": "Gordon"
+  },
+  {
+    "slug_id": 1854,
+    "title": "Imperial Auction Market - Imperial, NE",
+    "state": "NE",
+    "city": "Imperial"
+  },
+  {
+    "slug_id": 3653,
+    "title": "North Platte Stockyards Livestock Auction - North Platte, NE",
+    "state": "NE",
+    "city": "North Platte"
+  },
+  {
+    "slug_id": 1855,
+    "title": "Tri-State Livestock Auction - McCook, NE",
+    "state": "NE",
+    "city": "McCook"
   }
 ]

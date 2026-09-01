@@ -725,8 +725,33 @@ st.markdown('<div class="sec-header">7-Day Window (Rolling Index Composition)</d
 window_start = last_date - timedelta(days=6)
 window_fci = fci_df[(fci_df["date"] >= window_start) & (fci_df["date"] <= last_date)][
     ["date", "same_day_price", "same_day_head", "same_day_avg_weight"]
-].copy()
-window_fci["Day"] = window_fci["date"].dt.strftime("%a %m/%d")
+].copy().sort_values("date").reset_index(drop=True)
+
+# Saturday/Sunday sales are already folded into the following Monday's own
+# same_day_* figures (see update_index.py's recompute_fci_daily -- confirmed
+# against CME's own official files, a Monday's DAILY TOTALS literally equals
+# Monday's own rows plus the preceding Saturday's). Sat/Sun therefore never
+# carry their own same-day total; showing them as separate blank rows here
+# just looks like missing data. Drop them and relabel Monday's row to show
+# the span it actually represents, matching how CME's own report has no
+# standalone Sat/Sun line at all.
+drop_idx = []
+for i, row in window_fci.iterrows():
+    if row["date"].weekday() == 5:  # Saturday
+        span_start = row["date"]
+        j = i
+        while j + 1 < len(window_fci) and window_fci.loc[j + 1, "date"].weekday() in (5, 6):
+            j += 1
+        if j + 1 < len(window_fci):
+            drop_idx.extend(range(i, j + 1))
+            window_fci.loc[j + 1, "_span_start"] = span_start
+window_fci = window_fci.drop(index=drop_idx).reset_index(drop=True)
+window_fci["Day"] = window_fci.apply(
+    lambda r: f'{r["_span_start"].strftime("%a %m/%d")}–{r["date"].strftime("%a %m/%d")}'
+    if "_span_start" in window_fci.columns and pd.notna(r.get("_span_start"))
+    else r["date"].strftime("%a %m/%d"),
+    axis=1,
+)
 
 window_loc = loc_df[(loc_df["date"] >= window_start) & (loc_df["date"] <= last_date)]
 window_w = window_loc["head"] * window_loc["avg_weight"]
@@ -756,9 +781,10 @@ with st.container(key="wm-window"):
         use_container_width=True, hide_index=True, height=320,
     )
 st.caption(
-    "Each row is that single day's own weighted average (not rolling) — together they're the raw "
-    "material behind the rolling Current Index above. A blank row had no fresh same-day report "
-    "(weekend, or that location's next scheduled sale hadn't landed yet)."
+    "Each row is that day's own weighted average (not rolling) — together they're the raw material "
+    "behind the rolling Current Index above. Saturday/Sunday sales are combined into the following "
+    "Monday's row (CME's own convention, confirmed against their published files) rather than shown "
+    "separately. A blank row means that location's next scheduled sale hasn't landed yet."
 )
 
 

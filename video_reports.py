@@ -60,6 +60,15 @@ VIDEO_REPORT_SLUGS = {
     # report showing a "CATTLE DRIVE (NC)" line item. Frequently reports
     # zero qualifying feeder-steer rows (many weeks are slaughter cows /
     # replacement cattle only), same as CMS.
+    "WESTERN_VIDEO": 3242,  # Western Video Market Livestock Video/Internet Auction - Cottonwood, CA
+    # Also outside the region (CA), but same "don't judge by HQ state" logic
+    # as Cattle Drive -- its report covers regional sales (e.g. a Wyoming
+    # sale) under the same North Central/South Central headers. Uses a
+    # GENUINELY DIFFERENT report template than the other 5 (which all share
+    # Superior's exact layout) -- continuous per-delivery-month price lists
+    # under class/frame/grade section headers, not fixed 50lb brackets, and
+    # a delivery label that's often omitted on a row (continuation of the
+    # last one seen). Needs its own parser -- see parse_western_video_pdf().
 }
 
 REPORT_PDF_URL = "https://www.ams.usda.gov/mnreports/ams_{slug}.pdf"
@@ -229,13 +238,129 @@ def parse_video_pdf(pdf_bytes):
     return report_date, rows
 
 
+_WV_SECTION_RE = re.compile(
+    r"^(STEERS|HEIFERS|DAIRY STEERS|DAIRY HEIFERS|BEEF/DAIRY STEERS|BEEF/DAIRY HEIFERS) - "
+    r"(Medium and Large 1-2|Medium and Large 1|Large 1-2|Large 1|Medium 1-2|Medium 1) "
+    r"\(Per (?:Cwt|Head)",
+)
+_WV_DELIVERY_RE = re.compile(r"^(Current|[A-Za-z]{3}(?:-[A-Za-z]{3})?)\s+(\d.*)$")
+_WV_GRADE_MAP = {"Medium and Large 1": "1", "Medium and Large 1-2": "1-2"}
+
+
+def _wv_consume_value_group(tokens, i):
+    """
+    A "Wt Range"/"Price Range" column is either one bare number (the row's
+    own average, appearing twice -- e.g. "780 780") or a "low - high" range
+    followed by the average as a 4th token (e.g. "900 - 940 921"). Returns
+    (avg_value_str, next_index).
+    """
+    if i + 1 < len(tokens) and tokens[i + 1] == "-":
+        return tokens[i + 3], i + 4
+    return tokens[i + 1], i + 2
+
+
+def parse_western_video_pdf(pdf_bytes):
+    """
+    Western Video Market's report shares CME's/AMS's region convention
+    (North Central/South Central qualify, same 12-state coverage as every
+    other video report) but is otherwise a different template from
+    Superior's -- see the VIDEO_REPORT_SLUGS comment for why. Continuous
+    per-delivery-month price lists under class/frame/grade section headers
+    (e.g. "STEERS - Medium and Large 1 (Per Cwt / Est. Wt )"), plain text
+    (no fixed word-coordinate columns to exploit the way Superior's report
+    has), and a delivery-month label that's frequently omitted on a row --
+    it then continues whatever label the last row in this SAME section
+    carried (a flattened rowspan). Only "Current" delivery rows qualify
+    (CME's 14-day pickup rule, same as every other source).
+    """
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
+
+    report_date = _parse_report_date(full_text)
+
+    rows = []
+    cur_region = None
+    cur_class = cur_grade = None
+    cur_delivery = None  # carries forward across rows within one section
+
+    for line in full_text.splitlines():
+        stripped = line.strip()
+
+        if stripped in REGION_STATES or stripped in ("Southeast", "West", "North Central", "South Central"):
+            cur_region = stripped if stripped in QUALIFYING_REGIONS else None
+            cur_class = cur_grade = cur_delivery = None
+            continue
+
+        if stripped == "REPLACEMENT CATTLE":
+            cur_region = None  # only FEEDER CATTLE rows qualify; stop until next region header
+            continue
+
+        m = _WV_SECTION_RE.match(stripped)
+        if m:
+            cur_class, descriptor = m.group(1), m.group(2)
+            cur_grade = _WV_GRADE_MAP.get(descriptor)  # None for Large-only/Medium-only -- correctly excluded
+            cur_delivery = None
+            continue
+
+        if not cur_region or cur_class != "STEERS" or cur_grade not in TARGET_GRADES:
+            continue
+        if stripped.startswith("Delivery") or not stripped or stripped[0].isalpha() and not _WV_DELIVERY_RE.match(stripped):
+            continue
+
+        dm = _WV_DELIVERY_RE.match(stripped)
+        if dm:
+            cur_delivery = dm.group(1)
+            data = dm.group(2)
+        else:
+            data = stripped
+
+        if cur_delivery != "Current":
+            continue
+
+        tokens = data.split()
+        try:
+            head = int(tokens[0].replace(",", ""))
+            avg_wt_str, price_start = _wv_consume_value_group(tokens, 1)
+            avg_price_str, note_start = _wv_consume_value_group(tokens, price_start)
+            avg_wt = float(avg_wt_str.replace(",", ""))
+            avg_price = float(avg_price_str.replace(",", ""))
+        except (ValueError, IndexError):
+            continue
+
+        notes = " ".join(tokens[note_start:])
+        if "Mexican" in notes or "Origin" in notes:
+            continue
+
+        bracket = int(avg_wt // 50 * 50)
+        if bracket not in TARGET_BRACKETS:
+            continue
+
+        rows.append({
+            "class": "Steers",
+            "frame": "Medium and Large",
+            "muscle_grade": cur_grade,
+            "weight_break_low": bracket,
+            "head_count": head,
+            "avg_weight": avg_wt,
+            "avg_price": avg_price,
+            "final_ind": "Final",
+            "region": cur_region,
+        })
+
+    return report_date, rows
+
+
+_PARSERS = {"WESTERN_VIDEO": parse_western_video_pdf}
+
+
 def fetch_all_video_rows(verbose=True):
     """Returns {name: (report_date, rows)} for every configured video report."""
     out = {}
     for name in VIDEO_REPORT_SLUGS:
+        parser = _PARSERS.get(name, parse_video_pdf)
         try:
             pdf_bytes = fetch_video_pdf(name)
-            report_date, rows = parse_video_pdf(pdf_bytes)
+            report_date, rows = parser(pdf_bytes)
         except Exception as e:
             if verbose:
                 print(f"  [skip] {name} video report: {e}")

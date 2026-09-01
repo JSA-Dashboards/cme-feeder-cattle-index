@@ -592,8 +592,19 @@ with st.sidebar:
         "workbook_precursor": "JSA reconstruction from Ross's raw per-location sale data (the same source behind the published column) — validated within about $0.20/cwt of published values where they overlap.",
         "usda_mars": "JSA's own USDA MARS/Direct/Video estimate — CME hasn't published this date yet (usually a 1-3 business day lag), so this is a genuine forecast, not a stand-in for released data.",
     }
+    # Weekday-only for this range display: CME never publishes a file for
+    # Sat/Sun, so every weekend date falls back to the MARS estimate even in
+    # an otherwise fully-official stretch, scattering "usda_mars" rows across
+    # nearly two years and making a naive min/max span look like a much
+    # wider estimate window than the real one (which is just the trailing
+    # 1-3 unpublished business days). The underlying fci_df/chart still
+    # correctly includes those weekend estimate rows -- only this summary
+    # range ignores them.
     _segments = sorted(
-        (grp["date"].min(), grp["date"].max(), src) for src, grp in fci_df.groupby("source")
+        (wd["date"].min(), wd["date"].max(), src)
+        for src, grp in fci_df.groupby("source")
+        for wd in [grp[grp["date"].dt.weekday < 5]]
+        if not wd.empty
     )
     _seg_html = "".join(
         f'<b>{start.strftime("%b %d, %Y")} – {end.strftime("%b %d, %Y")}:</b><br>'

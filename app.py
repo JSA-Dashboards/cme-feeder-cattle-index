@@ -662,9 +662,19 @@ st.markdown("<hr style='margin:10px 0 18px;'>", unsafe_allow_html=True)
 
 # ── KPI Tiles ─────────────────────────────────────────────────────────────────
 
-current = fci_df.iloc[-1]["fci_value"]
-prev_point = fci_df.iloc[-2]["fci_value"] if len(fci_df) > 1 else None
-day_chg = current - prev_point if prev_point is not None else None
+def _round2(v):
+    return None if v is None or pd.isna(v) else round(v, 2)
+
+
+# Round each individual value to display precision BEFORE differencing, not
+# after -- otherwise a change tile can show e.g. -$0.10 while the two values
+# it's derived from display as $329.20 and $329.31 (an $0.11 difference by
+# eye), since -0.1003 and -0.11 round to different cents even though they're
+# both "correct" in isolation. Rounding first keeps every number on screen
+# self-consistent with the others.
+current = _round2(fci_df.iloc[-1]["fci_value"])
+prev_point = _round2(fci_df.iloc[-2]["fci_value"]) if len(fci_df) > 1 else None
+day_chg = _round2(current - prev_point) if prev_point is not None else None
 
 # "Current Index" is only accurate when the latest date is a real published
 # value (source == "workbook" or "cme_official"). Any other date is JSA's
@@ -684,20 +694,23 @@ current_label = (
     else f"FCI Estimate {_today.month}/{_today.day}/{_today.strftime('%y')}"
 )
 
-week_ago = value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=7))
-week_chg = current - week_ago if week_ago is not None else None
+week_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=7)))
+week_chg = _round2(current - week_ago) if week_ago is not None else None
 
-month_ago = value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=30))
-month_chg = current - month_ago if month_ago is not None else None
+month_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=30)))
+month_chg = _round2(current - month_ago) if month_ago is not None else None
 
-year_ago = value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=365))
-year_chg = current - year_ago if year_ago is not None else None
+year_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=365)))
+year_chg = _round2(current - year_ago) if year_ago is not None else None
+
+prev_date = fci_df.iloc[-2]["date"] if len(fci_df) > 1 else None
+prev_label = f"Previous Day's FCI ({prev_date.month}/{prev_date.day}/{prev_date.strftime('%y')})" if prev_date is not None else "Previous Day's FCI"
 
 cols = st.columns(4)
 with cols[0]:
-    st.markdown(tile(current_label, fmt_price(current)), unsafe_allow_html=True)
+    st.markdown(tile(current_label, fmt_price(current), delta_html(day_chg, " DoD")), unsafe_allow_html=True)
 with cols[1]:
-    st.markdown(tile("Day Change", fmt_price(day_chg), delta_html(day_chg)), unsafe_allow_html=True)
+    st.markdown(tile(prev_label, fmt_price(prev_point)), unsafe_allow_html=True)
 with cols[2]:
     st.markdown(tile("Week Change", fmt_price(week_chg), delta_html(week_chg)), unsafe_allow_html=True)
 with cols[3]:

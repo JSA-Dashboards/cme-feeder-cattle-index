@@ -275,6 +275,60 @@ def _load_mars_reconstruction():
     return fci, loc
 
 
+def _load_cme_official():
+    """
+    CME's own literal daily settlement-calculation files (see cme_ftp.py /
+    backfill_ftp.py), pulled from a public FTP archive -- not a
+    reconstruction or approximation of any kind, just the exact numbers CME
+    itself published. Wherever this covers a date, it should win over every
+    other source (workbook, precursor, MARS reconstruction) for that date.
+
+    CME publishes with a lag of roughly 1-3 business days, so this table
+    will always be missing the most recent day or two -- that gap is exactly
+    where the MARS/Direct/Video reconstruction in _load_mars_reconstruction()
+    still earns its keep: estimating what CME will say before it says it,
+    not re-deriving history CME has already told us.
+    """
+    fci_cols = ["date", "fci_value", "source", "same_day_price", "same_day_head", "same_day_avg_weight"]
+    loc_cols = ["date", "location", "state", "price", "head", "avg_weight", "fci_value", "basis", "source"]
+    empty = (pd.DataFrame(columns=fci_cols), pd.DataFrame(columns=loc_cols))
+    if not MARS_DB_PATH.exists():
+        return empty
+
+    conn = sqlite3.connect(MARS_DB_PATH)
+    try:
+        fci_raw = pd.read_sql(
+            "SELECT report_date AS date, fci_value, same_day_price, same_day_head, same_day_avg_weight "
+            "FROM cme_ftp_daily", conn,
+        )
+        loc_raw = pd.read_sql(
+            "SELECT report_date AS date, location, state, head_count, avg_weight, avg_price "
+            "FROM cme_ftp_locations", conn,
+        )
+    except pd.errors.DatabaseError:
+        return empty  # table doesn't exist yet -- backfill_ftp.py hasn't run
+    finally:
+        conn.close()
+
+    if fci_raw.empty:
+        return empty
+
+    fci = fci_raw.copy()
+    fci["date"] = pd.to_datetime(fci["date"])
+    fci["source"] = "cme_official"
+    fci = fci.sort_values("date").reset_index(drop=True)
+
+    loc = loc_raw.copy()
+    loc["date"] = pd.to_datetime(loc["date"])
+    loc = loc.rename(columns={"avg_price": "price", "head_count": "head"})
+    loc = loc.merge(fci[["date", "fci_value"]], on="date", how="left")
+    loc["basis"] = loc["price"] - loc["fci_value"]
+    loc["source"] = "cme_official"
+    loc = loc.dropna(subset=["fci_value"])[loc_cols]
+
+    return fci, loc
+
+
 WB_PRECURSOR_SHEET = "CME Feeder Cattle Index Values"
 BRACKET_SPECS = [
     (700, "1"), (750, "1"), (800, "1"), (850, "1"),
@@ -433,16 +487,23 @@ def _load_workbook_precursor(before_date):
 def load_data():
     """
     Priority order, earliest ground-truth-quality data wins for each date:
-      1. wb_fci (2024-01-01 - 2026-01-23): the workbook's published CME
-         values -- ground truth, never overridden.
-      2. precursor (2023-01-24 - 2023-12-31): recomputed from Ross's raw
+      1. cme_official: CME's own exact daily settlement files (cme_ftp.py) --
+         wins over every other source for any date it covers. Published
+         with a ~1-3 business day lag, so this always trails off a bit short
+         of today.
+      2. wb_fci (2024-01-01 - 2026-01-23): the workbook's published CME
+         values -- ground truth, kept as a fallback for any date the FTP
+         archive itself doesn't cover.
+      3. precursor (2023-01-24 - 2023-12-31): recomputed from Ross's raw
          per-location sale data using CME's own methodology -- validated to
          within about $0.20/cwt (median $0.003) of the published column
          where the two overlap, so treated as ground-truth-equivalent.
-      3. mars_before (before 2023-01-24) / mars_after (2026-01-24 onward):
-         JSA's own USDA MARS reconstruction, same weighted-average method,
-         looser accuracy (~$0.50-$9/cwt spot-checked) since it's a genuine
-         approximation rather than the real underlying sale data.
+      4. mars_before / mars_after: JSA's own USDA MARS reconstruction --
+         this is the ONLY genuine estimate left in this chain, now that
+         cme_official covers almost all already-published history. Its real
+         job is the trailing day or two CME hasn't published yet -- an
+         actual prediction, not a stand-in for data CME has already
+         released.
     """
     wb_fci, wb_loc = _load_workbook()
     wb_start, wb_end = wb_fci["date"].min(), wb_fci["date"].max()
@@ -456,12 +517,20 @@ def load_data():
     mars_after_fci = mars_fci[mars_fci["date"] > wb_end]
     mars_after_loc = mars_loc[mars_loc["date"] > wb_end]
 
-    fci = pd.concat(
+    fallback_fci = pd.concat(
         [mars_before_fci, precursor_fci, wb_fci, mars_after_fci], ignore_index=True
-    ).sort_values("date").reset_index(drop=True)
-    loc = pd.concat(
+    )
+    fallback_loc = pd.concat(
         [mars_before_loc, precursor_loc, wb_loc, mars_after_loc], ignore_index=True
-    ).sort_values("date").reset_index(drop=True)
+    )
+
+    official_fci, official_loc = _load_cme_official()
+    if not official_fci.empty:
+        fallback_fci = fallback_fci[~fallback_fci["date"].isin(official_fci["date"])]
+        fallback_loc = fallback_loc[~fallback_loc["date"].isin(official_fci["date"])]
+
+    fci = pd.concat([fallback_fci, official_fci], ignore_index=True).sort_values("date").reset_index(drop=True)
+    loc = pd.concat([fallback_loc, official_loc], ignore_index=True).sort_values("date").reset_index(drop=True)
 
     return fci, loc
 
@@ -518,9 +587,10 @@ with st.sidebar:
         st.rerun()
 
     _SOURCE_LABELS = {
+        "cme_official": "CME's own published daily settlement file — exact, not a reconstruction.",
         "workbook": "JSA-compiled workbook, CME's published index value.",
         "workbook_precursor": "JSA reconstruction from Ross's raw per-location sale data (the same source behind the published column) — validated within about $0.20/cwt of published values where they overlap.",
-        "usda_mars": "JSA reconstruction from USDA MARS sale-barn data (~60 locations), plus Direct/Video trade PDFs — spot-checked within roughly $0.50–$9/cwt of published values, not an official CME feed.",
+        "usda_mars": "JSA's own USDA MARS/Direct/Video estimate — CME hasn't published this date yet (usually a 1-3 business day lag), so this is a genuine forecast, not a stand-in for released data.",
     }
     _segments = sorted(
         (grp["date"].min(), grp["date"].max(), src) for src, grp in fci_df.groupby("source")
@@ -585,12 +655,12 @@ current = fci_df.iloc[-1]["fci_value"]
 prev_point = fci_df.iloc[-2]["fci_value"] if len(fci_df) > 1 else None
 day_chg = current - prev_point if prev_point is not None else None
 
-# "Current Index" is only accurate when the latest date is CME's actual
-# published value (source == "workbook"). Every other date is JSA's own
-# reconstruction -- label it as an estimate so it's never mistaken for the
-# real published figure, which is what actually confused the user here.
+# "Current Index" is only accurate when the latest date is a real published
+# value (source == "workbook" or "cme_official"). Any other date is JSA's
+# own reconstruction -- label it as an estimate so it's never mistaken for
+# the real published figure, which is what actually confused the user here.
 current_label = (
-    "Current Index" if fci_df.iloc[-1]["source"] == "workbook"
+    "Current Index" if fci_df.iloc[-1]["source"] in ("workbook", "cme_official")
     else f"FCI Estimate {last_date.month}/{last_date.day}/{last_date.strftime('%y')}"
 )
 
@@ -937,7 +1007,7 @@ else:
     # Estimate" on dates where that rolling value is CME's real published
     # number, not JSA's reconstruction.
     detail_rows = fci_df[fci_df["date"] == detail_date]
-    detail_is_published = not detail_rows.empty and detail_rows.iloc[0]["source"] == "workbook"
+    detail_is_published = not detail_rows.empty and detail_rows.iloc[0]["source"] in ("workbook", "cme_official")
     fci_label = "Published Index" if detail_is_published else "FCI Estimate"
     sd_price_d = detail_rows.iloc[0]["same_day_price"] if not detail_rows.empty else None
     sd_head_d = detail_rows.iloc[0]["same_day_head"] if not detail_rows.empty else None
@@ -1005,28 +1075,31 @@ else:
 with st.expander("📋  Raw Data Table"):
     tab_fci, tab_loc = st.tabs(["Index Values", "Location Sales"])
     with tab_fci:
+        # Plain string formatting instead of pandas Styler -- with 10+ years
+        # of history now in scope, these tables can exceed Styler's
+        # styler.render.max_elements cell cap (hit at ~280k cells testing
+        # the location table below), and no conditional coloring is applied
+        # here anyway, just number formatting.
         d = fci_df.copy()
         d["date"] = d["date"].dt.strftime("%Y-%m-%d")
+        d = d.rename(columns={"date": "Date", "fci_value": "FCI"}).sort_values("Date", ascending=False)
+        d["FCI"] = d["FCI"].map(lambda v: f"${v:.2f}" if pd.notna(v) else "—")
         with st.container(key="wm-raw-fci"):
-            st.dataframe(
-                d.rename(columns={"date": "Date", "fci_value": "FCI"}).sort_values("Date", ascending=False)
-                .style.format({"FCI": "${:.2f}"}),
-                use_container_width=True, hide_index=True, height=320,
-            )
+            st.dataframe(d, use_container_width=True, hide_index=True, height=320)
     with tab_loc:
         d = loc_filtered[["date", "location", "state", "head", "avg_weight", "price", "fci_value", "basis"]].copy()
         d["date"] = d["date"].dt.strftime("%Y-%m-%d")
+        d = d.rename(columns={
+            "date": "Date", "location": "Location", "state": "State", "head": "Head",
+            "avg_weight": "Weight", "price": "Price", "fci_value": "FCI", "basis": "Basis",
+        }).sort_values("Date", ascending=False)
+        d["Head"] = d["Head"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
+        d["Weight"] = d["Weight"].map(lambda v: f"{v:,.0f} lb" if pd.notna(v) else "—")
+        d["Price"] = d["Price"].map(lambda v: f"${v:.2f}" if pd.notna(v) else "—")
+        d["FCI"] = d["FCI"].map(lambda v: f"${v:.2f}" if pd.notna(v) else "—")
+        d["Basis"] = d["Basis"].map(lambda v: f"{v:+.2f}" if pd.notna(v) else "—")
         with st.container(key="wm-raw-loc"):
-            st.dataframe(
-                d.rename(columns={
-                    "date": "Date", "location": "Location", "state": "State", "head": "Head",
-                    "avg_weight": "Weight", "price": "Price", "fci_value": "FCI", "basis": "Basis",
-                }).sort_values("Date", ascending=False)
-                .style.format({
-                    "Head": "{:,.0f}", "Weight": "{:,.0f} lb", "Price": "${:.2f}", "FCI": "${:.2f}", "Basis": "{:+.2f}",
-                }, na_rep="—"),
-                use_container_width=True, hide_index=True, height=320,
-            )
+            st.dataframe(d, use_container_width=True, hide_index=True, height=320)
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────

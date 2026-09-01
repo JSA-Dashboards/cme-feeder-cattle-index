@@ -66,9 +66,13 @@ def get_auth():
 
 
 def init_db(conn):
+    # WAL mode lets other processes (Streamlit, backfill_ftp.py) keep
+    # reading the DB while this write transaction is open.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS mars_sales (
             report_date TEXT NOT NULL,
+            raw_date TEXT NOT NULL,
             slug_id INTEGER NOT NULL,
             location TEXT NOT NULL,
             state TEXT NOT NULL,
@@ -80,6 +84,11 @@ def init_db(conn):
             PRIMARY KEY (report_date, slug_id, weight_low, muscle_grade, avg_price, head_count)
         )
     """)
+    # Migration for DBs created before raw_date existed.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(mars_sales)").fetchall()}
+    if "raw_date" not in cols:
+        conn.execute("ALTER TABLE mars_sales ADD COLUMN raw_date TEXT")
+        conn.execute("UPDATE mars_sales SET raw_date = report_date WHERE raw_date IS NULL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fci_daily (
             report_date TEXT PRIMARY KEY,
@@ -148,13 +157,24 @@ def recompute_fci_daily(conn):
     given table size). Returns (n_written, first_date, last_date | None).
     """
     all_rows = conn.execute(
-        "SELECT report_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
+        "SELECT report_date, raw_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
     ).fetchall()
 
+    # by_day keys off the (possibly weekend-shifted) report_date -- this is
+    # what CME's own rule governs, and what the rolling 7-day window must use.
+    # by_raw_day keys off the TRUE calendar date of sale -- used only for the
+    # same-day snapshot below. Without this split, a Saturday-only auction
+    # (e.g. Ericson NE) that gets shifted to Monday for window purposes would
+    # also leak into Monday's own "Daily" figure, which CME's rule never
+    # actually requires (it only speaks to the rolling sample, not a same-day
+    # display -- that's our own addition mirroring Compass's "Daily: $X" line).
     by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
-    for report_date, head, wt, price in all_rows:
+    by_raw_day = {}  # raw_date -> list of (weight_lbs, dollars, head)
+    for report_date, raw_date, head, wt, price in all_rows:
         w = head * wt
-        by_day.setdefault(report_date, []).append((w, w * price, head))
+        entry = (w, w * price, head)
+        by_day.setdefault(report_date, []).append(entry)
+        by_raw_day.setdefault(raw_date, []).append(entry)
 
     all_dates = sorted(date.fromisoformat(d) for d in by_day)
     if not all_dates:
@@ -187,7 +207,7 @@ def recompute_fci_daily(conn):
         # (weekends etc.), same as the report showing no standalone row then.
         sd_den = sd_num = 0.0
         sd_head = 0
-        for w, dollars, head in by_day.get(d.isoformat(), []):
+        for w, dollars, head in by_raw_day.get(d.isoformat(), []):
             sd_den += w
             sd_num += dollars
             sd_head += head
@@ -233,9 +253,9 @@ def run_update(since: date, verbose=True):
             iso_date = shift_weekend_to_monday(sale_date).isoformat()
             conn.execute(
                 "INSERT OR IGNORE INTO mars_sales "
-                "(report_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (iso_date, slug_id, loc["city"] or loc["title"], loc["state"],
+                "(report_date, raw_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (iso_date, sale_date.isoformat(), slug_id, loc["city"] or loc["title"], loc["state"],
                  r["weight_break_low"], r["muscle_grade"],
                  r["head_count"], r["avg_weight"], r["avg_price"]),
             )
@@ -260,9 +280,9 @@ def run_update(since: date, verbose=True):
         for r in rows:
             conn.execute(
                 "INSERT OR IGNORE INTO mars_sales "
-                "(report_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (iso_date, DIRECT_REPORT_SLUGS[state], f"{state} DIRECT", state,
+                "(report_date, raw_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (iso_date, iso_date, DIRECT_REPORT_SLUGS[state], f"{state} DIRECT", state,
                  r["weight_break_low"], r["muscle_grade"],
                  r["head_count"], r["avg_weight"], r["avg_price"]),
             )
@@ -290,9 +310,9 @@ def run_update(since: date, verbose=True):
         for r in rows:
             conn.execute(
                 "INSERT OR IGNORE INTO mars_sales "
-                "(report_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (iso_date, slug_id, f"{name} VIDEO ({r['region']})", r["region"],
+                "(report_date, raw_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (iso_date, report_date_.isoformat(), slug_id, f"{name} VIDEO ({r['region']})", r["region"],
                  r["weight_break_low"], r["muscle_grade"],
                  r["head_count"], r["avg_weight"], r["avg_price"]),
             )

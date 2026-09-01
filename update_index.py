@@ -160,21 +160,26 @@ def recompute_fci_daily(conn):
         "SELECT report_date, raw_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
     ).fetchall()
 
-    # by_day keys off the (possibly weekend-shifted) report_date -- this is
-    # what CME's own rule governs, and what the rolling 7-day window must use.
-    # by_raw_day keys off the TRUE calendar date of sale -- used only for the
-    # same-day snapshot below. Without this split, a Saturday-only auction
-    # (e.g. Ericson NE) that gets shifted to Monday for window purposes would
-    # also leak into Monday's own "Daily" figure, which CME's rule never
-    # actually requires (it only speaks to the rolling sample, not a same-day
-    # display -- that's our own addition mirroring Compass's "Daily: $X" line).
+    # by_day keys off the (possibly weekend-shifted) report_date -- used for
+    # BOTH the rolling 7-day window and the same-day snapshot below.
+    #
+    # An earlier version of this function used raw_date (the true calendar
+    # sale date) for the same-day snapshot instead, on the theory that a
+    # Saturday-only auction (e.g. Ericson NE) shouldn't leak into the
+    # following Monday's "Daily" figure. That was wrong -- confirmed
+    # directly against CME's own official daily FTP files (see cme_ftp.py):
+    # a Monday file's own DAILY TOTALS line consistently equals that
+    # Monday's own rows PLUS the preceding Saturday's, matching CME's stated
+    # rule ("Saturday and Sunday sales... as if... occurred on Monday")
+    # literally rather than just for the rolling window. raw_date is still
+    # tracked and used for per-row display (e.g. the Sale Locations table,
+    # cme_ftp_locations) -- CME's own files likewise keep a weekend row's
+    # true date visible per-location while still folding its total into the
+    # following business day's combined figure.
     by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
-    by_raw_day = {}  # raw_date -> list of (weight_lbs, dollars, head)
     for report_date, raw_date, head, wt, price in all_rows:
         w = head * wt
-        entry = (w, w * price, head)
-        by_day.setdefault(report_date, []).append(entry)
-        by_raw_day.setdefault(raw_date, []).append(entry)
+        by_day.setdefault(report_date, []).append((w, w * price, head))
 
     all_dates = sorted(date.fromisoformat(d) for d in by_day)
     if not all_dates:
@@ -207,7 +212,7 @@ def recompute_fci_daily(conn):
         # (weekends etc.), same as the report showing no standalone row then.
         sd_den = sd_num = 0.0
         sd_head = 0
-        for w, dollars, head in by_raw_day.get(d.isoformat(), []):
+        for w, dollars, head in by_day.get(d.isoformat(), []):
             sd_den += w
             sd_num += dollars
             sd_head += head

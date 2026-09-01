@@ -670,9 +670,18 @@ day_chg = current - prev_point if prev_point is not None else None
 # value (source == "workbook" or "cme_official"). Any other date is JSA's
 # own reconstruction -- label it as an estimate so it's never mistaken for
 # the real published figure, which is what actually confused the user here.
+#
+# The estimate is dated to TODAY, not last_date. If no source has reported
+# anything yet today, last_date still trails behind (e.g. a Tuesday morning
+# before any Tuesday auction/direct/video report has posted) -- but the
+# figure itself is still our current best guess FOR today (a no-change
+# carry-forward, same logic as compute_forecast's own naive-persistence
+# model), so the label should say today's date, not the date of the data
+# it's carried forward from.
+_today = datetime.now()
 current_label = (
     "Current Index" if fci_df.iloc[-1]["source"] in ("workbook", "cme_official")
-    else f"FCI Estimate {last_date.month}/{last_date.day}/{last_date.strftime('%y')}"
+    else f"FCI Estimate {_today.month}/{_today.day}/{_today.strftime('%y')}"
 )
 
 week_ago = value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=7))

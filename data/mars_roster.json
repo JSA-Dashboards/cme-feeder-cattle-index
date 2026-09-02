@@ -496,5 +496,11 @@
     "title": "Oklahoma National Stockyards Feeder Cattle - Oklahoma City, OK",
     "state": "OK",
     "city": "Oklahoma City"
+  },
+  {
+    "slug_id": 1773,
+    "title": "Miles City Livestock Commission Auction - Miles City, MT",
+    "state": "MT",
+    "city": "Miles City"
   }
 ]

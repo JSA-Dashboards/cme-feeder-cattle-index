@@ -703,14 +703,29 @@ month_chg = _round2(current - month_ago) if month_ago is not None else None
 year_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=365)))
 year_chg = _round2(current - year_ago) if year_ago is not None else None
 
-prev_date = fci_df.iloc[-2]["date"] if len(fci_df) > 1 else None
-prev_label = f"Previous Day's FCI ({prev_date.month}/{prev_date.day}/{prev_date.strftime('%y')})" if prev_date is not None else "Previous Day's FCI"
+# Labeled as TODAY minus one calendar day, not the date of whichever row
+# prev_point actually comes from -- same carry-forward convention as
+# current_label above. Once CME actually publishes that date, the label and
+# the underlying data date will naturally line up; until then this reads
+# "yesterday" even if the value shown is itself carried forward further back.
+_yesterday = _today - timedelta(days=1)
+prev_label = f"Previous Day's FCI ({_yesterday.month}/{_yesterday.day}/{_yesterday.strftime('%y')})"
+
+# CME's own actual day-over-day change: the last two dates CME has published
+# (source == "cme_official"), independent of whatever current/prev_point are
+# showing above (which can mix an estimate with an official value, e.g. our
+# 9/1 estimate vs. CME's 8/31 actual). This is always a real-vs-real
+# comparison, never mixed with JSA's own estimate.
+official_rows = fci_df[fci_df["source"] == "cme_official"]
+cme_actual_chg = None
+if len(official_rows) > 1:
+    cme_actual_chg = _round2(official_rows.iloc[-1]["fci_value"] - official_rows.iloc[-2]["fci_value"])
 
 cols = st.columns(4)
 with cols[0]:
     st.markdown(tile(current_label, fmt_price(current), delta_html(day_chg, " DoD")), unsafe_allow_html=True)
 with cols[1]:
-    st.markdown(tile(prev_label, fmt_price(prev_point)), unsafe_allow_html=True)
+    st.markdown(tile(prev_label, fmt_price(prev_point), delta_html(cme_actual_chg, " CME DoD")), unsafe_allow_html=True)
 with cols[2]:
     st.markdown(tile("Week Change", fmt_price(week_chg), delta_html(week_chg)), unsafe_allow_html=True)
 with cols[3]:

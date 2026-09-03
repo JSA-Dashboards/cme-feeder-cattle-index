@@ -38,6 +38,7 @@ https://mymarketnews.ams.usda.gov/mymarketnews-api).
 import argparse
 import json
 import os
+import re
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -56,6 +57,41 @@ MARS_BASE = "https://marsapi.ams.usda.gov/services/v1.2"
 TARGET_GRADES = {"1", "1-2"}
 TARGET_BRACKETS = {700, 750, 800, 850}
 CONTINUATION_START = date(2026, 1, 24)  # day after the workbook's last date
+
+_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_SOLD_ON_RE = re.compile(
+    r"\bsold\s+(?:on\s+)?(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b"
+)
+
+
+def detect_final_sale_day(report_date: date, narrative: str | None) -> date:
+    """
+    CME's rule: a multi-day sale without separate per-day reports must be
+    attributed to its FINAL day, not whichever day USDA's own report_date
+    field happens to carry. USDA's report_begin_date/report_end_date fields
+    do NOT reliably reflect this -- confirmed on a real report (El Reno OK,
+    9/1/26) where both fields said "09/01" (Tuesday) despite the report's
+    own narrative explicitly describing sales on both Tuesday AND
+    Wednesday. Detects this from the narrative text itself: any "sold
+    [on] <weekday>" mention naming a day LATER in the week than
+    report_date's own weekday shifts the effective date to that later day.
+
+    Validated empirically before trusting this broadly: checked El Reno's
+    own narrative across 9 weeks (this pattern correctly fired on exactly
+    the 1 week it should have, not the other 8) and spot-checked ~15 other
+    varied locations across ~90 reports with zero false positives -- "sold"
+    + a weekday name earlier in (or equal to) the week never triggers,
+    only an explicit later-day mention does.
+    """
+    if not narrative:
+        return report_date
+    own_wd = report_date.weekday()
+    mentions = _SOLD_ON_RE.findall(narrative)
+    later = [m for m in mentions if _WEEKDAYS.index(m) > own_wd]
+    if not later:
+        return report_date
+    latest_wd = max(_WEEKDAYS.index(m) for m in later)
+    return report_date + timedelta(days=latest_wd - own_wd)
 
 
 def get_auth():
@@ -255,6 +291,13 @@ def run_update(since: date, verbose=True):
             rd = r["report_date"]  # MM/DD/YYYY
             m, d, y = rd.split("/")
             sale_date = date(int(y), int(m), int(d))
+            # USDA's own report_date can understate a multi-day sale's true
+            # final day (confirmed: report_begin_date/report_end_date both
+            # said "Tuesday" for a report whose own narrative described
+            # sales on both Tuesday AND Wednesday) -- correct to the real
+            # final day before any weekend-shift, since raw_date's whole
+            # purpose is the TRUE calendar date, not USDA's own label.
+            sale_date = detect_final_sale_day(sale_date, r.get("report_narrative"))
             iso_date = shift_weekend_to_monday(sale_date).isoformat()
             conn.execute(
                 "INSERT OR IGNORE INTO mars_sales "

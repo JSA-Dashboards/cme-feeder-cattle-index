@@ -1,10 +1,31 @@
-import sqlite3
+import os
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import openpyxl
 from pathlib import Path
 from datetime import datetime, timedelta
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# On Streamlit Community Cloud, secrets live in st.secrets rather than a
+# local .env file -- forward anything relevant into os.environ so
+# snowflake_db.py (which only reads via os.environ/os.getenv) sees them the
+# same way whether running locally or deployed. Mirrors the pattern already
+# proven for basis-tracker-streamlit/river-fob-portal.
+try:
+    for _secret_key in (
+        "USE_SNOWFLAKE", "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD",
+        "SNOWFLAKE_ROLE", "SNOWFLAKE_WAREHOUSE", "SNOWFLAKE_DATABASE", "SNOWFLAKE_SCHEMA",
+    ):
+        if _secret_key in st.secrets and not os.environ.get(_secret_key):
+            os.environ[_secret_key] = str(st.secrets[_secret_key])
+except Exception:
+    pass  # st.secrets not available (no secrets.toml locally) -- fine, .env already loaded above
+
+import snowflake_db as db
 
 FORECAST_HORIZON_DAYS = 10  # business days
 FORECAST_CI = 0.80  # 80% prediction interval
@@ -233,15 +254,15 @@ def _load_mars_reconstruction():
     """
     fci_cols = ["date", "fci_value", "source", "same_day_price", "same_day_head", "same_day_avg_weight"]
     loc_cols = ["date", "location", "state", "price", "head", "avg_weight", "fci_value", "basis", "source"]
-    if not MARS_DB_PATH.exists():
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
         return pd.DataFrame(columns=fci_cols), pd.DataFrame(columns=loc_cols)
 
-    conn = sqlite3.connect(MARS_DB_PATH)
-    fci_raw = pd.read_sql(
+    conn = db.get_conn()
+    fci_raw = db.read_sql_lower(
         "SELECT report_date AS date, fci_value, same_day_price, same_day_head, same_day_avg_weight "
         "FROM fci_daily", conn,
     )
-    sales = pd.read_sql(
+    sales = db.read_sql_lower(
         "SELECT report_date AS date, location, state, weight_low, head_count, avg_weight, avg_price "
         "FROM mars_sales", conn,
     )
@@ -292,16 +313,16 @@ def _load_cme_official():
     fci_cols = ["date", "fci_value", "source", "same_day_price", "same_day_head", "same_day_avg_weight"]
     loc_cols = ["date", "location", "state", "price", "head", "avg_weight", "fci_value", "basis", "source"]
     empty = (pd.DataFrame(columns=fci_cols), pd.DataFrame(columns=loc_cols))
-    if not MARS_DB_PATH.exists():
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
         return empty
 
-    conn = sqlite3.connect(MARS_DB_PATH)
+    conn = db.get_conn()
     try:
-        fci_raw = pd.read_sql(
+        fci_raw = db.read_sql_lower(
             "SELECT report_date AS date, fci_value, same_day_price, same_day_head, same_day_avg_weight "
             "FROM cme_ftp_daily", conn,
         )
-        loc_raw = pd.read_sql(
+        loc_raw = db.read_sql_lower(
             "SELECT report_date AS date, location, state, head_count, avg_weight, avg_price "
             "FROM cme_ftp_locations", conn,
         )

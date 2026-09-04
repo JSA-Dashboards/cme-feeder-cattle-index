@@ -7,12 +7,16 @@ safe to re-run or resume.
     python backfill_ftp.py --start 2015-01-01 --end 2026-08-31
 """
 import argparse
-import sqlite3
 import time
 from datetime import date, datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import cme_ftp
+import snowflake_db as db
 
 DB_PATH = Path(__file__).parent / "data" / "mars_history.db"
 # Confirmed empirically: a burst of concurrent connections trips a temporary
@@ -33,11 +37,13 @@ def main():
     start = datetime.strptime(args.start, "%Y-%m-%d").date()
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else date.today()
 
-    conn = sqlite3.connect(DB_PATH)
-    # WAL mode lets Streamlit keep reading the DB while this long-running
-    # backfill writes to it -- without it, sqlite's default rollback-journal
-    # locking blocks reads for the entire run once any write is pending.
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = db.get_conn()
+    if not db.use_snowflake():
+        # WAL mode lets Streamlit keep reading the DB while this long-running
+        # backfill writes to it -- without it, sqlite's default
+        # rollback-journal locking blocks reads for the entire run once any
+        # write is pending.
+        conn.execute("PRAGMA journal_mode=WAL")
     cme_ftp.init_official_tables(conn)
 
     dates = list(cme_ftp.daterange(start, end))
@@ -74,28 +80,32 @@ def main():
             continue
         daily = parsed["daily"] or {}
         seven = parsed["seven_day"] or {}
-        conn.execute(
-            "INSERT OR REPLACE INTO cme_ftp_daily "
-            "(report_date, fci_value, reported_change, n_locations, total_head, "
-            "same_day_price, same_day_head, same_day_avg_weight) VALUES (?,?,?,?,?,?,?,?)",
+        db.merge_replace(
+            conn, "cme_ftp_daily",
+            ["report_date", "fci_value", "reported_change", "n_locations", "total_head",
+             "same_day_price", "same_day_head", "same_day_avg_weight"],
             (parsed["date"], parsed["reported_index"], parsed["reported_change"],
              len(parsed["locations"]), seven.get("head"),
              daily.get("avg_price"), daily.get("head"), daily.get("avg_weight")),
+            ["report_date"],
         )
         for loc in parsed["locations"]:
-            conn.execute(
-                "INSERT OR REPLACE INTO cme_ftp_locations "
-                "(report_date, location, state, head_count, avg_weight, avg_price) VALUES (?,?,?,?,?,?)",
+            db.merge_replace(
+                conn, "cme_ftp_locations",
+                ["report_date", "location", "state", "head_count", "avg_weight", "avg_price"],
                 (loc["raw_date"], loc["location"], loc["state"], loc["head"],
                  loc["avg_weight"], loc["avg_price"]),
+                ["report_date", "location"],
             )
         ingested += 1
         if ingested % 50 == 0:
             conn.commit()
 
     conn.commit()
-    n_rows = conn.execute("SELECT COUNT(*) FROM cme_ftp_daily").fetchone()[0]
-    first_last = conn.execute("SELECT MIN(report_date), MAX(report_date) FROM cme_ftp_daily").fetchone()
+    cur = conn.cursor()
+    n_rows = cur.execute("SELECT COUNT(*) FROM cme_ftp_daily").fetchone()[0]
+    first_last = cur.execute("SELECT MIN(report_date), MAX(report_date) FROM cme_ftp_daily").fetchone()
+    first_last = (db.iso(first_last[0]), db.iso(first_last[1]))
     conn.close()
 
     elapsed = time.time() - t0

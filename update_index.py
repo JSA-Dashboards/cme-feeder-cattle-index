@@ -39,12 +39,15 @@ import argparse
 import json
 import os
 import re
-import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 
+load_dotenv()
+
+import snowflake_db as db
 from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
 from video_reports import VIDEO_REPORT_SLUGS, fetch_all_video_rows
 
@@ -102,6 +105,11 @@ def get_auth():
 
 
 def init_db(conn):
+    # Schema lives in snowflake/01_schema.sql + a one-time migration, not
+    # provisioned by the app at runtime -- same convention as
+    # basis-tracker-streamlit's database.py.
+    if db.use_snowflake():
+        return
     # WAL mode lets other processes (Streamlit, backfill_ftp.py) keep
     # reading the DB while this write transaction is open.
     conn.execute("PRAGMA journal_mode=WAL")
@@ -192,9 +200,10 @@ def recompute_fci_daily(conn):
     this is NOT limited to a recently-affected date range -- it's cheap
     given table size). Returns (n_written, first_date, last_date | None).
     """
-    all_rows = conn.execute(
+    all_rows = conn.cursor().execute(
         "SELECT report_date, raw_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
     ).fetchall()
+    all_rows = [db.iso_row(r) for r in all_rows]
 
     # by_day keys off the (possibly weekend-shifted) report_date -- used for
     # BOTH the rolling 7-day window and the same-day snapshot below.
@@ -219,11 +228,11 @@ def recompute_fci_daily(conn):
 
     all_dates = sorted(date.fromisoformat(d) for d in by_day)
     if not all_dates:
-        conn.execute("DELETE FROM fci_daily")
+        db.truncate(conn, "fci_daily")
         conn.commit()
         return 0, None, None
     first_date, last_date = all_dates[0], all_dates[-1]
-    conn.execute("DELETE FROM fci_daily")
+    db.truncate(conn, "fci_daily")
 
     n_written = 0
     d = first_date
@@ -256,10 +265,10 @@ def recompute_fci_daily(conn):
         sd_avg_weight = (sd_den / sd_head) if sd_head > 0 else None
 
         if den > 0:
-            conn.execute(
+            conn.cursor().execute(
                 "INSERT INTO fci_daily "
                 "(report_date, fci_value, n_locations, total_head, same_day_price, same_day_head, same_day_avg_weight) "
-                "VALUES (?,?,?,?,?,?,?)",
+                f"VALUES ({db.placeholders(7)})",
                 (d.isoformat(), num / den, n_locs, total_head, sd_price, sd_head or None, sd_avg_weight),
             )
             n_written += 1
@@ -274,7 +283,7 @@ def run_update(since: date, verbose=True):
     until = date.today()
     since_str, until_str = mdY(since), mdY(until)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = db.get_conn()
     init_db(conn)
 
     total_inserted = 0
@@ -299,14 +308,13 @@ def run_update(since: date, verbose=True):
             # purpose is the TRUE calendar date, not USDA's own label.
             sale_date = detect_final_sale_day(sale_date, r.get("report_narrative"))
             iso_date = shift_weekend_to_monday(sale_date).isoformat()
-            conn.execute(
-                "INSERT OR IGNORE INTO mars_sales "
-                "(report_date, raw_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (iso_date, sale_date.isoformat(), slug_id, loc["city"] or loc["title"], loc["state"],
-                 r["weight_break_low"], r["muscle_grade"],
-                 r["head_count"], r["avg_weight"], r["avg_price"]),
-            )
+            cols = ["report_date", "raw_date", "slug_id", "location", "state",
+                    "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
+            values = (iso_date, sale_date.isoformat(), slug_id, loc["city"] or loc["title"], loc["state"],
+                      r["weight_break_low"], r["muscle_grade"],
+                      r["head_count"], r["avg_weight"], r["avg_price"])
+            db.merge_ignore(conn, "mars_sales", cols, values,
+                             ["report_date", "slug_id", "weight_low", "muscle_grade", "avg_price", "head_count"])
         total_inserted += len(qrows)
         if verbose and qrows:
             print(f"  {loc['state']:>2} {loc['city'] or loc['title']:<28} +{len(qrows)} rows")
@@ -325,15 +333,14 @@ def run_update(since: date, verbose=True):
         if report_date_ is None:
             continue
         iso_date = report_date_.isoformat()
+        cols = ["report_date", "raw_date", "slug_id", "location", "state",
+                "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
+        key_cols = ["report_date", "slug_id", "weight_low", "muscle_grade", "avg_price", "head_count"]
         for r in rows:
-            conn.execute(
-                "INSERT OR IGNORE INTO mars_sales "
-                "(report_date, raw_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (iso_date, iso_date, DIRECT_REPORT_SLUGS[state], f"{state} DIRECT", state,
-                 r["weight_break_low"], r["muscle_grade"],
-                 r["head_count"], r["avg_weight"], r["avg_price"]),
-            )
+            values = (iso_date, iso_date, DIRECT_REPORT_SLUGS[state], f"{state} DIRECT", state,
+                      r["weight_break_low"], r["muscle_grade"],
+                      r["head_count"], r["avg_weight"], r["avg_price"])
+            db.merge_ignore(conn, "mars_sales", cols, values, key_cols)
         direct_inserted += len(rows)
     total_inserted += direct_inserted
 
@@ -355,15 +362,14 @@ def run_update(since: date, verbose=True):
             continue
         iso_date = shift_weekend_to_monday(report_date_).isoformat()
         slug_id = VIDEO_REPORT_SLUGS[name]
+        cols = ["report_date", "raw_date", "slug_id", "location", "state",
+                "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
+        key_cols = ["report_date", "slug_id", "weight_low", "muscle_grade", "avg_price", "head_count"]
         for r in rows:
-            conn.execute(
-                "INSERT OR IGNORE INTO mars_sales "
-                "(report_date, raw_date, slug_id, location, state, weight_low, muscle_grade, head_count, avg_weight, avg_price) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (iso_date, report_date_.isoformat(), slug_id, f"{name} VIDEO ({r['region']})", r["region"],
-                 r["weight_break_low"], r["muscle_grade"],
-                 r["head_count"], r["avg_weight"], r["avg_price"]),
-            )
+            values = (iso_date, report_date_.isoformat(), slug_id, f"{name} VIDEO ({r['region']})", r["region"],
+                      r["weight_break_low"], r["muscle_grade"],
+                      r["head_count"], r["avg_weight"], r["avg_price"])
+            db.merge_ignore(conn, "mars_sales", cols, values, key_cols)
         video_inserted += len(rows)
     total_inserted += video_inserted
     conn.commit()
@@ -376,12 +382,12 @@ def run_update(since: date, verbose=True):
               f"{len(direct_results)} states, {video_inserted} video-auction rows across {len(video_results)} reports.")
         print(f"Recomputed FCI (7-day rolling window) for {n_written} dates "
               f"({first_date or '—'} to {last_date or '—'}).")
-        recent = conn.execute(
+        recent = conn.cursor().execute(
             "SELECT report_date, fci_value, n_locations FROM fci_daily ORDER BY report_date DESC LIMIT 8"
         ).fetchall()
         print("\nMost recent reconstructed index values:")
         for d, v, n in recent:
-            print(f"  {d}  ${v:.2f}   ({n} locations)")
+            print(f"  {db.iso(d)}  ${v:.2f}   ({n} locations)")
     conn.close()
 
 
@@ -394,11 +400,11 @@ if __name__ == "__main__":
 
     if args.since:
         since = date.fromisoformat(args.since)
-    elif DB_PATH.exists():
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute("SELECT MAX(report_date) FROM fci_daily").fetchone()
+    elif db.use_snowflake() or DB_PATH.exists():
+        conn = db.get_conn()
+        row = conn.cursor().execute("SELECT MAX(report_date) FROM fci_daily").fetchone()
         conn.close()
-        since = date.fromisoformat(row[0]) - timedelta(days=7) if row and row[0] else CONTINUATION_START
+        since = date.fromisoformat(db.iso(row[0])) - timedelta(days=7) if row and row[0] else CONTINUATION_START
     else:
         since = CONTINUATION_START
 

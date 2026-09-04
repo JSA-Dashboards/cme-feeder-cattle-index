@@ -4,3 +4,5 @@ plotly>=5.18.0
 openpyxl>=3.1.0
 requests>=2.31.0
 pdfplumber>=0.11.0
+python-dotenv>=1.0.1
+snowflake-connector-python>=3.12  # DB backend when USE_SNOWFLAKE=1

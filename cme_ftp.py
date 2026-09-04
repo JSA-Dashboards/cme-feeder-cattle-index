@@ -50,6 +50,8 @@ import re
 import zlib
 from datetime import date, timedelta
 
+import snowflake_db as db
+
 FTP_HOST = "ftp.cmegroup.com"
 FTP_BASE = "cash_settled_commodity_index_prices/daily_data/feeder_cattle"
 
@@ -234,6 +236,9 @@ def init_official_tables(conn):
     numbers -- once a date has a row here, app.py should prefer it over any
     estimate for the same date rather than merge the two.
     """
+    # Schema lives in snowflake/01_schema.sql, not provisioned at runtime.
+    if db.use_snowflake():
+        return
     # WAL mode lets Streamlit (or anything else) keep reading the DB while
     # a long-running backfill or the daily scheduled update writes to it --
     # sqlite's default rollback-journal locking otherwise blocks all reads
@@ -286,24 +291,26 @@ def ingest_range(conn, start: date, end: date, verbose=True):
             continue
         daily = parsed["daily"] or {}
         seven = parsed["seven_day"] or {}
-        conn.execute(
-            "INSERT OR REPLACE INTO cme_ftp_daily "
-            "(report_date, fci_value, reported_change, n_locations, total_head, "
-            "same_day_price, same_day_head, same_day_avg_weight) VALUES (?,?,?,?,?,?,?,?)",
+        db.merge_replace(
+            conn, "cme_ftp_daily",
+            ["report_date", "fci_value", "reported_change", "n_locations", "total_head",
+             "same_day_price", "same_day_head", "same_day_avg_weight"],
             (parsed["date"], parsed["reported_index"], parsed["reported_change"],
              len(parsed["locations"]), seven.get("head"),
              daily.get("avg_price"), daily.get("head"), daily.get("avg_weight")),
+            ["report_date"],
         )
         # Keyed by each row's own raw_date (which can differ from this
         # file's date -- a weekend carry-forward row keeps its true sale
-        # date), so INSERT OR REPLACE alone keeps re-ingestion idempotent
-        # without needing a delete-by-file-date pass first.
+        # date), so this upsert alone keeps re-ingestion idempotent without
+        # needing a delete-by-file-date pass first.
         for loc in parsed["locations"]:
-            conn.execute(
-                "INSERT OR REPLACE INTO cme_ftp_locations "
-                "(report_date, location, state, head_count, avg_weight, avg_price) VALUES (?,?,?,?,?,?)",
+            db.merge_replace(
+                conn, "cme_ftp_locations",
+                ["report_date", "location", "state", "head_count", "avg_weight", "avg_price"],
                 (loc["raw_date"], loc["location"], loc["state"], loc["head"],
                  loc["avg_weight"], loc["avg_price"]),
+                ["report_date", "location"],
             )
         ingested += 1
         if verbose and ingested % 50 == 0:

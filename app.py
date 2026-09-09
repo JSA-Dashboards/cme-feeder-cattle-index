@@ -1,8 +1,6 @@
 import os
 import streamlit as st
 import pandas as pd
-from pandas.tseries.holiday import USFederalHolidayCalendar
-from pandas.tseries.offsets import CustomBusinessDay
 import plotly.graph_objects as go
 import openpyxl
 from pathlib import Path
@@ -535,6 +533,39 @@ def _load_recon_index():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def _load_cme_index_dates():
+    """
+    Every date CME has actually filed an index for, straight from its own
+    file archive (3,000+ files back to 2015).
+
+    This replaces a USFederalHolidayCalendar, which was simply wrong about
+    this series. Measured over 2024-01-01..2026-09-04, CME published on 22 of
+    28 weekday federal holidays -- MLK, Presidents Day, Juneteenth, Columbus
+    Day, Veterans Day, New Year's Day, July 4 2025, and Labor Day in both
+    2024 and 2025. It skipped only 11 weekdays in that span, several of which
+    are not federal holidays at all (Dec 24, Dec 26, Dec 31, Jul 3 2025). The
+    real skip set is roughly Memorial Day, Independence Day, Thanksgiving and
+    the Christmas-New Year stretch, and it is not even consistent year to
+    year: Memorial Day 2024 was skipped, 2025 and 2026 were not.
+
+    No fixed rule reproduces that. CME's own history does, by construction.
+    """
+    empty = pd.DatetimeIndex([])
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return empty
+    conn = db.get_conn()
+    try:
+        df = db.read_sql_lower("SELECT report_date AS date FROM cme_ftp_daily", conn)
+    except Exception:
+        return empty
+    finally:
+        conn.close()
+    if df.empty:
+        return empty
+    return pd.DatetimeIndex(pd.to_datetime(df["date"])).sort_values()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_data():
     """
     Priority order, earliest ground-truth-quality data wins for each date:
@@ -741,7 +772,7 @@ def _mdy(d):
 # No single label satisfies every consumer: QST charts the same index against
 # what looks like the date it received each value, so CME's 9/3 index appears
 # there on a 9/8 bar. That is why both dates are shown rather than one.
-_CME_BDAY = CustomBusinessDay(calendar=USFederalHolidayCalendar())
+_CME_INDEX_DATES = _load_cme_index_dates()
 
 # Raw internal source strings are meaningless on screen, and without them there
 # is no way to tell a published CME value from a JSA estimate in the raw table.
@@ -753,10 +784,23 @@ _SOURCE_LABELS = {
 
 
 def _release_date(d):
-    """The date CME releases the index it filed under `d`."""
+    """
+    When CME releases the index it filed under `d`: the next date CME files
+    an index for, read off its own history rather than guessed from a holiday
+    calendar.
+
+    Past the end of that history there is nothing to read, so this falls back
+    to the next weekday. That is a guess, and it is the one place this column
+    can be wrong -- but it is the right guess for Labor Day, which CME filed
+    through in both 2024 and 2025.
+    """
     if d is None or pd.isna(d):
         return None
-    return pd.Timestamp(d) + _CME_BDAY
+    ts = pd.Timestamp(d)
+    i = _CME_INDEX_DATES.searchsorted(ts, side="right")
+    if i < len(_CME_INDEX_DATES):
+        return _CME_INDEX_DATES[i]
+    return ts + pd.offsets.BDay(1)
 
 
 
@@ -1288,15 +1332,19 @@ else:
     _pending = _sc[_sc["actual"].isna()]
     if _last_official is not None:
         _pending = _pending[_pending["date"] > _last_official]
-    # CME files an index only on business days -- verified against its own FTP
-    # archive, which holds files for 8/28, 8/31 and 9/1-9/4 but none at all for
-    # 9/5, 9/6 or 9/7 (weekend plus Labor Day). This reconstruction computes a
-    # value for every CALENDAR day, so without this filter those weekend and
-    # holiday carry-forwards show up as prints CME will never publish -- and
-    # under release-date labelling they collapse onto the same next business
-    # day, listing "Tue 09/08" three times over.
+    # Weekdays only. This reconstruction computes a value for every CALENDAR
+    # day, and CME never files one for a Saturday or Sunday, so the weekend
+    # carry-forwards are not prints anyone is waiting for.
+    #
+    # This deliberately does NOT exclude holidays. An earlier version filtered
+    # on a federal-holiday business-day calendar, which hid the 9/7/2026
+    # estimate as a Labor Day -- but CME filed an index on Labor Day in both
+    # 2024 and 2025 (see _load_cme_index_dates), so 9/7 is a print that is
+    # genuinely outstanding, not one CME declined to make. Showing a date CME
+    # later turns out to skip is the cheaper error: it drops out of this table
+    # on its own once CME's frontier moves past it.
     _pending = _pending[_pending["date"].map(
-        lambda d: _CME_BDAY.is_on_offset(pd.Timestamp(d)))]
+        lambda d: pd.Timestamp(d).weekday() < 5)]
 
     _c1, _c2 = st.columns(2)
     with _c1:

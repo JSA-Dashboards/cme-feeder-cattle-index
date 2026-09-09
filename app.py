@@ -1460,11 +1460,11 @@ if not _peers.empty:
     # the summary caption each want a different length -- and because "CIH"
     # must never go through .title(), which renders it "Cih".
     _SRC_LABELS = {
-        "CIH":     ("CIH FCI EST",     "CIH FCI Est Miss",     "CIH"),
-        "COMPASS": ("Compass FCI Est", "Compass FCI Est Miss", "Compass"),
+        "CIH":     ("CIH FCI EST",     "CIH FCI EST Miss",     "CIH"),
+        "COMPASS": ("Compass FCI EST", "Compass FCI EST Miss", "Compass"),
     }
     _labels = lambda src: _SRC_LABELS.get(
-        src, (f"{src.title()} FCI Est", f"{src.title()} FCI Est Miss", src.title()))
+        src, (f"{src.title()} FCI EST", f"{src.title()} FCI EST Miss", src.title()))
     _lbl = lambda src: _labels(src)[0]        # value column
     _miss_lbl = lambda src: _labels(src)[1]   # miss column
     _short = lambda src: _labels(src)[2]      # caption, where a full header is noise
@@ -1477,7 +1477,7 @@ if not _peers.empty:
     for _s in _srcs:
         _disp[_lbl(_s)] = _t[_s].map(_money)
     _disp["CME"] = _t["__cme"].map(_money)
-    _disp["JSA FCI Est Miss"] = (_t["__ours"] - _t["__cme"]).map(_delta)
+    _disp["JSA FCI EST Miss"] = (_t["__ours"] - _t["__cme"]).map(_delta)
     for _s in _srcs:
         _disp[_miss_lbl(_s)] = (_t[_s] - _t["__cme"]).map(_delta)
 

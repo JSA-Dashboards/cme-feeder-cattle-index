@@ -20,7 +20,7 @@ below is a pattern OBSERVED in CME's files. That is weaker evidence, which is
 why check_bucket_drift() exists.
 """
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import snowflake_db as db
 
@@ -72,12 +72,36 @@ _MIN_MATCHES = 5
 _AGREEMENT = 0.8
 
 
-def shifted_bucket_date(location, report_date_iso: str) -> str:
-    """report_date_iso moved by this location's bucketing correction, if any."""
+def _as_date(v) -> date:
+    """
+    Coerce whatever a backend hands back into a datetime.date.
+
+    The two backends disagree, and the disagreement is silent: SQLite has no
+    DATE type and returns the ISO TEXT it stored, while Snowflake's connector
+    returns a real datetime.date (pandas may present either as a Timestamp).
+    Assuming str here shipped a TypeError that only fired against Snowflake --
+    i.e. only in production -- and load_data() swallows the traceback and calls
+    st.stop(), so the entire page went blank rather than one panel. Normalise
+    at the boundary, for the same reason snowflake_db.iso() exists.
+    """
+    if isinstance(v, str):
+        return date.fromisoformat(v[:10])       # tolerate a datetime string
+    if isinstance(v, datetime):                 # also covers pandas.Timestamp
+        return v.date()
+    if isinstance(v, date):
+        return v
+    raise TypeError(f"cannot read {v!r} ({type(v).__name__}) as a date")
+
+
+def shifted_bucket_date(location, report_date) -> str:
+    """
+    report_date moved by this location's bucketing correction, if any, as an
+    ISO string. Accepts a str, date, datetime or pandas Timestamp -- see
+    _as_date() for why that matters.
+    """
     n = LOCATION_BUCKET_SHIFT_DAYS.get((location or "").strip().lower())
-    if not n:
-        return report_date_iso
-    return (date.fromisoformat(report_date_iso) + timedelta(days=n)).isoformat()
+    d = _as_date(report_date)
+    return (d + timedelta(days=n) if n else d).isoformat()
 
 
 def _norm(s: str) -> str:
@@ -130,7 +154,7 @@ def check_bucket_drift(conn, lookback_days=120):
             label = label or loc
             for rd2, head2, price2, _ in theirs[key]:
                 if head == head2 and abs(price - price2) < 0.015:
-                    deltas.append((date.fromisoformat(rd2) - date.fromisoformat(rd)).days)
+                    deltas.append((_as_date(rd2) - _as_date(rd)).days)
                     break
         if len(deltas) < _MIN_MATCHES:
             continue
@@ -159,3 +183,34 @@ def check_bucket_drift(conn, lookback_days=120):
                 f"like this and correcting it was 10x worse."
             )
     return warnings
+
+if __name__ == "__main__":
+    # Dependency-free self-check: `python bucketing.py`.
+    #
+    # Every type below is one a real backend hands over -- SQLite an ISO
+    # string, Snowflake a datetime.date, pandas a Timestamp. Taking str for
+    # granted here broke the deployed dashboard outright, because the only
+    # code path that reads Snowflake is production and the only path exercised
+    # locally is SQLite. Keep all four covered.
+    import pandas as _pd
+
+    _WED, _THU = "2026-09-02", "2026-09-03"
+    for _v in (_WED,                                  # sqlite: ISO text
+               date(2026, 9, 2),                      # snowflake: date
+               datetime(2026, 9, 2, 14, 30),          # datetime
+               _pd.Timestamp("2026-09-02"),           # pandas
+               "2026-09-02T00:00:00"):                # ISO datetime text
+        _got = shifted_bucket_date("Clovis", _v)
+        assert _got == _THU, f"Clovis {type(_v).__name__} -> {_got}, want {_THU}"
+        _got = shifted_bucket_date("Joplin", _v)      # unconfigured: no shift
+        assert _got == _WED, f"Joplin {type(_v).__name__} -> {_got}, want {_WED}"
+
+    # Case and surrounding whitespace must not decide whether a shift applies.
+    for _name in ("clovis", "CLOVIS", "  Clovis  "):
+        assert shifted_bucket_date(_name, _WED) == _THU, _name
+    # A missing location must not raise -- mars_sales allows it.
+    assert shifted_bucket_date(None, _WED) == _WED
+    assert shifted_bucket_date("", _WED) == _WED
+
+    print("bucketing self-check passed: %d configured shift(s), %d rejected"
+          % (len(LOCATION_BUCKET_SHIFT_DAYS), len(BUCKET_SHIFT_REJECTED)))

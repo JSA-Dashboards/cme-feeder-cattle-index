@@ -1387,11 +1387,11 @@ else:
             _p = _pending.sort_values("date", ascending=False).copy()
             _p["Index date"] = _p["date"].dt.strftime("%a %m/%d")
             _p["Prints"] = _p["date"].map(lambda d: _release_date(d).strftime("%m/%d"))
-            _p["Our estimate"] = _p["recon"].map(lambda v: f"${v:.2f}")
+            _p["JSA FCI EST"] = _p["recon"].map(lambda v: f"${v:.2f}")
             _p["Head"] = _p["total_head"].map(
                 lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
             with st.container(key="wm-pending"):
-                st.dataframe(_p[["Index date", "Prints", "Our estimate", "Head"]],
+                st.dataframe(_p[["Index date", "Prints", "JSA FCI EST", "Head"]],
                              use_container_width=True, hide_index=True, height=210)
             if _last_official is not None:
                 st.caption(
@@ -1408,11 +1408,11 @@ else:
         else:
             _s["err"] = _s["recon"] - _s["actual"]
             _s["Index date"] = _s["date"].dt.strftime("%m/%d")
-            _s["Ours"] = _s["recon"].map(lambda v: f"${v:.2f}")
+            _s["JSA FCI EST"] = _s["recon"].map(lambda v: f"${v:.2f}")
             _s["CME"] = _s["actual"].map(lambda v: f"${v:.2f}")
             _s["Miss"] = _s["err"].map(lambda v: f"{v:+.2f}")
             with st.container(key="wm-scored"):
-                st.dataframe(_s[["Index date", "Ours", "CME", "Miss"]],
+                st.dataframe(_s[["Index date", "JSA FCI EST", "CME", "Miss"]],
                              use_container_width=True, hide_index=True, height=210)
             # Dollar signs escaped: st.caption renders markdown, and a $...$
             # pair is LaTeX math there -- unescaped, "$0.38" and "$2" render as
@@ -1456,21 +1456,30 @@ if not _peers.empty:
     _t["__cme"] = _cme_s
     _t = _t.sort_index(ascending=False)
 
-    # .title() would render "CIH" as "Cih"; acronyms need an explicit label.
-    _SRC_LABELS = {"CIH": "CIH", "COMPASS": "Compass"}
-    _lbl = lambda src: _SRC_LABELS.get(src, src.title())
+    # Three labels per source, because the value column, the miss column and
+    # the summary caption each want a different length -- and because "CIH"
+    # must never go through .title(), which renders it "Cih".
+    _SRC_LABELS = {
+        "CIH":     ("CIH FCI EST",     "CIH FCI Est Miss",     "CIH"),
+        "COMPASS": ("Compass FCI Est", "Compass FCI Est Miss", "Compass"),
+    }
+    _labels = lambda src: _SRC_LABELS.get(
+        src, (f"{src.title()} FCI Est", f"{src.title()} FCI Est Miss", src.title()))
+    _lbl = lambda src: _labels(src)[0]        # value column
+    _miss_lbl = lambda src: _labels(src)[1]   # miss column
+    _short = lambda src: _labels(src)[2]      # caption, where a full header is noise
     _money = lambda v: f"${v:.2f}" if pd.notna(v) else "—"
     _delta = lambda v: f"{v:+.2f}" if pd.notna(v) else "—"
 
     _disp = pd.DataFrame(index=_t.index)
     _disp["Index date"] = _t.index.strftime("%a %m/%d")
-    _disp["Ours"] = _t["__ours"].map(_money)
+    _disp["JSA FCI EST"] = _t["__ours"].map(_money)
     for _s in _srcs:
         _disp[_lbl(_s)] = _t[_s].map(_money)
     _disp["CME"] = _t["__cme"].map(_money)
-    _disp["Miss ours"] = (_t["__ours"] - _t["__cme"]).map(_delta)
+    _disp["JSA FCI Est Miss"] = (_t["__ours"] - _t["__cme"]).map(_delta)
     for _s in _srcs:
-        _disp[f"Miss {_lbl(_s)}"] = (_t[_s] - _t["__cme"]).map(_delta)
+        _disp[_miss_lbl(_s)] = (_t[_s] - _t["__cme"]).map(_delta)
 
     with st.container(key="wm-peers"):
         st.dataframe(_disp, use_container_width=True, hide_index=True,
@@ -1484,11 +1493,11 @@ if not _peers.empty:
         _bits = []
         _o = (_scored["__ours"] - _scored["__cme"]).abs().dropna()
         if len(_o):
-            _bits.append(f"ours {_o.mean():.3f} ({len(_o)})")
+            _bits.append(f"JSA {_o.mean():.3f} ({len(_o)})")
         for _s in _srcs:
             _e = (_scored[_s] - _scored["__cme"]).abs().dropna()
             if len(_e):
-                _bits.append(f"{_lbl(_s)} {_e.mean():.3f} ({len(_e)})")
+                _bits.append(f"{_short(_s)} {_e.mean():.3f} ({len(_e)})")
         st.caption("Mean absolute miss, dates scored in brackets: " + " · ".join(_bits))
     else:
         st.caption("No date here has been printed by CME yet, so nobody is scored.")

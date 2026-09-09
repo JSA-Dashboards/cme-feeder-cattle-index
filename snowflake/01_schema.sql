@@ -31,8 +31,14 @@ CREATE TABLE IF NOT EXISTS mars_sales (
     head_count INTEGER NOT NULL,
     avg_weight FLOAT NOT NULL,
     avg_price FLOAT NOT NULL,
+    -- Date the source report was PUBLISHED, when that lags the sale
+    -- (video/internet auctions). NULL for auction and direct rows.
+    published_date DATE,
     PRIMARY KEY (report_date, slug_id, weight_low, muscle_grade, avg_price, head_count)
 );
+
+-- Migration for deployments created before published_date existed.
+ALTER TABLE mars_sales ADD COLUMN IF NOT EXISTS published_date DATE;
 
 -- Upsert (mirrors "INSERT OR REPLACE") -- CME's own exact daily settlement
 -- files (cme_ftp.py/backfill_ftp.py), wins over the estimate above for any

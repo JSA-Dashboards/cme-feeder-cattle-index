@@ -1,6 +1,8 @@
 import os
 import streamlit as st
 import pandas as pd
+from pandas.tseries.holiday import USFederalHolidayCalendar
+from pandas.tseries.offsets import CustomBusinessDay
 import plotly.graph_objects as go
 import openpyxl
 from pathlib import Path
@@ -505,6 +507,34 @@ def _load_workbook_precursor(before_date):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def _load_recon_index():
+    """
+    JSA's own reconstruction for EVERY date, including dates CME has since
+    published. load_data() deliberately drops those (CME's own value wins for
+    display, and rightly so), but scoring the forecast needs BOTH numbers for
+    the same date -- otherwise there is no way to see whether the estimates
+    were any good.
+    """
+    empty = pd.DataFrame(columns=["date", "recon", "total_head"])
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return empty
+    conn = db.get_conn()
+    try:
+        df = db.read_sql_lower(
+            "SELECT report_date AS date, fci_value, total_head FROM fci_daily", conn
+        )
+    except Exception:
+        return empty
+    finally:
+        conn.close()
+    if df.empty:
+        return empty
+    df["date"] = pd.to_datetime(df["date"])
+    return (df.rename(columns={"fci_value": "recon"})
+              .sort_values("date").reset_index(drop=True))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_data():
     """
     Priority order, earliest ground-truth-quality data wins for each date:
@@ -687,6 +717,49 @@ def _round2(v):
     return None if v is None or pd.isna(v) else round(v, 2)
 
 
+def _mdy(d):
+    """M/D/YY, matching the tile style CIH and CME's own sheets use."""
+    return "%d/%d/%s" % (d.month, d.day, d.strftime("%y"))
+
+
+# CME FILES an index under the date its sales run through, then RELEASES it the
+# following business day. Those two differ by more than a day whenever a holiday
+# intervenes: the 9/4/2026 file was released 9/8, because 9/5-9/6 were the
+# weekend and 9/7 was Labor Day.
+#
+# Everything user-facing on this page is labelled by CME's own INDEX date -- the
+# last sale day in the window, which is how CME names its files -- with the
+# release date shown alongside as context.
+#
+# Release-date labelling was tried on 2026-09-09 and reverted the same day. It
+# reads more naturally in isolation, being the print people wait for, but CIH's
+# daily sheet -- which this desk checks against every morning -- is dated by
+# INDEX date. Release labelling put every number here one business day ahead of
+# that benchmark, turning each comparison into a mental subtraction, and it also
+# disagreed with CME's filenames and the raw data table.
+#
+# No single label satisfies every consumer: QST charts the same index against
+# what looks like the date it received each value, so CME's 9/3 index appears
+# there on a 9/8 bar. That is why both dates are shown rather than one.
+_CME_BDAY = CustomBusinessDay(calendar=USFederalHolidayCalendar())
+
+# Raw internal source strings are meaningless on screen, and without them there
+# is no way to tell a published CME value from a JSA estimate in the raw table.
+_SOURCE_LABELS = {
+    "cme_official": "CME published",
+    "workbook": "CME published (workbook)",
+    "usda_mars": "JSA estimate",
+}
+
+
+def _release_date(d):
+    """The date CME releases the index it filed under `d`."""
+    if d is None or pd.isna(d):
+        return None
+    return pd.Timestamp(d) + _CME_BDAY
+
+
+
 # Round each individual value to display precision BEFORE differencing, not
 # after -- otherwise a change tile can show e.g. -$0.10 while the two values
 # it's derived from display as $329.20 and $329.31 (an $0.11 difference by
@@ -694,25 +767,31 @@ def _round2(v):
 # both "correct" in isolation. Rounding first keeps every number on screen
 # self-consistent with the others.
 current = _round2(fci_df.iloc[-1]["fci_value"])
-prev_point = _round2(fci_df.iloc[-2]["fci_value"]) if len(fci_df) > 1 else None
-day_chg = _round2(current - prev_point) if prev_point is not None else None
+# Adjacent-row change, kept separate from the "Last CME Print" tile below so
+# the " DoD" caption stays a genuine day-over-day rather than spanning the
+# gap back to CME's last publication.
+_adjacent = _round2(fci_df.iloc[-2]["fci_value"]) if len(fci_df) > 1 else None
+day_chg = _round2(current - _adjacent) if _adjacent is not None else None
 
 # "Current Index" is only accurate when the latest date is a real published
 # value (source == "workbook" or "cme_official"). Any other date is JSA's
 # own reconstruction -- label it as an estimate so it's never mistaken for
-# the real published figure, which is what actually confused the user here.
+# the real published figure.
 #
-# The estimate is dated to TODAY, not last_date. If no source has reported
-# anything yet today, last_date still trails behind (e.g. a Tuesday morning
-# before any Tuesday auction/direct/video report has posted) -- but the
-# figure itself is still our current best guess FOR today (a no-change
-# carry-forward, same logic as compute_forecast's own naive-persistence
-# model), so the label should say today's date, not the date of the data
-# it's carried forward from.
-_today = datetime.now()
+# Labelled with the DATE OF THE DATA, not the calendar. This used to date the
+# estimate to TODAY, on the reasoning that a carry-forward figure is our best
+# guess "for today". That convention breaks as soon as publication lags more
+# than a day: over the 2026 Labor Day weekend it captioned a window ending
+# 9/4 as "FCI Estimate 9/8/26", three days off, and nothing on screen said
+# which date the number was actually for. CME labels each index by the date
+# its sales run THROUGH and releases it the following afternoon, so the data
+# date is both the honest label and the one that lines up with CME's own
+# print and with CIH's daily sheet.
+_cur_row = fci_df.iloc[-1]
 current_label = (
-    "Current Index" if fci_df.iloc[-1]["source"] in ("workbook", "cme_official")
-    else f"FCI Estimate {_today.month}/{_today.day}/{_today.strftime('%y')}"
+    f"Current Index ({_mdy(_cur_row['date'])})"
+    if _cur_row["source"] in ("workbook", "cme_official")
+    else f"FCI Estimate {_mdy(_cur_row['date'])}"
 )
 
 week_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=7)))
@@ -729,18 +808,25 @@ year_chg = _round2(current - year_ago) if year_ago is not None else None
 # current_label above. Once CME actually publishes that date, the label and
 # the underlying data date will naturally line up; until then this reads
 # "yesterday" even if the value shown is itself carried forward further back.
-_yesterday = _today - timedelta(days=1)
-prev_label = f"Previous Day's FCI ({_yesterday.month}/{_yesterday.day}/{_yesterday.strftime('%y')})"
-
-# CME's own actual day-over-day change: the last two dates CME has published
-# (source == "cme_official"), independent of whatever current/prev_point are
-# showing above (which can mix an estimate with an official value, e.g. our
-# 9/1 estimate vs. CME's 8/31 actual). This is always a real-vs-real
-# comparison, never mixed with JSA's own estimate.
+# This tile is CME's last ACTUAL print, so its value, its label and its delta
+# all come from one place: the most recent cme_official row. It previously
+# showed fci_df.iloc[-2] -- whatever row happened to be second-to-last --
+# while captioning the delta "CME DoD". That is fine while the
+# reconstruction sits one day ahead of CME, but the moment it runs several
+# days past CME's last publication (which is exactly what a holiday does to
+# the lag) the tile shows an ESTIMATE under a CME label. Sourcing all three
+# from official_rows means the label and the number cannot diverge.
 official_rows = fci_df[fci_df["source"] == "cme_official"]
 cme_actual_chg = None
 if len(official_rows) > 1:
     cme_actual_chg = _round2(official_rows.iloc[-1]["fci_value"] - official_rows.iloc[-2]["fci_value"])
+
+if len(official_rows):
+    prev_point = _round2(official_rows.iloc[-1]["fci_value"])
+    prev_label = f"Last CME Print ({_mdy(official_rows.iloc[-1]['date'])})"
+else:
+    prev_point = None
+    prev_label = "Last CME Print"
 
 cols = st.columns(4)
 with cols[0]:
@@ -1167,6 +1253,98 @@ else:
 
 # ── Data Table ────────────────────────────────────────────────────────────────
 
+# ── Pending CME Prints / Forecast Scorecard ───────────────────────────────────
+# The headline tile only ever shows the LATEST date, which is not the number
+# you want when using this as a forecast. What matters is (a) which dates CME
+# still owes a print for, with our estimate for each, and (b) how close the
+# last several estimates actually landed. Without this, both required either
+# hovering the trend chart or reading the raw table and knowing from memory
+# where CME's published history stops.
+
+st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+st.markdown('<div class="sec-header">Pending CME Prints &amp; Forecast Accuracy</div>',
+            unsafe_allow_html=True)
+st.caption(
+    "Dated by CME **index** date — the last sale day in the 7-day window, which is "
+    "how CME names its files and how CIH dates its daily sheet. *Prints* is when "
+    "CME releases it: the next business day, which a holiday can push days out."
+)
+
+_recon = _load_recon_index()
+_official = (
+    fci_df[fci_df["source"] == "cme_official"][["date", "fci_value"]]
+    .rename(columns={"fci_value": "actual"})
+)
+
+if _recon.empty:
+    st.info("No reconstruction available on this backend, so there is nothing to compare.")
+else:
+    _sc = _recon.merge(_official, on="date", how="left")
+    _last_official = _official["date"].max() if not _official.empty else None
+
+    # Only dates AFTER CME's last print are genuinely pending. An unmatched
+    # date before that is a day CME simply does not publish (weekend/holiday),
+    # not a forecast awaiting a result.
+    _pending = _sc[_sc["actual"].isna()]
+    if _last_official is not None:
+        _pending = _pending[_pending["date"] > _last_official]
+    # CME files an index only on business days -- verified against its own FTP
+    # archive, which holds files for 8/28, 8/31 and 9/1-9/4 but none at all for
+    # 9/5, 9/6 or 9/7 (weekend plus Labor Day). This reconstruction computes a
+    # value for every CALENDAR day, so without this filter those weekend and
+    # holiday carry-forwards show up as prints CME will never publish -- and
+    # under release-date labelling they collapse onto the same next business
+    # day, listing "Tue 09/08" three times over.
+    _pending = _pending[_pending["date"].map(
+        lambda d: _CME_BDAY.is_on_offset(pd.Timestamp(d)))]
+
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        st.caption("**Awaiting CME** — our forecast for each unpublished index date")
+        if _pending.empty:
+            st.caption("CME has published every date we hold an estimate for.")
+        else:
+            _p = _pending.sort_values("date", ascending=False).copy()
+            _p["Index date"] = _p["date"].dt.strftime("%a %m/%d")
+            _p["Prints"] = _p["date"].map(lambda d: _release_date(d).strftime("%m/%d"))
+            _p["Our estimate"] = _p["recon"].map(lambda v: f"${v:.2f}")
+            _p["Head"] = _p["total_head"].map(
+                lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
+            with st.container(key="wm-pending"):
+                st.dataframe(_p[["Index date", "Prints", "Our estimate", "Head"]],
+                             use_container_width=True, hide_index=True, height=210)
+            if _last_official is not None:
+                st.caption(
+                    f"CME's last index date is {_last_official.strftime('%b %d')} "
+                    f"(printed {_release_date(_last_official).strftime('%b %d')}). A low "
+                    "*window head* means few sale days are in the 7-day window yet, so "
+                    "that estimate will move as reports land."
+                )
+    with _c2:
+        st.caption("**Scored** — how the last ten estimates turned out")
+        _s = _sc.dropna(subset=["actual"]).sort_values("date", ascending=False).head(10).copy()
+        if _s.empty:
+            st.caption("No dates where both a reconstruction and a CME print exist.")
+        else:
+            _s["err"] = _s["recon"] - _s["actual"]
+            _s["Index date"] = _s["date"].dt.strftime("%m/%d")
+            _s["Ours"] = _s["recon"].map(lambda v: f"${v:.2f}")
+            _s["CME"] = _s["actual"].map(lambda v: f"${v:.2f}")
+            _s["Miss"] = _s["err"].map(lambda v: f"{v:+.2f}")
+            with st.container(key="wm-scored"):
+                st.dataframe(_s[["Index date", "Ours", "CME", "Miss"]],
+                             use_container_width=True, hide_index=True, height=210)
+            # Dollar signs escaped: st.caption renders markdown, and a $...$
+            # pair is LaTeX math there -- unescaped, "$0.38" and "$2" render as
+            # mangled math rather than money.
+            st.caption(
+                f"Mean absolute miss over these {len(_s)} dates: "
+                f"**\\${_s['err'].abs().mean():.2f}**. Dates before the direct-trade "
+                "component began (2026-08-28) ran about \\$2 high because that input "
+                "was missing entirely -- they are not representative of current accuracy."
+            )
+
+
 with st.expander("📋  Raw Data Table"):
     tab_fci, tab_loc = st.tabs(["Index Values", "Location Sales"])
     with tab_fci:
@@ -1175,12 +1353,36 @@ with st.expander("📋  Raw Data Table"):
         # styler.render.max_elements cell cap (hit at ~280k cells testing
         # the location table below), and no conditional coloring is applied
         # here anyway, just number formatting.
+        #
+        # "Date" is CME's index date, matching the tiles and both panel tables.
+        # "Prints" is when CME releases it. "Source" used to render as a raw
+        # internal string (usda_mars / cme_official), which gave no way to tell an
+        # estimate from a published value -- the single most important thing to
+        # know when reading this tab, and the reason it was easy to mistake a
+        # forecast for a settled number.
         d = fci_df.copy()
+        d["Prints"] = d["date"].map(
+            lambda x: _release_date(x).strftime("%Y-%m-%d") if pd.notna(x) else "—")
+        d["Source"] = d["source"].map(_SOURCE_LABELS).fillna(d["source"])
         d["date"] = d["date"].dt.strftime("%Y-%m-%d")
-        d = d.rename(columns={"date": "Date", "fci_value": "FCI"}).sort_values("Date", ascending=False)
+        d = d.rename(columns={
+            "date": "Date", "fci_value": "FCI", "same_day_price": "Daily $",
+            "same_day_head": "Daily head", "same_day_avg_weight": "Daily wt",
+        }).sort_values("Date", ascending=False)
         d["FCI"] = d["FCI"].map(lambda v: f"${v:.2f}" if pd.notna(v) else "—")
+        d["Daily $"] = d["Daily $"].map(lambda v: f"${v:.2f}" if pd.notna(v) else "—")
+        d["Daily head"] = d["Daily head"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "—")
+        d["Daily wt"] = d["Daily wt"].map(lambda v: f"{v:,.0f} lb" if pd.notna(v) else "—")
         with st.container(key="wm-raw-fci"):
-            st.dataframe(d, use_container_width=True, hide_index=True, height=320)
+            st.dataframe(
+                d[["Date", "Prints", "Source", "FCI", "Daily $", "Daily head", "Daily wt"]],
+                use_container_width=True, hide_index=True, height=320)
+        st.caption(
+            "**Date** is CME's index date — the last sale day in that 7-day window. "
+            "**Prints** is when CME releases it, the next business day. **Source** "
+            "separates CME's published values from JSA's own estimates; only the "
+            "estimates are forecasts."
+        )
     with tab_loc:
         d = loc_filtered[["date", "location", "state", "head", "avg_weight", "price", "fci_value", "basis"]].copy()
         d["date"] = d["date"].dt.strftime("%Y-%m-%d")

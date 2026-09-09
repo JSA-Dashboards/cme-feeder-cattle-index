@@ -125,6 +125,11 @@ def init_db(conn):
             head_count INTEGER NOT NULL,
             avg_weight REAL NOT NULL,
             avg_price REAL NOT NULL,
+            -- Date the source report was PUBLISHED, when that can lag the sale
+            -- (video/internet auctions). NULL for auction and direct rows,
+            -- which publish on their own report date. See the gate in
+            -- recompute_fci_daily().
+            published_date TEXT,
             PRIMARY KEY (report_date, slug_id, weight_low, muscle_grade, avg_price, head_count)
         )
     """)
@@ -133,6 +138,12 @@ def init_db(conn):
     if "raw_date" not in cols:
         conn.execute("ALTER TABLE mars_sales ADD COLUMN raw_date TEXT")
         conn.execute("UPDATE mars_sales SET raw_date = report_date WHERE raw_date IS NULL")
+    # Migration for DBs created before published_date existed. Left NULL --
+    # backfilling it would mean re-fetching PDFs AMS has already overwritten,
+    # and NULL is the correct "available on its sale date" default for every
+    # auction and direct row anyway.
+    if "published_date" not in cols:
+        conn.execute("ALTER TABLE mars_sales ADD COLUMN published_date TEXT")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fci_daily (
             report_date TEXT PRIMARY KEY,
@@ -201,7 +212,8 @@ def recompute_fci_daily(conn):
     given table size). Returns (n_written, first_date, last_date | None).
     """
     all_rows = conn.cursor().execute(
-        "SELECT report_date, raw_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
+        "SELECT report_date, raw_date, head_count, avg_weight, avg_price, published_date "
+        "FROM mars_sales ORDER BY report_date"
     ).fetchall()
     all_rows = [db.iso_row(r) for r in all_rows]
 
@@ -221,8 +233,33 @@ def recompute_fci_daily(conn):
     # cme_ftp_locations) -- CME's own files likewise keep a weekend row's
     # true date visible per-location while still folding its total into the
     # following business day's combined figure.
+    #
+    # A publication-date GATE was tried here on 2026-09-08 and REVERTED on
+    # 2026-09-09. Do not reintroduce it without reading this.
+    #
+    # The idea: a video sale is reported under its final sale day, but AMS may
+    # not publish it until the next business day, so it should arguably not
+    # count toward an index date preceding its publication. It appeared to be
+    # confirmed -- it fitted CME's then-current 9/3/2026 print of 328.80 to
+    # within 0.06, where the ungated figure was 0.79 out.
+    #
+    # That print was PRELIMINARY. CME later revised 9/3 to 329.53 on 13,485
+    # head -- up by exactly 1,376 head, which is precisely the Superior Labor
+    # Day video volume (116 North Central + 1,260 South Central). So CME does
+    # attribute a video sale to its SALE date. Its first print for a date
+    # simply omits reports that have not landed yet, and a revision adds them.
+    # Measured against the REVISED value, ungated is +0.06 and gated is -0.67.
+    #
+    # The lesson generalises: this reconstruction should be expected to track
+    # CME's FINAL value for a date, and to differ from CME's FIRST print by
+    # whatever had not yet been reported when CME computed it. Validating
+    # against a fresh CME print therefore risks fitting a provisional number.
+    #
+    # published_date is still recorded on mars_sales (see run_update) -- the
+    # lag is genuinely useful, since it explains why a first print and a final
+    # print differ -- but it must NOT filter the window.
     by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
-    for report_date, raw_date, head, wt, price in all_rows:
+    for report_date, raw_date, head, wt, price, published_date in all_rows:
         w = head * wt
         by_day.setdefault(report_date, []).append((w, w * price, head))
 
@@ -244,6 +281,7 @@ def recompute_fci_daily(conn):
         den = num = 0.0
         n_locs = 0
         total_head = 0
+        d_iso = d.isoformat()
         for wd in window_days:
             for w, dollars, head in by_day.get(wd, []):
                 den += w
@@ -257,7 +295,7 @@ def recompute_fci_daily(conn):
         # (weekends etc.), same as the report showing no standalone row then.
         sd_den = sd_num = 0.0
         sd_head = 0
-        for w, dollars, head in by_day.get(d.isoformat(), []):
+        for w, dollars, head in by_day.get(d_iso, []):
             sd_den += w
             sd_num += dollars
             sd_head += head
@@ -357,19 +395,35 @@ def run_update(since: date, verbose=True):
         print("\nVideo auction reports (this week only):")
     video_results = fetch_all_video_rows(verbose=verbose)
     video_inserted = 0
-    for name, (report_date_, rows) in video_results.items():
+    for name, (report_date_, published_date_, rows) in video_results.items():
         if report_date_ is None:
             continue
         iso_date = shift_weekend_to_monday(report_date_).isoformat()
+        # Gate the index on the LATER of the two: a sale shifted off a weekend
+        # can't become available before its report was actually published.
+        pub_iso = (
+            max(published_date_.isoformat(), iso_date) if published_date_ else None
+        )
         slug_id = VIDEO_REPORT_SLUGS[name]
         cols = ["report_date", "raw_date", "slug_id", "location", "state",
-                "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
+                "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price",
+                "published_date"]
         key_cols = ["report_date", "slug_id", "weight_low", "muscle_grade", "avg_price", "head_count"]
         for r in rows:
             values = (iso_date, report_date_.isoformat(), slug_id, f"{name} VIDEO ({r['region']})", r["region"],
                       r["weight_break_low"], r["muscle_grade"],
-                      r["head_count"], r["avg_weight"], r["avg_price"])
+                      r["head_count"], r["avg_weight"], r["avg_price"], pub_iso)
             db.merge_ignore(conn, "mars_sales", cols, values, key_cols)
+        # merge_ignore leaves an existing row untouched, so video rows stored
+        # before published_date existed keep a NULL and would slip past the
+        # gate in recompute_fci_daily(). Stamp them from this run's header.
+        if pub_iso:
+            ph = db.placeholders(1)
+            conn.cursor().execute(
+                f"UPDATE mars_sales SET published_date={ph} "
+                f"WHERE report_date={ph} AND slug_id={ph} AND published_date IS NULL",
+                (pub_iso, iso_date, slug_id),
+            )
         video_inserted += len(rows)
     total_inserted += video_inserted
     conn.commit()

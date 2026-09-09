@@ -20,5 +20,21 @@ Thumbs.db
 *.log
 
 # NOTE: data/Feeder Cattle Info Ross.xlsx and data/mars_history.db are
-# intentionally NOT ignored — they ARE the app's data and must be committed
-# for the Streamlit Cloud deployment to have anything to show.
+# intentionally NOT ignored, but NOT because the deployment needs them.
+# Production reads SNOWFLAKE (JSA.CME_FEEDER_CATTLE) -- see snowflake_db.py and
+# snowflake/02_migrate_data.py. The committed .db is a local-dev seed so a fresh
+# clone has data without re-running the whole USDA backfill.
+#
+# So do NOT commit the .db on every refresh: it is ~6.5 MB of binary, which is
+# ~2.4 GB of history per year if the daily job commits it. Push data to
+# Snowflake instead; commit the .db only when the seed is meaningfully stale.
+# (An earlier version of this note said the file had to be committed for
+# Streamlit Cloud to show anything. That predates the Snowflake cutover.)
+
+# Scheduled-run logs (scripts/daily_update.ps1)
+logs/
+# Local DB backups
+data/*.db.bak-*
+# SQLite WAL/SHM sidecars - transient; daily_update.ps1 checkpoints them into the .db
+data/*.db-wal
+data/*.db-shm

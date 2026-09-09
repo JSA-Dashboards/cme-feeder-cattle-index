@@ -90,6 +90,20 @@ SECTION_RE = re.compile(
 DATE_RANGE_RE = re.compile(
     r"Weighted Average Report for (\d{1,2}/\d{1,2}/\d{4})(?:\s*-\s*(\d{1,2}/\d{1,2}/\d{4}))?"
 )
+# The AMS header carries the date the report was PUBLISHED, which for a video
+# sale can lag the sale itself (e.g. the 9/3/2026 Labor Day sale was published
+# 9/4/2026). CME does not fold a video sale into an index date that precedes
+# its publication -- confirmed against CME's own FTP constituent lists, which
+# carry Superior on 8/21/2026 (published same day) but omit it from the
+# 9/3/2026 index (published 9/4). update_index.py gates on this.
+PUBLISHED_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October"
+    r"|November|December)\s+(\d{1,2})\s*,\s*(\d{4})\b"
+)
+_MONTHS = {m: i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"], start=1)}
+
 TARGET_GRADES = {"1", "1-2"}
 TARGET_BRACKETS = {700, 750, 800, 850}
 
@@ -127,6 +141,28 @@ def _parse_report_date(text):
     end = m.group(2) or m.group(1)
     mm, dd, yyyy = end.split("/")
     return date(int(yyyy), int(mm), int(dd))
+
+
+def _parse_published_date(text):
+    """
+    AMS stamps the publication date in the first few lines of page 1, above
+    the FEEDER CATTLE table. Restricted to the head of the page so a date
+    inside the narrative (e.g. "up to and including September 17, 2026")
+    can't be mistaken for it.
+    """
+    m = PUBLISHED_RE.search(text[:500])
+    if not m:
+        return None
+    month, day, year = m.group(1), int(m.group(2)), int(m.group(3))
+    return date(year, _MONTHS[month], day)
+
+
+def extract_published_date(pdf_bytes):
+    """Publication date off page 1's header, or None if absent/unparseable."""
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        if not pdf.pages:
+            return None
+        return _parse_published_date(pdf.pages[0].extract_text() or "")
 
 
 def fetch_video_pdf(name, timeout=60):
@@ -354,18 +390,27 @@ _PARSERS = {"WESTERN_VIDEO": parse_western_video_pdf}
 
 
 def fetch_all_video_rows(verbose=True):
-    """Returns {name: (report_date, rows)} for every configured video report."""
+    """
+    Returns {name: (report_date, published_date, rows)} for every configured
+    video report. published_date is the AMS header date (may be None if the
+    header can't be parsed -- update_index.py then treats the row as
+    available on its sale date, the pre-gating behaviour).
+    """
     out = {}
     for name in VIDEO_REPORT_SLUGS:
         parser = _PARSERS.get(name, parse_video_pdf)
         try:
             pdf_bytes = fetch_video_pdf(name)
             report_date, rows = parser(pdf_bytes)
+            published_date = extract_published_date(pdf_bytes)
         except Exception as e:
             if verbose:
                 print(f"  [skip] {name} video report: {e}")
             continue
-        out[name] = (report_date, rows)
+        out[name] = (report_date, published_date, rows)
         if verbose:
-            print(f"  {name} VIDEO  {report_date}  +{len(rows)} qualifying rows")
+            lag = ""
+            if report_date and published_date and published_date != report_date:
+                lag = f" (published {published_date}, +{(published_date - report_date).days}d)"
+            print(f"  {name} VIDEO  {report_date}{lag}  +{len(rows)} qualifying rows")
     return out

@@ -38,3 +38,6 @@ data/*.db.bak-*
 # SQLite WAL/SHM sidecars - transient; daily_update.ps1 checkpoints them into the .db
 data/*.db-wal
 data/*.db-shm
+
+# Scratch downloads (AMS video-sale PDFs fetched during parsing)
+.tmp/

@@ -20,7 +20,8 @@ load_dotenv()
 HERE = Path(__file__).parent.parent
 DB_PATH = HERE / "data" / "mars_history.db"
 
-TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily", "cme_ftp_locations"]
+TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily", "cme_ftp_locations",
+          "peer_estimates"]
 
 
 def main():

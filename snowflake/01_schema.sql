@@ -20,6 +20,19 @@ CREATE TABLE IF NOT EXISTS fci_daily (
 
 -- Insert-if-new (mirrors "INSERT OR IGNORE") -- raw per-location/per-bracket
 -- qualifying sale rows feeding the MARS/Direct/Video reconstruction above.
+-- Competitors' published FCI estimates, hand-entered from their daily sheets.
+-- index_date is CME's index date (what the sheet estimates), not the sheet's
+-- own issue date. Created 2026-09-09 by SYSADMIN, which owns it -- note that
+-- Snowflake uses only the PRIMARY role for DDL, so this needed
+-- SNOWFLAKE_ROLE=SYSADMIN rather than a secondary-role grant.
+CREATE TABLE IF NOT EXISTS peer_estimates (
+    index_date DATE NOT NULL,
+    source VARCHAR NOT NULL,
+    fci_value FLOAT NOT NULL,
+    note VARCHAR,
+    PRIMARY KEY (index_date, source)
+);
+
 CREATE TABLE IF NOT EXISTS mars_sales (
     report_date DATE NOT NULL,
     raw_date DATE NOT NULL,

@@ -26,6 +26,7 @@ except Exception:
     pass  # st.secrets not available (no secrets.toml locally) -- fine, .env already loaded above
 
 import snowflake_db as db
+from bucketing import shifted_bucket_date
 
 FORECAST_HORIZON_DAYS = 10  # business days
 FORECAST_CI = 0.80  # 80% prediction interval
@@ -277,6 +278,13 @@ def _load_mars_reconstruction():
         loc = pd.DataFrame(columns=loc_cols)
         return fci, loc
 
+    # Bucket exactly as recompute_fci_daily() does. Without this the Sale
+    # Locations table and the 7-day window show Clovis on the Wednesday USDA
+    # reported while the index counts it on CME's Thursday -- a 47-head
+    # disagreement between the rows and the number beside them. raw_date is
+    # untouched, so USDA's true date is still recorded.
+    sales["date"] = [shifted_bucket_date(l, d)
+                     for l, d in zip(sales["location"], sales["date"])]
     sales["date"] = pd.to_datetime(sales["date"])
     sales["w"] = sales["head_count"] * sales["avg_weight"]
     sales["wp"] = sales["w"] * sales["avg_price"]
@@ -530,6 +538,30 @@ def _load_recon_index():
     df["date"] = pd.to_datetime(df["date"])
     return (df.rename(columns={"fci_value": "recon"})
               .sort_values("date").reset_index(drop=True))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_peer_estimates():
+    """
+    Competitors' published FCI estimates, hand-entered via
+    add_peer_estimate.py. index_date is CME's index date, so these line up
+    directly with fci_daily and cme_ftp_daily.
+    """
+    empty = pd.DataFrame(columns=["date", "source", "value"])
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return empty
+    conn = db.get_conn()
+    try:
+        df = db.read_sql_lower(
+            "SELECT index_date AS date, source, fci_value FROM peer_estimates", conn)
+    except Exception:
+        return empty          # table absent on this backend yet
+    finally:
+        conn.close()
+    if df.empty:
+        return empty
+    df["date"] = pd.to_datetime(df["date"])
+    return df.rename(columns={"fci_value": "value"})
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1369,7 +1401,7 @@ else:
                     "that estimate will move as reports land."
                 )
     with _c2:
-        st.caption("**Scored** — how the last ten estimates turned out")
+        st.caption("**Scorecard** — how the last ten estimates turned out")
         _s = _sc.dropna(subset=["actual"]).sort_values("date", ascending=False).head(10).copy()
         if _s.empty:
             st.caption("No dates where both a reconstruction and a CME print exist.")
@@ -1391,6 +1423,75 @@ else:
                 "component began (2026-08-28) ran about \\$2 high because that input "
                 "was missing entirely -- they are not representative of current accuracy."
             )
+
+
+# ── Versus the competition ────────────────────────────────────────────────────
+# The scorecard above answers "are we close to CME". This answers "are we
+# closer than the desks we compete with", which is a different question and the
+# one that actually matters commercially. Their figures are hand-entered from
+# their daily sheets, so this table is only as complete as what has been typed
+# in -- dates with no peer figure are simply absent rather than shown as zero.
+
+_peers = _load_peer_estimates()
+if not _peers.empty:
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="sec-header">Versus CIH &amp; Compass</div>',
+                unsafe_allow_html=True)
+    st.caption(
+        "Their published estimate against ours for the same CME index date. "
+        "*Miss* columns appear once CME prints that date; before then all three "
+        "are open forecasts."
+    )
+
+    _piv = _peers.pivot_table(index="date", columns="source", values="value",
+                              aggfunc="last")
+    _srcs = [c for c in sorted(_piv.columns)]
+    _ours_s = (_recon.set_index("date")["recon"] if not _recon.empty
+               else pd.Series(dtype=float))
+    _cme_s = (official_rows.set_index("date")["fci_value"] if len(official_rows)
+              else pd.Series(dtype=float))
+
+    _t = _piv.copy()
+    _t["__ours"] = _ours_s
+    _t["__cme"] = _cme_s
+    _t = _t.sort_index(ascending=False)
+
+    # .title() would render "CIH" as "Cih"; acronyms need an explicit label.
+    _SRC_LABELS = {"CIH": "CIH", "COMPASS": "Compass"}
+    _lbl = lambda src: _SRC_LABELS.get(src, src.title())
+    _money = lambda v: f"${v:.2f}" if pd.notna(v) else "—"
+    _delta = lambda v: f"{v:+.2f}" if pd.notna(v) else "—"
+
+    _disp = pd.DataFrame(index=_t.index)
+    _disp["Index date"] = _t.index.strftime("%a %m/%d")
+    _disp["Ours"] = _t["__ours"].map(_money)
+    for _s in _srcs:
+        _disp[_lbl(_s)] = _t[_s].map(_money)
+    _disp["CME"] = _t["__cme"].map(_money)
+    _disp["Miss ours"] = (_t["__ours"] - _t["__cme"]).map(_delta)
+    for _s in _srcs:
+        _disp[f"Miss {_lbl(_s)}"] = (_t[_s] - _t["__cme"]).map(_delta)
+
+    with st.container(key="wm-peers"):
+        st.dataframe(_disp, use_container_width=True, hide_index=True,
+                     height=min(320, 60 + 35 * len(_disp)))
+
+    # Running accuracy, over scored dates only. Each source is averaged over
+    # the dates IT has a figure for, so the counts can differ -- shown, because
+    # "0.01 over 7 dates" and "0.01 over 1 date" are not the same claim.
+    _scored = _t[_t["__cme"].notna()]
+    if len(_scored):
+        _bits = []
+        _o = (_scored["__ours"] - _scored["__cme"]).abs().dropna()
+        if len(_o):
+            _bits.append(f"ours {_o.mean():.3f} ({len(_o)})")
+        for _s in _srcs:
+            _e = (_scored[_s] - _scored["__cme"]).abs().dropna()
+            if len(_e):
+                _bits.append(f"{_lbl(_s)} {_e.mean():.3f} ({len(_e)})")
+        st.caption("Mean absolute miss, dates scored in brackets: " + " · ".join(_bits))
+    else:
+        st.caption("No date here has been printed by CME yet, so nobody is scored.")
 
 
 with st.expander("📋  Raw Data Table"):

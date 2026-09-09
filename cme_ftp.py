@@ -45,6 +45,7 @@ Format notes (reverse-engineered, not documented by CME):
     zero-head row, not a parse error.
 """
 import ftplib
+import time
 import io
 import re
 import zlib
@@ -73,10 +74,33 @@ def file_path_for(d: date) -> str:
     return f"{FTP_BASE}/{fname}"
 
 
-def fetch_daily_file(d: date, timeout=20) -> str | None:
+class FetchFailed(RuntimeError):
     """
-    Returns the raw file text, or None if that date has no file (weekend/
-    holiday/not yet published/before the archive's coverage starts).
+    The file could not be retrieved for a reason that is NOT "it does not
+    exist" -- a transient block, a timeout, a reset. Distinct from None,
+    which means the server told us the path is genuinely absent.
+    """
+
+
+# Substrings that mark an ftplib.error_perm as "the path is not there"
+# rather than "something else went wrong".
+_MISSING_MARKERS = ("550", "no such file", "failed to open", "not found",
+                    "cannot find")
+
+
+def fetch_daily_file(d: date, timeout=20, attempts=3) -> str | None:
+    """
+    Returns the raw file text, or None if that date GENUINELY has no file
+    (weekend/holiday/not yet published/before the archive's coverage starts).
+    Raises FetchFailed for any other failure.
+
+    This distinction used to be absent: every ftplib error was swallowed
+    into None, so a transient block read exactly like an absent file, and
+    backfill_ftp.py reported both as "no file (weekend/holiday/unpublished)".
+    On 2026-09-09 that made the pipeline report CME as not having published
+    2026-09-07 when FC260907.txt had been on the server since 09-08 14:05.
+    Reporting a fetch failure as a non-publication is the worst possible
+    way to be wrong here, because it looks like news about CME.
 
     Uses ftplib directly with a fresh connection per call rather than
     urllib's ftp:// support -- urllib caches FTP control connections keyed
@@ -86,20 +110,32 @@ def fetch_daily_file(d: date, timeout=20) -> str | None:
     process silently fails by reusing the same broken connection. A fresh
     ftplib connection per call sidesteps that entirely.
     """
-    try:
-        ftp = ftplib.FTP(FTP_HOST, timeout=timeout)
+    last_err = None
+    for attempt in range(1, attempts + 1):
         try:
-            ftp.login()
-            buf = io.BytesIO()
-            ftp.retrbinary(f"RETR {file_path_for(d)}", buf.write)
-            content = buf.getvalue()
-        finally:
-            ftp.close()
-        if not content:
-            return None
-        return content.decode("utf-8", errors="replace")
-    except (*ftplib.all_errors, OSError):
-        return None
+            ftp = ftplib.FTP(FTP_HOST, timeout=timeout)
+            try:
+                ftp.login()
+                buf = io.BytesIO()
+                ftp.retrbinary(f"RETR {file_path_for(d)}", buf.write)
+                content = buf.getvalue()
+            finally:
+                ftp.close()
+            if not content:
+                return None
+            return content.decode("utf-8", errors="replace")
+        except ftplib.error_perm as e:
+            # A permanent refusal. If it names a missing path, the date
+            # simply has no file; anything else is a real problem.
+            if any(mark in str(e).lower() for mark in _MISSING_MARKERS):
+                return None
+            last_err = e
+        except (*ftplib.all_errors, OSError) as e:
+            last_err = e
+        if attempt < attempts:
+            time.sleep(1.5 * attempt)
+    raise FetchFailed(
+        "%s: %s: %s" % (file_path_for(d), type(last_err).__name__, last_err))
 
 
 def _tokenize(blob: str) -> list[str]:
@@ -113,6 +149,69 @@ def _mdy_to_iso(mdy: str, fallback_year: int) -> str:
     if y < 100:
         y += 2000
     return date(y, m, d).isoformat()
+
+
+def _parse_reported(text: str) -> tuple:
+    """
+    REPORTED INDEX / REPORTED CHANGE. Neither needs column arithmetic, so
+    this works on any file including one with no sales at all.
+
+    The change label is sometimes truncated to "REPORTED CHANG" -- observed
+    in FC260907.txt -- so the trailing E is optional. Requiring the full
+    spelling silently returned None for the change on those files.
+    """
+    idx = chg = None
+    for ln in text.splitlines():
+        m = re.search(r"REPORTED INDEX\s+(-?[\d.]+)", ln)
+        if m:
+            idx = float(m.group(1))
+        m = re.search(r"REPORTED CHANGE?\s+(-?[\d.]+)", ln)
+        if m:
+            chg = float(m.group(1))
+    return idx, chg
+
+
+def _parse_totals_only(text: str, file_date: date) -> dict:
+    """
+    Parse a file that has NO location rows -- a day on which no qualifying
+    sale was reported anywhere, so every location line is blank.
+
+    parse_daily_file() derives its fixed-width layout from the first data
+    row's state code, and such a file has none, so it cannot proceed. This
+    is the one case that defeats the width derivation, and also the case
+    that needs it least: the seven-day totals and the REPORTED INDEX are
+    the only numbers present and neither depends on column positions.
+
+    Observed on FC260907.txt (Labor Day 2026): zero daily head, seven-day
+    totals of 10,786 head, REPORTED INDEX 326.98. Before this the file
+    parsed to None and was recorded as "no file", i.e. as CME not having
+    published at all.
+
+    Slashes are the row's filler; replacing them with spaces lets the
+    trailing five figures tokenise without any width assumption.
+    """
+    daily = seven_day = None
+    for ln in text.splitlines():
+        if "TOTALS" not in ln:
+            continue
+        toks = _tokenize(ln.replace("/", " "))
+        if len(toks) < 5:
+            continue
+        head, _w_lbs, avg_w, _dollars, avg_p = (float(t) for t in toks[-5:])
+        agg = {"head": int(head), "avg_weight": avg_w, "avg_price": avg_p}
+        if "SEVEN-DAY" in ln:
+            seven_day = agg
+        elif "DAILY" in ln:
+            daily = agg
+    idx, chg = _parse_reported(text)
+    return {
+        "date": file_date.isoformat(),
+        "reported_index": idx,
+        "reported_change": chg,
+        "daily": daily,
+        "seven_day": seven_day,
+        "locations": [],
+    }
 
 
 def parse_daily_file(text: str, file_date: date) -> dict | None:
@@ -141,7 +240,8 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             prefix_len = m.end(1)
             break
     if prefix_len is None:
-        return None
+        # No state code anywhere: a day with no qualifying sales at all.
+        return _parse_totals_only(text, file_date)
 
     locations = []
     daily = seven_day = None
@@ -196,14 +296,7 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             "avg_price": avg_p,
         })
 
-    reported_index = reported_change = None
-    for ln in lines:
-        m = re.search(r"REPORTED INDEX\s+(-?[\d.]+)", ln)
-        if m:
-            reported_index = float(m.group(1))
-        m = re.search(r"REPORTED CHANGE\s+(-?[\d.]+)", ln)
-        if m:
-            reported_change = float(m.group(1))
+    reported_index, reported_change = _parse_reported(text)
 
     return {
         "date": file_date.isoformat(),

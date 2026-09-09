@@ -52,8 +52,13 @@ def main():
 
     t0 = time.time()
     results = {}
+    failed = {}
     for i, d in enumerate(dates):
-        results[d] = cme_ftp.fetch_daily_file(d)
+        try:
+            results[d] = cme_ftp.fetch_daily_file(d)
+        except cme_ftp.FetchFailed as e:
+            results[d] = None
+            failed[d] = str(e)
         time.sleep(REQUEST_DELAY_S)
         if (i + 1) % 100 == 0:
             print(f"  ...fetched {i+1}/{len(dates)} ({time.time()-t0:.0f}s elapsed)")
@@ -65,18 +70,25 @@ def main():
     if retry_dates:
         print(f"  retry pass: {len(retry_dates)} dates came back empty, re-fetching once more...")
         for d in retry_dates:
-            results[d] = cme_ftp.fetch_daily_file(d)
+            try:
+                results[d] = cme_ftp.fetch_daily_file(d)
+                failed.pop(d, None)
+            except cme_ftp.FetchFailed as e:
+                results[d] = None
+                failed[d] = str(e)
             time.sleep(REQUEST_DELAY_S)
 
-    ingested = missing = 0
+    ingested = absent = 0
+    unreadable = []
     for d in dates:
         text = results.get(d)
         if text is None:
-            missing += 1
-            continue
+            if d not in failed:
+                absent += 1        # server says the path is not there
+            continue               # fetch failures counted separately
         parsed = cme_ftp.parse_daily_file(text, d)
         if parsed is None or parsed["reported_index"] is None:
-            missing += 1
+            unreadable.append(d)   # we HAVE the file and cannot read it
             continue
         daily = parsed["daily"] or {}
         seven = parsed["seven_day"] or {}
@@ -109,7 +121,21 @@ def main():
     conn.close()
 
     elapsed = time.time() - t0
-    print(f"\nDone in {elapsed:.0f}s. Ingested {ingested} days, {missing} had no file (weekend/holiday/unpublished).")
+    print(f"\nDone in {elapsed:.0f}s. Ingested {ingested} days; "
+          f"{absent} had no file (weekend/holiday/not yet published).")
+    # These two used to be folded into the "no file" count, which turned a
+    # transient block or a parser gap into an apparent statement about what
+    # CME had published. Both are OUR problem, and both are now loud.
+    if failed:
+        print(f"  !! {len(failed)} date(s) FAILED to fetch -- NOT the same "
+              f"as unpublished:")
+        for d in sorted(failed)[:10]:
+            print(f"       {d}: {failed[d]}")
+    if unreadable:
+        print(f"  !! {len(unreadable)} file(s) fetched but UNREADABLE -- we "
+              f"hold the data and cannot parse it:")
+        for d in sorted(unreadable)[:10]:
+            print(f"       {d}")
     print(f"cme_ftp_daily now has {n_rows} total rows, spanning {first_last[0]} to {first_last[1]}.")
 
 

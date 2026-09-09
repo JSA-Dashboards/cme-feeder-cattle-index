@@ -49,7 +49,8 @@ load_dotenv()
 
 import snowflake_db as db
 from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
-from video_reports import VIDEO_REPORT_SLUGS, fetch_all_video_rows
+from video_reports import (VIDEO_MAX_AGE_DAYS, VIDEO_REPORT_SLUGS,
+                           fetch_all_video_rows)
 
 HERE = Path(__file__).parent
 DATA_DIR = HERE / "data"
@@ -95,6 +96,62 @@ def detect_final_sale_day(report_date: date, narrative: str | None) -> date:
         return report_date
     latest_wd = max(_WEEKDAYS.index(m) for m in later)
     return report_date + timedelta(days=latest_wd - own_wd)
+
+
+# Per-location correction to the BUCKETING date only. Applied when building the
+# rolling window in recompute_fci_daily(), NOT when storing rows: report_date and
+# raw_date both keep what USDA reported, so nothing here rewrites source data and
+# the correction can be removed by editing this table alone. Doing it at write
+# time would also double-count, since merge_ignore keys on report_date -- the
+# shifted row would insert alongside the unshifted one already stored.
+#
+# CLOVIS NM: MARS reports every Clovis sale on a Wednesday; CME buckets every one
+# of them on the Thursday. Verified 2026-09-09 across 13 consecutive sales,
+# matched on identical head count AND identical weighted price, so these are
+# provably the same sales rather than coincidences:
+#
+#     ours (MARS)       CME              head    price
+#     2026-08-05 Wed    2026-08-06 Thu     76    $321.44
+#     2026-08-12 Wed    2026-08-13 Thu     44    $326.34
+#     2026-08-19 Wed    2026-08-20 Thu     73    $325.07
+#     2026-08-26 Wed    2026-08-27 Thu    107    $308.06
+#     2026-09-02 Wed    2026-09-03 Thu     47    $298.39
+#
+# 13 of 13 offset by exactly +1, no exceptions. CME's index is what this
+# reconstruction predicts, so reproducing it means bucketing the way CME buckets,
+# whatever the true calendar sale date was. Measured on the dates with complete
+# inputs (2026-08-28 onward): MAE 0.0134 -> 0.0043, and 2026-09-02 goes from
+# +0.07 against CME to exact.
+#
+# ---------------------------------------------------------------------------
+# EL RENO OK IS DELIBERATELY ABSENT. Do not add it.
+#
+# The same survey flagged El Reno as offset on 12 of its 13 sales -- on the face
+# of it a stronger pattern than Clovis. Shifting it is wrong, and measurably so:
+# 2026-09-02 goes from +0.07 to +1.36 and the MAE from 0.0134 to 0.1966, an
+# order of magnitude worse.
+#
+# The reason is that El Reno is ALREADY corrected, by detect_final_sale_day()
+# below: its multi-day sales are moved to their true final day from the report
+# narrative, firing on 1 week in 9. A blanket shift applies that correction a
+# second time, including on the 8 weeks that need no correction at all.
+#
+# The lesson, which is why this comment is this long: the head+price matcher used
+# to find these offsets cannot distinguish "CME buckets this later" from "the
+# matcher paired the wrong two sales". A detected pattern is a hypothesis to be
+# measured, never a licence to act. Nothing goes in this table without a measured
+# improvement on complete-input dates -- the survey alone is not evidence.
+LOCATION_BUCKET_SHIFT_DAYS = {
+    "clovis": 1,
+}
+
+
+def shifted_bucket_date(location, report_date_iso: str) -> str:
+    """report_date_iso moved by this location's bucketing correction, if any."""
+    n = LOCATION_BUCKET_SHIFT_DAYS.get((location or "").strip().lower())
+    if not n:
+        return report_date_iso
+    return (date.fromisoformat(report_date_iso) + timedelta(days=n)).isoformat()
 
 
 def get_auth():
@@ -212,8 +269,8 @@ def recompute_fci_daily(conn):
     given table size). Returns (n_written, first_date, last_date | None).
     """
     all_rows = conn.cursor().execute(
-        "SELECT report_date, raw_date, head_count, avg_weight, avg_price, published_date "
-        "FROM mars_sales ORDER BY report_date"
+        "SELECT report_date, raw_date, head_count, avg_weight, avg_price, published_date, "
+        "location FROM mars_sales ORDER BY report_date"
     ).fetchall()
     all_rows = [db.iso_row(r) for r in all_rows]
 
@@ -259,7 +316,9 @@ def recompute_fci_daily(conn):
     # lag is genuinely useful, since it explains why a first print and a final
     # print differ -- but it must NOT filter the window.
     by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
-    for report_date, raw_date, head, wt, price, published_date in all_rows:
+    for report_date, raw_date, head, wt, price, published_date, location in all_rows:
+        # Bucket the way CME buckets -- see LOCATION_BUCKET_SHIFT_DAYS.
+        report_date = shifted_bucket_date(location, report_date)
         w = head * wt
         by_day.setdefault(report_date, []).append((w, w * price, head))
 
@@ -395,8 +454,19 @@ def run_update(since: date, verbose=True):
         print("\nVideo auction reports (this week only):")
     video_results = fetch_all_video_rows(verbose=verbose)
     video_inserted = 0
+    video_stale = 0
     for name, (report_date_, published_date_, rows) in video_results.items():
         if report_date_ is None:
+            continue
+        # AMS keeps the last edition of a seasonal report posted forever, so
+        # a successful fetch is NOT evidence of a recent sale. See
+        # VIDEO_MAX_AGE_DAYS in video_reports.py for what this prevents.
+        age_days = (date.today() - report_date_).days
+        if age_days > VIDEO_MAX_AGE_DAYS:
+            video_stale += 1
+            if verbose:
+                print(f"  [stale] {name} VIDEO {report_date_} is {age_days}d "
+                      f"old -- skipped (AMS still serves the last edition)")
             continue
         iso_date = shift_weekend_to_monday(report_date_).isoformat()
         # Gate the index on the LATER of the two: a sale shifted off a weekend

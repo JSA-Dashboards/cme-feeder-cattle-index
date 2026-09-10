@@ -211,6 +211,31 @@ if ($code -eq 0 -and $pushCode -eq 0) {
     Ping-Health '/fail' $summary
 }
 
+# -- Daily estimate email -----------------------------------------------------
+# The MORNING run mails the estimate; the afternoon pass stays silent unless it
+# broke. Two identical-looking emails a day trains you to ignore both, and the
+# afternoon number is a refinement rather than news. A FAILURE always mails,
+# from either slot, because that is the case worth interrupting someone for.
+#
+# Sent through Outlook COM (see send_email.ps1) so no mail password is stored
+# anywhere. Inert unless EMAIL_TO is set in .env, and never fatal -- by this
+# point the pipeline has already done its real work and published.
+$slot = ''
+try { $slot = (& $py -c "import sys; sys.path.insert(0, r'$repo'); from snapshots import run_slot; print(run_slot())" 2>$null).Trim() } catch { }
+if ($code -eq 0 -and $pushCode -eq 0) {
+    if ($slot -eq 'am') {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $repo 'scripts\send_email.ps1') -Slot $slot |
+            ForEach-Object { Log $_ }
+    } else {
+        Log ("email: {0} slot succeeded - no mail sent by design" -f ($(if ($slot) { $slot } else { 'unknown' })))
+    }
+} else {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $repo 'scripts\send_email.ps1') -Failed $summary |
+        ForEach-Object { Log $_ }
+}
+
 # Distinct exit codes so Task Scheduler's LastTaskResult says WHICH half failed:
 # the update itself, or only the publish step.
 if ($code -ne 0)      { exit $code }

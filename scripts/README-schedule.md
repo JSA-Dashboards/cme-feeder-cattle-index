@@ -128,6 +128,57 @@ If you would rather not use a third party: Snowflake's `SYSTEM$SEND_EMAIL`
 needs a notification integration, and creating one requires ACCOUNTADMIN, which
 RBALDWIN does not have. That route is closed without an admin.
 
+## Daily estimate email
+
+The **morning** run mails the estimate; the afternoon pass is silent unless it
+failed. Two near-identical emails a day trains you to ignore both, and the
+afternoon number is a refinement rather than news. A **failure mails from
+either slot** — that is the case worth interrupting someone for.
+
+Sent through **Outlook COM**, not SMTP. That means no mail password stored
+anywhere, no SMTP AUTH exemption to request from IT (Microsoft 365 disables
+basic auth by default), and no third-party mail service holding a key — it uses
+the `JSA` profile already authenticated on this machine.
+
+The trade: **Outlook must be running.** `send_email.ps1` starts it minimised if
+it is not, and waits up to 60 seconds for the profile to load. If Outlook
+cannot start, the send logs a warning and the pipeline carries on — the real
+work is already published by that point.
+
+Set the recipients in `.env` (comma-separate for several):
+
+```
+EMAIL_TO=RBaldwin@jpsi.com
+EMAIL_CC=
+```
+
+Unset `EMAIL_TO` and no mail is attempted at all.
+
+To see it without sending, which opens a draft in Outlook:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\send_email.ps1 -Preview
+```
+
+**INTERNAL ONLY.** The body carries CME's published index values, licensed to
+JSA for internal display and internal non-display use. Forwarding it to clients
+or reusing it in client communications needs a separate agreement with CME. The
+email says so in its own footer, because whoever forwards it will not remember.
+
+## Checking a run
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_run.ps1
+powershell ... -File scripts\check_run.ps1 -Date 2026-09-10
+```
+
+Reports, in order: whether Task Scheduler fired it **on schedule** (event 107)
+rather than at boot (118) or by hand (110); whether WakeToRun actually woke the
+machine near 07:30; the run's own log, exit codes and whether it met 08:15
+(judging the FIRST run of the day, since that is the one the deadline is for);
+and then the data — the frozen morning call, what the freshness banner would
+say, and how the call scored once CME printed. Read-only.
+
 ## Still manual
 
 - **Peer estimates.** CIH's and Compass's figures are hand-entered with

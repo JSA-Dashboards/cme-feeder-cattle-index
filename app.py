@@ -28,8 +28,8 @@ except Exception:
 import snowflake_db as db
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
-from composition import (BRACKETS as COMP_BRACKETS, mix_effect,
-                         window_composition)
+from composition import (BRACKETS as COMP_BRACKETS, grade_totals as comp_grade_totals,
+                         mix_effect, window_composition)
 from volumes import (compare as volume_compare, history as volume_history,
                      ytd as volume_ytd)
 
@@ -1090,6 +1090,128 @@ with cols[2]:
 with cols[3]:
     st.markdown(tile("Month Change", fmt_price(month_chg), delta_html(month_chg)), unsafe_allow_html=True)
 
+# ── Index Volume ───────────────────────────────────────────────────────────────────────────
+# How much cattle is behind the index, which the price alone does not say: a
+# two-cent move on 9,000 head is a different fact from the same move on 25,000.
+# Two views, because they routinely disagree and each answers a real question.
+# The WINDOW row is a point-in-time reading, dominated by the last few weeks.
+# The CUMULATIVE row is the year to date. On 2026-09-09 the window sat 57%
+# under the year-ago date while the year to date ran 1.4% AHEAD of 2025.
+
+_vol, _vol_years, _vol_norm, _vol_span, _vol_ytd = _load_volumes()
+if _vol and _vol.get("head"):
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="sec-header">Index Volume</div>', unsafe_allow_html=True)
+
+    _est = " (our estimate — CME has not printed this date)" if _vol["is_estimate"] else ""
+    st.caption(
+        f"Head in the 7-day window for **{pd.Timestamp(_vol['date']).strftime('%b %d, %Y')}**"
+        f"{_est}. Year-ago steps back 52 weeks rather than 365 days so the weekday "
+        f"lines up — Monday windows run much heavier than Friday ones."
+    )
+
+    _n5, _n10 = _vol["norms"].get("5yr", {}), _vol["norms"].get("10yr", {})
+    _w = st.columns(5)
+    with _w[0]:
+        st.markdown(tile("Window Head", f"{_vol['head']:,}"), unsafe_allow_html=True)
+    with _w[1]:
+        st.markdown(tile("vs Last Week", f"{_vol['week_ago']:,}" if _vol["week_ago"] else "—",
+                         pct_delta_html(_vol["week_pct"])), unsafe_allow_html=True)
+    with _w[2]:
+        st.markdown(tile("vs Last Year", f"{_vol['year_ago']:,}" if _vol["year_ago"] else "—",
+                         pct_delta_html(_vol["year_pct"])), unsafe_allow_html=True)
+    for _col, _nm in ((_w[3], _n5), (_w[4], _n10)):
+        with _col:
+            st.markdown(tile(f"vs {_nm.get('label', '—')} Norm",
+                             f"{_nm['norm']:,.0f}" if _nm.get("norm") else "—",
+                             pct_delta_html(_nm.get("pct"))), unsafe_allow_html=True)
+
+    _bits = []
+    for _nm in (_n5, _n10):
+        if _nm.get("norm"):
+            _bits.append(f"{_nm['label']} ({_nm['years'][0]}–{_nm['years'][1]}): median "
+                         f"{_nm['norm']:,.0f}, middle half {_nm['p25']:,.0f}–"
+                         f"{_nm['p75']:,.0f}, n={_nm['n']}")
+    if _bits:
+        st.caption(f"Norms are the median for ISO week {_vol['iso_week']} — "
+                   + " · ".join(_bits) + ".")
+    for _nm in (_n5, _n10):
+        if _nm.get("norm") and not _nm.get("reliable"):
+            # ISO weeks 1 and 52 straddle the New Year shutdown, pooling closed
+            # days with normal ones. Say so rather than implying precision.
+            st.warning(
+                f"**Treat the {_nm['label']} norm with caution this week.** Those "
+                f"years spread {_nm['spread_pct']:.0f}% of their own median for ISO "
+                f"week {_vol['iso_week']} — the week straddles a holiday shutdown, so "
+                f"the baseline mixes closed days with normal ones. Last week and last "
+                f"year are unaffected."
+            )
+
+    # Cumulative. Sums CME's DAILY TOTALS, not the rolling window -- adding the
+    # window across a year would count every animal about five times.
+    if _vol_ytd and _vol_ytd.get("head"):
+        _y = _vol_ytd
+        _p5, _p10 = _y["periods"].get("5yr", {}), _y["periods"].get("10yr", {})
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        _d = st.columns(4)
+        with _d[0]:
+            st.markdown(tile(f"{_y['year']} YTD Head", f"{_y['head']:,}"),
+                        unsafe_allow_html=True)
+        with _d[1]:
+            st.markdown(tile(f"vs {_y['prev_year']} YTD",
+                             f"{_y['prev_head']:,}" if _y["prev_head"] else "—",
+                             pct_delta_html(_y["prev_pct"])), unsafe_allow_html=True)
+        for _col, _pr in ((_d[2], _p5), (_d[3], _p10)):
+            with _col:
+                st.markdown(tile(f"vs {_pr.get('label', '—')} Avg YTD",
+                                 f"{_pr['avg']:,.0f}" if _pr.get("avg") else "—",
+                                 pct_delta_html(_pr.get("pct"))), unsafe_allow_html=True)
+
+        # Olympic average, in a second row positioned so each tile sits
+        # directly beneath its plain counterpart above. Additive on purpose:
+        # the plain average stays the headline, this is the cross-check.
+        if _p5.get("oly_avg") or _p10.get("oly_avg"):
+            _o = st.columns(4)
+            for _col, _pr in ((_o[2], _p5), (_o[3], _p10)):
+                with _col:
+                    st.markdown(tile(f"vs {_pr.get('label', '—')} Olympic",
+                                     f"{_pr['oly_avg']:,.0f}" if _pr.get("oly_avg") else "—",
+                                     pct_delta_html(_pr.get("oly_pct"))),
+                                unsafe_allow_html=True)
+            _drops = []
+            for _pr in (_p5, _p10):
+                if _pr.get("oly_avg"):
+                    _drops.append(
+                        f"{_pr['label']} drops {_pr['oly_dropped_high']} "
+                        f"({_pr['oly_dropped_high_head']:,}) and "
+                        f"{_pr['oly_dropped_low']} ({_pr['oly_dropped_low_head']:,}), "
+                        f"averaging the remaining {_pr['oly_n']}")
+            st.caption(
+                "**Olympic average** — highest and lowest year removed, the rest "
+                "averaged. " + " · ".join(_drops) + ". Worth reading with care on "
+                "this series: volume has been trending down, so the year dropped as "
+                "the *low* is 2025 — the most recent and most relevant one. That "
+                "raises the baseline and makes 2026 look slightly worse, for a "
+                "reason that is trend rather than outlier."
+            )
+
+        if _y.get("dates_comparable") is False:
+            st.warning(
+                f"**The two years published different numbers of dates** "
+                f"({_y['dates']} vs {_y['prev_dates']}, a {_y['date_gap_pct']:.0f}% "
+                f"gap), so part of this difference is calendar coverage rather than "
+                f"cattle. Treat the percentage as indicative."
+            )
+        st.caption(
+            f"Cumulative head sold, every year cut at the same point in the week "
+            f"(ISO week {_y['iso_week']}, day {_y['iso_weekday']}) so a partial "
+            f"current week is not measured against complete ones. Summed from CME's "
+            f"DAILY TOTALS — the window head above is a 7-day *rolling* figure, and "
+            f"adding it across a year would count every animal about five times. "
+            f"{_y['year']}: {_y['dates']} published dates · {_y['prev_year']}: "
+            f"{_y['prev_dates']}."
+        )
+
 # ── Daily (same-day, non-rolling) snapshot ─────────────────────────────────────
 # Mirrors the "Daily: $X on Y head and Z lbs average" line under CME subscriber
 # reports — the single date's own weighted average, distinct from the 7-day
@@ -1218,9 +1340,43 @@ if _comp:
             "Total Head": f"{_tot:,}",
             "Share": f"{100 * _tot / _grand:.1f}%" if _grand else "—",
         })
+    # Totals row, so the columns visibly add up and the blended price can be
+    # checked against the tiles without arithmetic. Blank Share cell rather
+    # than "100.0%" -- the column is bracket share, and a total of itself is
+    # noise.
+    _gt = comp_grade_totals(_comp)
+    _rows.append({
+        "Bracket": "TOTAL",
+        "#1 Head": f"{_gt['1']['head']:,}",
+        "#1 Price": f"${_gt['1']['price']:.2f}" if _gt["1"]["price"] else "—",
+        "#1-2 Head": f"{_gt['1-2']['head']:,}",
+        "#1-2 Price": f"${_gt['1-2']['price']:.2f}" if _gt["1-2"]["price"] else "—",
+        "Total Head": f"{_grand:,}",
+        "Share": "",
+    })
     with st.container(key="wm-composition"):
         st.dataframe(pd.DataFrame(_rows), use_container_width=True,
-                     hide_index=True, height=180)
+                     hide_index=True, height=215)
+
+    # Grade split on one scannable line. The discount is given in dollars AND
+    # as a share of the #1 price because the two tell different stories: the
+    # dollar spread has roughly tripled since 2019 purely because the price
+    # level tripled, while the proportional discount has sat in a 4-6% band
+    # with no trend. Dollars alone invite reading a rising market as a
+    # widening quality gap.
+    _lb_total = _gt["1"]["lbs"] + _gt["1-2"]["lbs"]
+    if _lb_total and _gt["1"]["price"] and _gt["1-2"]["price"]:
+        _disc = _gt["1"]["price"] - _gt["1-2"]["price"]
+        st.caption(
+            f"**#1** {100 * _gt['1']['head'] / _grand:.1f}% of head "
+            f"({100 * _gt['1']['lbs'] / _lb_total:.1f}% of pounds) at "
+            f"\\${_gt['1']['price']:.2f}  ·  "
+            f"**#1-2** {100 * _gt['1-2']['head'] / _grand:.1f}% of head "
+            f"({100 * _gt['1-2']['lbs'] / _lb_total:.1f}% of pounds) at "
+            f"\\${_gt['1-2']['price']:.2f}  ·  "
+            f"**discount \\${abs(_disc):.2f}**, or "
+            f"{100 * abs(_disc) / _gt['1']['price']:.1f}% of the #1 price"
+        )
 
     if _mix:
         # Sign convention: a NEGATIVE effect means the current mix is holding
@@ -1420,128 +1576,16 @@ st.caption(
 )
 
 
-# ── Index Volume ───────────────────────────────────────────────────────────────────────────
-# How much cattle is behind the index, which the price alone does not say: a
-# two-cent move on 9,000 head is a different fact from the same move on 25,000.
-# Two views, because they routinely disagree and each answers a real question.
-# The WINDOW row is a point-in-time reading, dominated by the last few weeks.
-# The CUMULATIVE row is the year to date. On 2026-09-09 the window sat 57%
-# under the year-ago date while the year to date ran 1.4% AHEAD of 2025.
+# ── Volume vs Seasonal Norm ─────────────────────────────────────────────────────────────────
+# The chart half of the volume panel, left down here with the other charts
+# rather than beside its own tiles. The tiles are the daily read and belong
+# next to the price they contextualise; this is reference, and sits better
+# alongside Seasonal Pattern than pushing the 7-day window 300px down.
 
-_vol, _vol_years, _vol_norm, _vol_span, _vol_ytd = _load_volumes()
-if _vol and _vol.get("head"):
+if _vol and _vol_years and _vol_norm:
     st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-    st.markdown('<div class="sec-header">Index Volume</div>', unsafe_allow_html=True)
-
-    _est = " (our estimate — CME has not printed this date)" if _vol["is_estimate"] else ""
-    st.caption(
-        f"Head in the 7-day window for **{pd.Timestamp(_vol['date']).strftime('%b %d, %Y')}**"
-        f"{_est}. Year-ago steps back 52 weeks rather than 365 days so the weekday "
-        f"lines up — Monday windows run much heavier than Friday ones."
-    )
-
-    _n5, _n10 = _vol["norms"].get("5yr", {}), _vol["norms"].get("10yr", {})
-    _w = st.columns(5)
-    with _w[0]:
-        st.markdown(tile("Window Head", f"{_vol['head']:,}"), unsafe_allow_html=True)
-    with _w[1]:
-        st.markdown(tile("vs Last Week", f"{_vol['week_ago']:,}" if _vol["week_ago"] else "—",
-                         pct_delta_html(_vol["week_pct"])), unsafe_allow_html=True)
-    with _w[2]:
-        st.markdown(tile("vs Last Year", f"{_vol['year_ago']:,}" if _vol["year_ago"] else "—",
-                         pct_delta_html(_vol["year_pct"])), unsafe_allow_html=True)
-    for _col, _nm in ((_w[3], _n5), (_w[4], _n10)):
-        with _col:
-            st.markdown(tile(f"vs {_nm.get('label', '—')} Norm",
-                             f"{_nm['norm']:,.0f}" if _nm.get("norm") else "—",
-                             pct_delta_html(_nm.get("pct"))), unsafe_allow_html=True)
-
-    _bits = []
-    for _nm in (_n5, _n10):
-        if _nm.get("norm"):
-            _bits.append(f"{_nm['label']} ({_nm['years'][0]}–{_nm['years'][1]}): median "
-                         f"{_nm['norm']:,.0f}, middle half {_nm['p25']:,.0f}–"
-                         f"{_nm['p75']:,.0f}, n={_nm['n']}")
-    if _bits:
-        st.caption(f"Norms are the median for ISO week {_vol['iso_week']} — "
-                   + " · ".join(_bits) + ".")
-    for _nm in (_n5, _n10):
-        if _nm.get("norm") and not _nm.get("reliable"):
-            # ISO weeks 1 and 52 straddle the New Year shutdown, pooling closed
-            # days with normal ones. Say so rather than implying precision.
-            st.warning(
-                f"**Treat the {_nm['label']} norm with caution this week.** Those "
-                f"years spread {_nm['spread_pct']:.0f}% of their own median for ISO "
-                f"week {_vol['iso_week']} — the week straddles a holiday shutdown, so "
-                f"the baseline mixes closed days with normal ones. Last week and last "
-                f"year are unaffected."
-            )
-
-    # Cumulative. Sums CME's DAILY TOTALS, not the rolling window -- adding the
-    # window across a year would count every animal about five times.
-    if _vol_ytd and _vol_ytd.get("head"):
-        _y = _vol_ytd
-        _p5, _p10 = _y["periods"].get("5yr", {}), _y["periods"].get("10yr", {})
-        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-        _d = st.columns(4)
-        with _d[0]:
-            st.markdown(tile(f"{_y['year']} YTD Head", f"{_y['head']:,}"),
-                        unsafe_allow_html=True)
-        with _d[1]:
-            st.markdown(tile(f"vs {_y['prev_year']} YTD",
-                             f"{_y['prev_head']:,}" if _y["prev_head"] else "—",
-                             pct_delta_html(_y["prev_pct"])), unsafe_allow_html=True)
-        for _col, _pr in ((_d[2], _p5), (_d[3], _p10)):
-            with _col:
-                st.markdown(tile(f"vs {_pr.get('label', '—')} Avg YTD",
-                                 f"{_pr['avg']:,.0f}" if _pr.get("avg") else "—",
-                                 pct_delta_html(_pr.get("pct"))), unsafe_allow_html=True)
-
-        # Olympic average, in a second row positioned so each tile sits
-        # directly beneath its plain counterpart above. Additive on purpose:
-        # the plain average stays the headline, this is the cross-check.
-        if _p5.get("oly_avg") or _p10.get("oly_avg"):
-            _o = st.columns(4)
-            for _col, _pr in ((_o[2], _p5), (_o[3], _p10)):
-                with _col:
-                    st.markdown(tile(f"vs {_pr.get('label', '—')} Olympic",
-                                     f"{_pr['oly_avg']:,.0f}" if _pr.get("oly_avg") else "—",
-                                     pct_delta_html(_pr.get("oly_pct"))),
-                                unsafe_allow_html=True)
-            _drops = []
-            for _pr in (_p5, _p10):
-                if _pr.get("oly_avg"):
-                    _drops.append(
-                        f"{_pr['label']} drops {_pr['oly_dropped_high']} "
-                        f"({_pr['oly_dropped_high_head']:,}) and "
-                        f"{_pr['oly_dropped_low']} ({_pr['oly_dropped_low_head']:,}), "
-                        f"averaging the remaining {_pr['oly_n']}")
-            st.caption(
-                "**Olympic average** — highest and lowest year removed, the rest "
-                "averaged. " + " · ".join(_drops) + ". Worth reading with care on "
-                "this series: volume has been trending down, so the year dropped as "
-                "the *low* is 2025 — the most recent and most relevant one. That "
-                "raises the baseline and makes 2026 look slightly worse, for a "
-                "reason that is trend rather than outlier."
-            )
-
-        if _y.get("dates_comparable") is False:
-            st.warning(
-                f"**The two years published different numbers of dates** "
-                f"({_y['dates']} vs {_y['prev_dates']}, a {_y['date_gap_pct']:.0f}% "
-                f"gap), so part of this difference is calendar coverage rather than "
-                f"cattle. Treat the percentage as indicative."
-            )
-        st.caption(
-            f"Cumulative head sold, every year cut at the same point in the week "
-            f"(ISO week {_y['iso_week']}, day {_y['iso_weekday']}) so a partial "
-            f"current week is not measured against complete ones. Summed from CME's "
-            f"DAILY TOTALS — the window head above is a 7-day *rolling* figure, and "
-            f"adding it across a year would count every animal about five times. "
-            f"{_y['year']}: {_y['dates']} published dates · {_y['prev_year']}: "
-            f"{_y['prev_dates']}."
-        )
-
+    st.markdown('<div class="sec-header">Volume vs Seasonal Norm</div>',
+                unsafe_allow_html=True)
     # Seasonal volume chart: this year and last against the longest norm period.
     if _vol_years and _vol_norm:
         _fig_vol = go.Figure()
@@ -1582,6 +1626,8 @@ if _vol and _vol.get("head"):
             "year to year; holiday placement still drifts, which is why the year-ago and "
             "norm tiles can disagree."
         )
+
+
 
 # ── Weekly Rundown ────────────────────────────────────────────────────────────
 

@@ -70,7 +70,8 @@ def window_composition(conn, index_date_iso, days=7):
     return cells
 
 
-def _grade_totals(cells):
+def grade_totals(cells):
+    """{grade: {head, lbs, dollars, price}} summed across all brackets."""
     out = {g: {"head": 0, "lbs": 0.0, "dollars": 0.0} for g in GRADES}
     for (_wl, g), c in cells.items():
         if g not in out:
@@ -122,7 +123,7 @@ def mix_effect(conn, index_date_iso):
     cells = window_composition(conn, index_date_iso)
     if not cells:
         return None
-    tot = _grade_totals(cells)
+    tot = grade_totals(cells)
     lbs = sum(t["lbs"] for t in tot.values())
     if not lbs or not all(tot[g]["lbs"] for g in GRADES):
         return None

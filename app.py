@@ -1237,6 +1237,59 @@ if _comp:
             f"\\${_mix['counterfactual']:.2f})."
         )
 
+        # The numbers above are the daily read; this is what they mean. In an
+        # expander so the page stays scannable for someone checking the level
+        # at 07:45, with the reasoning one click away when a figure surprises
+        # them. Every number below is interpolated from the same _mix dict as
+        # the caption, so the worked example cannot drift from what is shown.
+        with st.expander("ℹ️  How to read the mix effect"):
+            _pts = 100 * (_mix["share_now"] - _mix["share_base"])
+            _dir_word = "lower" if _mix["effect"] < 0 else "higher"
+            st.markdown(f"""
+**It is a counterfactual: today's cattle, today's prices, the old quality mix.**
+
+The index counts two muscle grades — #1 and #1-2 Medium & Large steers — and
+#1-2 sells at a discount. So the printed level depends not only on what cattle
+are worth but on *how many of each grade happen to be in the sample*.
+
+The arithmetic is one line:
+
+```
+{_pts:+.1f} percentage points of pounds  x  ${abs(_mix["spread"]):.2f} discount  =  {"-" if _mix["effect"] < 0 else "+"}${abs(_mix["effect"]):.2f}/cwt
+```
+
+This week **{100 * _mix["share_now"]:.1f}%** of the window's pounds are #1-2,
+against **{100 * _mix["share_base"]:.1f}%** normal for this week of September
+({_mix["baseline_years"]} prior years). Those extra pounds sell about
+**\\${abs(_mix["spread"]):.2f}** back, so the index prints roughly
+**\\${abs(_mix["effect"]):.2f} {_dir_word}** than the usual mix would give.
+
+**It is not saying cattle got cheaper.** Both grades could be up on the week and
+this would read the same. It separates *what is in the sample* from *what the
+sample is worth*.
+
+**Why "this week of September" and not "this date".** Barns sell on fixed
+weekdays — Carthage Mondays, Beaver and El Reno Tuesdays — so comparing calendar
+dates across years lands on different weekdays and therefore different barns.
+Comparing the same numbered week keeps the position in the marketing year fixed
+and pools about five trading days per year, so one odd day cannot swing the
+baseline.
+
+**Expect it to move**, and to go positive in weeks when the mix is cleaner than
+normal. Direct trade is lumpy — a few large Texas lots can shift the share
+several points in a week — so this typically wanders between about +\\$1 and
+−\\$2 rather than sitting still.
+
+**What it is for.** When the index lands somewhere you did not expect, this says
+which of two different things happened:
+
+- *Cattle traded lower* — the grade prices themselves fell, mix effect roughly unchanged
+- *The sample got worse* — grade prices held, mix effect widened
+
+Those carry opposite implications. A composition move tends to snap back when a
+cleaner week of #1 cattle comes through; a price move does not.
+""")
+
 # ── FCI Trend Chart ───────────────────────────────────────────────────────────
 
 st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)

@@ -81,6 +81,35 @@ CREATE TABLE IF NOT EXISTS cme_ftp_daily (
     same_day_avg_weight FLOAT
 );
 
+-- AMS replacement- and slaughter-cattle auction reports: the weekly market read
+-- on herd expansion versus liquidation. NO primary key on purpose -- the natural
+-- key is not unique (slaughter cows carry ~10 rows per report under one class,
+-- separated only by weight and yield tier), so ingest deletes and re-inserts per
+-- (slug_id, report_date) rather than upserting. price_unit must be filtered on in
+-- every aggregation: bred females trade Per Unit, slaughter cows Per Cwt.
+CREATE TABLE IF NOT EXISTS replacement_sales (
+    report_date DATE NOT NULL,
+    published_date DATE,
+    slug_id INTEGER NOT NULL,
+    market_name VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    commodity VARCHAR,
+    class_desc VARCHAR,
+    age VARCHAR,
+    pregnancy_stage VARCHAR,
+    frame VARCHAR,
+    muscle_grade VARCHAR,
+    price_unit VARCHAR,
+    head_count INTEGER,
+    avg_weight FLOAT,
+    avg_price FLOAT,
+    price_min FLOAT,
+    price_max FLOAT,
+    receipts INTEGER,
+    receipts_year_ago INTEGER
+);
+
 -- Per-bracket detail behind each location row: CME's eight grade/weight
 -- columns. The row-level average weight hides the mix, and the mix is what
 -- answers whether the index is capturing heavier cattle or different ones.

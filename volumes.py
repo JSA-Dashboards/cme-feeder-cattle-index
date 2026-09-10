@@ -213,15 +213,48 @@ def ytd(conn, index_date_iso=None):
     for key, (y0, y1) in PERIODS.items():
         vals = [agg[y] for y in range(y0, y1 + 1) if y in agg]
         if not vals:
-            out["periods"][key] = {"label": f"{y1 - y0 + 1}-Yr", "avg": None}
+            out["periods"][key] = {"label": f"{y1 - y0 + 1}-Yr", "avg": None,
+                                   "oly_avg": None}
             continue
         avg = sum(h for h, _ in vals) / len(vals)
-        out["periods"][key] = {
+        entry = {
             "label": f"{y1 - y0 + 1}-Yr", "years": (y0, y1), "n": len(vals),
             "avg": avg, "avg_dates": sum(n for _, n in vals) / len(vals),
             "pct": 100.0 * (cur[0] - avg) / avg,
+            "oly_avg": None,
         }
+        entry.update(_olympic(agg, range(y0, y1 + 1), cur[0]))
+        out["periods"][key] = entry
     return out
+
+
+def _olympic(agg, years, current):
+    """
+    Olympic average: drop the highest and lowest year, average the rest. The
+    usual ag-benchmarking remedy for one freak season dominating a mean.
+
+    Reported ALONGSIDE the plain average, never instead of it, because on this
+    particular series the assumption behind it does not hold. Olympic averaging
+    treats extremes as noise. Feeder volume has been trending DOWN -- 2025 is
+    the lowest year in both the five- and ten-year windows -- so "drop the
+    lowest" removes the most recent and most relevant observation and raises the
+    baseline. Measured 2026-09-10: it moves 2026 from -9.96% to -10.99% against
+    five years and -13.64% to -14.12% against ten. Small, but in the direction
+    that flatters the baseline rather than the current year, and for a reason
+    that is trend rather than outlier.
+    """
+    pairs = sorted((agg[y][0], y) for y in years if y in agg)
+    if len(pairs) < 3:
+        return {"oly_avg": None}
+    low, high, kept = pairs[0], pairs[-1], pairs[1:-1]
+    oly = sum(v for v, _ in kept) / len(kept)
+    return {
+        "oly_avg": oly,
+        "oly_pct": 100.0 * (current - oly) / oly,
+        "oly_n": len(kept),
+        "oly_dropped_low": low[1], "oly_dropped_low_head": low[0],
+        "oly_dropped_high": high[1], "oly_dropped_high_head": high[0],
+    }
 
 
 def history(conn, years=(2026, 2025)):

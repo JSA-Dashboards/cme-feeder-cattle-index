@@ -1369,6 +1369,34 @@ if _vol and _vol.get("head"):
                                  f"{_pr['avg']:,.0f}" if _pr.get("avg") else "—",
                                  pct_delta_html(_pr.get("pct"))), unsafe_allow_html=True)
 
+        # Olympic average, in a second row positioned so each tile sits
+        # directly beneath its plain counterpart above. Additive on purpose:
+        # the plain average stays the headline, this is the cross-check.
+        if _p5.get("oly_avg") or _p10.get("oly_avg"):
+            _o = st.columns(4)
+            for _col, _pr in ((_o[2], _p5), (_o[3], _p10)):
+                with _col:
+                    st.markdown(tile(f"vs {_pr.get('label', '—')} Olympic",
+                                     f"{_pr['oly_avg']:,.0f}" if _pr.get("oly_avg") else "—",
+                                     pct_delta_html(_pr.get("oly_pct"))),
+                                unsafe_allow_html=True)
+            _drops = []
+            for _pr in (_p5, _p10):
+                if _pr.get("oly_avg"):
+                    _drops.append(
+                        f"{_pr['label']} drops {_pr['oly_dropped_high']} "
+                        f"({_pr['oly_dropped_high_head']:,}) and "
+                        f"{_pr['oly_dropped_low']} ({_pr['oly_dropped_low_head']:,}), "
+                        f"averaging the remaining {_pr['oly_n']}")
+            st.caption(
+                "**Olympic average** — highest and lowest year removed, the rest "
+                "averaged. " + " · ".join(_drops) + ". Worth reading with care on "
+                "this series: volume has been trending down, so the year dropped as "
+                "the *low* is 2025 — the most recent and most relevant one. That "
+                "raises the baseline and makes 2026 look slightly worse, for a "
+                "reason that is trend rather than outlier."
+            )
+
         if _y.get("dates_comparable") is False:
             st.warning(
                 f"**The two years published different numbers of dates** "

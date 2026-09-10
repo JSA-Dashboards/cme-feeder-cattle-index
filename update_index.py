@@ -60,6 +60,25 @@ ROSTER_PATH = DATA_DIR / "mars_roster.json"
 DB_PATH = DATA_DIR / "mars_history.db"
 
 MARS_BASE = "https://marsapi.ams.usda.gov/services/v1.2"
+
+# How far back of already-stored dates each run re-asks USDA for. Every run
+# re-fetches this window in full and upserts, so a report that USDA publishes
+# LATE is only ever picked up if it lands inside it -- past that, no run asks
+# for that date again and the sale is invisible for good.
+#
+# Measured 2026-09-09 over 80 auctions and 246 reports: 98.3% of qualifying head
+# is published within 2 days of the sale and 99.9% within 3, but the tail is
+# real -- Roswell published 8 days late and Mid Missouri Stockyards 12 (72 head
+# between them, 0.13%). 7 days missed both. 14 covers everything observed with
+# room to spare.
+#
+# Free to widen, which is why it is 14 and not 8: the window is a QUERY
+# PARAMETER on one call per auction slug, so a wider one costs no extra
+# requests, and the two expensive stages -- fetch_all_direct_rows() and
+# fetch_all_video_rows(), which run pdfplumber over ~20 PDFs and dominate the
+# ~20 minute runtime -- take no date range at all and are completely unaffected.
+# The only cost is parsing more JSON rows per slug.
+REFETCH_LOOKBACK_DAYS = 14
 TARGET_GRADES = {"1", "1-2"}
 TARGET_BRACKETS = {700, 750, 800, 850}
 CONTINUATION_START = date(2026, 1, 24)  # day after the workbook's last date
@@ -522,7 +541,8 @@ if __name__ == "__main__":
         conn = db.get_conn()
         row = conn.cursor().execute("SELECT MAX(report_date) FROM fci_daily").fetchone()
         conn.close()
-        since = date.fromisoformat(db.iso(row[0])) - timedelta(days=7) if row and row[0] else CONTINUATION_START
+        since = (date.fromisoformat(db.iso(row[0])) - timedelta(days=REFETCH_LOOKBACK_DAYS)
+                 if row and row[0] else CONTINUATION_START)
     else:
         since = CONTINUATION_START
 

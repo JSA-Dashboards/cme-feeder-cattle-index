@@ -67,27 +67,36 @@ $body    = Get-Content $bodyFile -Raw -Encoding utf8
 # sandboxed or non-desktop process. Start it ourselves first, minimised, and
 # give it time to load the profile. On a normal morning Outlook is already open
 # and this costs nothing.
+# Returns nothing on purpose. The first version returned $true/$false and was
+# called as `$null = Ensure-Outlook`, which in PowerShell discards the whole
+# output stream -- so every diagnostic Write-Output inside it vanished too, and
+# the 2026-09-10 failure logged only the bare COM error with no clue whether
+# Outlook had been started. Status is not used by the caller anyway; the COM
+# call below either works or does not.
 function Ensure-Outlook {
-    if (Get-Process OUTLOOK -ErrorAction SilentlyContinue) { return $true }
+    if (Get-Process OUTLOOK -ErrorAction SilentlyContinue) {
+        Write-Output 'email: Outlook already running'
+        return
+    }
     Write-Output 'email: Outlook not running, starting it'
     try {
         Start-Process 'outlook.exe' -WindowStyle Minimized -ErrorAction Stop
     } catch {
         Write-Output ("email: could not start Outlook - {0}" -f $_.Exception.Message)
-        return $false
+        return
     }
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 2
         if (Get-Process OUTLOOK -ErrorAction SilentlyContinue) {
-            Start-Sleep -Seconds 5      # let the profile finish loading
-            return $true
+            Write-Output ("email: Outlook started after {0}s, waiting for the profile" -f (($i + 1) * 2))
+            Start-Sleep -Seconds 5
+            return
         }
     }
     Write-Output 'email: Outlook did not start within 60s'
-    return $false
 }
 
-$null = Ensure-Outlook
+Ensure-Outlook
 try {
     $outlook = New-Object -ComObject Outlook.Application
     $mail = $outlook.CreateItem(0)            # 0 = olMailItem

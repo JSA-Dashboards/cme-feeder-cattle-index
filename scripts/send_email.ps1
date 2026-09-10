@@ -75,10 +75,21 @@ $body    = Get-Content $bodyFile -Raw -Encoding utf8
 # call below either works or does not.
 function Ensure-Outlook {
     if (Get-Process OUTLOOK -ErrorAction SilentlyContinue) {
-        Write-Output 'email: Outlook already running'
+        Write-Output 'email: classic Outlook already running'
         return
     }
-    Write-Output 'email: Outlook not running, starting it'
+    # The NEW Outlook for Windows (olk.exe, the Microsoft.OutlookForWindows
+    # store app) is a WebView2 wrapper around the web client and exposes NO COM
+    # automation at all -- no Outlook.Application, no MAPI. If that is the mail
+    # client in use, waiting 60s for classic to appear and then failing on COM
+    # wastes a minute of every run and logs a misleading error. Say so and stop.
+    if (Get-Process olk -ErrorAction SilentlyContinue) {
+        Write-Output ('email: the NEW Outlook (olk.exe) is running, which has no COM ' +
+                      'automation interface. Classic OUTLOOK.EXE is required for this ' +
+                      'transport, or switch to SMTP/Graph -- see README-schedule.md.')
+        return
+    }
+    Write-Output 'email: classic Outlook not running, starting it'
     try {
         Start-Process 'outlook.exe' -WindowStyle Minimized -ErrorAction Stop
     } catch {
@@ -97,6 +108,11 @@ function Ensure-Outlook {
 }
 
 Ensure-Outlook
+if ((Get-Process olk -ErrorAction SilentlyContinue) -and
+    -not (Get-Process OUTLOOK -ErrorAction SilentlyContinue)) {
+    Write-Output 'email: skipping the send - no COM-capable Outlook available'
+    exit 0
+}
 try {
     $outlook = New-Object -ComObject Outlook.Application
     $mail = $outlook.CreateItem(0)            # 0 = olMailItem

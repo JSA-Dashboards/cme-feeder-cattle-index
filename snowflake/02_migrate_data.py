@@ -21,7 +21,7 @@ HERE = Path(__file__).parent.parent
 DB_PATH = HERE / "data" / "mars_history.db"
 
 TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily", "cme_ftp_locations",
-          "peer_estimates", "fci_snapshots"]
+          "cme_ftp_brackets", "peer_estimates", "fci_snapshots"]
 
 
 def main():

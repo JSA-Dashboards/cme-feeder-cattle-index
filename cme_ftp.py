@@ -56,6 +56,18 @@ import snowflake_db as db
 FTP_HOST = "ftp.cmegroup.com"
 FTP_BASE = "cash_settled_commodity_index_prices/daily_data/feeder_cattle"
 
+# The eight weight/grade brackets a data row carries, in file column order.
+# Header rows 3-4 of any file spell it out: four "#1 Steers" columns at
+# 700-749 / 750-799 / 800-849 / 850-899, then the same four for "#1-2 Steers".
+# Each bracket is three numbers (head, weight, price), so 24 tokens, followed
+# by five summary tokens (total head, total weight, wtd avg weight, total
+# price, wtd avg price) for 29 in all -- which is exactly the count the
+# existing parser tests for and then discards the first 24 of.
+BRACKETS = [
+    ("1", 700), ("1", 750), ("1", 800), ("1", 850),
+    ("1-2", 700), ("1-2", 750), ("1-2", 800), ("1-2", 850),
+]
+
 _DATE_ROW_RE = re.compile(r"^\s*\d{1,2}/\d{1,2}/\d{2}\s")
 _STATE_RE = re.compile(r"([A-Z]{1,2})\s+(-?\d)")
 _CONCAT_RE = re.compile(r"(\d+\.\d{2})(?=\d+\.\d{2})")
@@ -271,10 +283,22 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
         upper_prefix = prefix.upper()
         is_totals = "TOTALS" in upper_prefix
         is_official_totals = "TOTALS" in prefix
+        brackets = []
         if len(toks) == 5:
             head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks)
         elif len(toks) == 29:
             head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks[24:29])
+            # The first 24 tokens are the eight brackets this row is built
+            # from. The row-level average weight hides the mix: 804 lb can be
+            # everything sitting at 800-849, or a barbell of 700-749 and
+            # 850-899. Keeping the brackets is what makes the weight-shift
+            # question answerable rather than a matter of inference.
+            for i, (grade, wlow) in enumerate(BRACKETS):
+                b_head, b_wt, b_price = (float(t) for t in toks[i * 3:i * 3 + 3])
+                if b_head > 0:
+                    brackets.append({"grade": grade, "weight_low": wlow,
+                                     "head": int(b_head), "avg_weight": b_wt,
+                                     "avg_price": b_price})
         else:
             continue  # unparseable row -- skip rather than guess
 
@@ -311,6 +335,7 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
         except Exception:
             raw_date = file_date.isoformat()
         locations.append({
+            "brackets": brackets,
             "raw_date": raw_date,
             "location": loc_text.title(),
             "state": state,
@@ -385,6 +410,25 @@ def init_official_tables(conn):
             same_day_price REAL,
             same_day_head INTEGER,
             same_day_avg_weight REAL
+        )
+    """)
+    # Per-bracket detail behind each location row: the eight grade/weight
+    # columns CME's files carry. The row-level average weight hides the mix --
+    # 804 lb can be everything at 800-849 or a barbell of 700-749 and 850-899 --
+    # and the mix is what tells you whether the index sample is capturing
+    # heavier cattle or simply different ones.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cme_ftp_brackets (
+            report_date TEXT NOT NULL,
+            raw_date TEXT,
+            location TEXT NOT NULL,
+            state TEXT,
+            grade TEXT NOT NULL,
+            weight_low INTEGER NOT NULL,
+            head_count INTEGER NOT NULL,
+            avg_weight REAL,
+            avg_price REAL,
+            PRIMARY KEY (report_date, location, grade, weight_low)
         )
     """)
     conn.execute("""

@@ -81,6 +81,22 @@ CREATE TABLE IF NOT EXISTS cme_ftp_daily (
     same_day_avg_weight FLOAT
 );
 
+-- Per-bracket detail behind each location row: CME's eight grade/weight
+-- columns. The row-level average weight hides the mix, and the mix is what
+-- answers whether the index is capturing heavier cattle or different ones.
+CREATE TABLE IF NOT EXISTS cme_ftp_brackets (
+    report_date DATE NOT NULL,
+    raw_date DATE,
+    location VARCHAR NOT NULL,
+    state VARCHAR,
+    grade VARCHAR NOT NULL,
+    weight_low INTEGER NOT NULL,
+    head_count INTEGER NOT NULL,
+    avg_weight FLOAT,
+    avg_price FLOAT,
+    PRIMARY KEY (report_date, location, grade, weight_low)
+);
+
 -- Upsert (mirrors "INSERT OR REPLACE") -- per-location detail behind the
 -- official cme_ftp_daily rows above.
 CREATE TABLE IF NOT EXISTS cme_ftp_locations (

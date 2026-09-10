@@ -102,6 +102,16 @@ def main():
             ["report_date"],
         )
         for loc in parsed["locations"]:
+            for b in loc.get("brackets") or []:
+                db.merge_replace(
+                    conn, "cme_ftp_brackets",
+                    ["report_date", "raw_date", "location", "state", "grade",
+                     "weight_low", "head_count", "avg_weight", "avg_price"],
+                    (parsed["date"], loc["raw_date"], loc["location"], loc["state"],
+                     b["grade"], b["weight_low"], b["head"], b["avg_weight"],
+                     b["avg_price"]),
+                    ["report_date", "location", "grade", "weight_low"],
+                )
             db.merge_replace(
                 conn, "cme_ftp_locations",
                 ["report_date", "location", "state", "head_count", "avg_weight", "avg_price"],

@@ -24,10 +24,41 @@ Two measurements, both taken 2026-09-09:
   n=17, from the FTP server's `MDTM` timestamps). The 07:30 run therefore
   *structurally cannot* see the file published that morning, so "Last CME
   Print" was always a day stale.
-- **USDA publication is unfinished at 07:30.** Across 80 auctions and 246
-  reports, head-weighted, 83.3% of a sale day's qualifying head is published
-  the same day (mostly noon–19:00), 85.2% by 07:30 the next morning, and 95.8%
-  by noon.
+- **USDA publication is only slightly unfinished at 07:30** — less than it
+  first appears. Measured against the date a sale is BUCKETED into (not its
+  USDA sale date, which is the framing that made El Reno look like a timing
+  problem when it was a bucketing one), 96.17% of a bucket date's qualifying
+  head is already published by 07:30 the next morning, rising to 98.41% by
+  noon. So the afternoon pass recovers a real but small tail.
+
+### Why 07:30 and not later
+
+Asked and measured 2026-09-09, against bucket dates:
+
+| Run time | Head available | Share |
+|---|---|---|
+| 07:00 | 51,096 | 95.41% |
+| **07:30** | 51,503 | **96.17%** |
+| 08:00 | 51,503 | 96.17% (**+0 head**) |
+| 08:30 | 51,718 | 96.57% |
+| 12:00 | 52,706 | 98.41% |
+
+Moving to **08:00 gains nothing at all** — zero head across 246 reports and six
+weeks. **08:30** gains 215 head, 0.40%, from six reports, worth one to two
+cents on the roughly six days in forty-two that it affects. For comparison,
+07:00 → 07:30 gains more (+407) than 07:30 → 08:30 does: 07:30 is already past
+the steep part of the curve.
+
+And the deadline forbids both anyway. At a 20-minute runtime, an 08:00 start
+finishes 08:20 and an 08:30 start finishes 08:50 — both past 08:15. The
+strongest single piece of evidence that 07:30 is not costing accuracy: on
+2026-09-08 the frozen 07:30 call was $327.4306 on **9,829 head** against CME's
+$327.4300 on **9,829 head** — an identical window, matched to six hundredths of
+a cent.
+
+Revisit this only if the 08:15 deadline itself moves. At 09:00, an 08:30 run
+would collect that 0.40% and also catch CME's own file in the morning rather
+than at 13:00.
 
 `fci_snapshots` is written INSERT-OR-IGNORE per `(index_date, run_date,
 run_slot)`, so the afternoon pass **cannot** overwrite the morning call it

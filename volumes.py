@@ -1,65 +1,84 @@
 """
 Index volume: how much cattle is behind the index, against last week, last
-year, and the eleven-year seasonal norm.
+year, and the five- and ten-year seasonal averages.
 
-SOURCE IS CME'S OWN PUBLISHED HEAD COUNT, not our reconstruction, and that is
-the load-bearing decision here. cme_ftp_daily.total_head runs 2015-01-01 to
-present across ~3,020 dates. Our own mars_sales cannot do history at all: the
-direct-trade component exists only from 2026-08-28 and video/internet from
-2026-08-05, so our head counts before late August 2026 are missing two whole
-components. A year-over-year comparison against our own numbers would measure
-our data collection rather than the cattle market. Our estimate is used ONLY
-for dates CME has not printed yet, and is flagged when it is.
+Everything here reads CME's OWN published numbers, never our reconstruction.
+Our mars_sales cannot carry history: direct trade exists only from 2026-08-28
+and video/internet from 2026-08-05, so our head counts before late August 2026
+are missing whole components and a year-over-year figure off them would measure
+our data collection rather than the cattle market. Our estimate appears only
+for dates CME has not printed, and is flagged when it does.
 
-ALIGNMENT MATTERS MORE THAN IT LOOKS. Two facts force it:
+TWO CME SERIES, USED FOR DIFFERENT THINGS:
 
-  Volume is violently seasonal -- the 2015-2025 median window head runs 46,516
-  in January against 16,530 in July, nearly 3x. Comparing across months is
-  meaningless.
+  cme_ftp_daily.total_head is the 7-DAY ROLLING window -- the head behind the
+  index on that date. Right for point-in-time comparisons. Adding it across a
+  year would count every animal about five times, so it is never summed.
 
-  CME publishes weekdays only (Mon-Fri ~600 dates each over eleven years, three
-  stray weekend dates). So the year-ago comparison uses -364 days, exactly 52
-  weeks, which preserves the weekday. -365 would slide the comparison onto a
-  different weekday, and Monday windows are much heavier than Friday ones.
+  cme_ftp_daily.same_day_head is CME's DAILY TOTALS row -- that date's own
+  sales, non-overlapping. Right for cumulative totals.
 
-The seasonal norm uses ISO week rather than calendar date, so the fall run
-lines up year to year instead of drifting.
+The per-location table (cme_ftp_locations) is deliberately NOT used for
+cumulative volume, despite also being same-day. Measured against CME's own
+DAILY TOTALS, our per-location parse captures only 93-95% of head in 2015-2020
+against ~99% from 2023 on -- the older fixed-width layouts drop rows (e.g.
+2018-12-28 line 21 runs the date into the name, "12/28/18NEW MEXICO DIRECT",
+and the row is lost). Summing it would understate older years by 5-7% and make
+the current year look better than it is against them. same_day_head is one
+robustly-parsed number per date and has no such gradient.
+
+ALIGNMENT, which changes answers:
+
+  Volume is violently seasonal -- the median window runs ~46,500 head in
+  January against ~16,500 in July -- so comparisons must be seasonally matched.
+
+  CME publishes weekdays only, and Monday windows run far heavier than Friday
+  ones, so the year-ago point steps back 364 days (52 weeks) rather than 365.
+
+  Cumulative cuts align on ISO week AND ISO weekday. Cutting on week alone
+  compared 2026 through Tuesday of week 37 against a COMPLETE week 37 in prior
+  years -- 179 dates against 185 -- which showed 2026 at -0.2% versus 2025 when
+  the properly aligned figure is +1.4%. The sign was wrong, not just the
+  magnitude.
 """
 from datetime import date, timedelta
 from statistics import median
 
 import snowflake_db as db
 
-# Years pooled for the seasonal norm. 2026 is excluded so the current year is
-# compared against history rather than against itself.
-NORM_FIRST_YEAR = 2015
-NORM_LAST_YEAR = 2025
+# Comparison periods. Both end at the last complete year so the current year is
+# measured against history rather than partly against itself.
+PERIODS = {"5yr": (2021, 2025), "10yr": (2016, 2025)}
 
-# A comparison date that CME did not publish (holiday, or a gap in the archive)
-# falls back to the nearest earlier published date within this many days. Beyond
-# that the comparison is reported as unavailable rather than stretched.
+# A comparison date CME did not publish (holiday, or an archive gap) falls back
+# to the nearest earlier published date within this many days; beyond that the
+# comparison is reported missing rather than stretched.
 NEAREST_DAYS = 3
 
-# 52 weeks, not a calendar year: keeps the weekday aligned. See the module note.
+# 52 weeks, not a calendar year: keeps the weekday aligned.
 YEAR_AGO_DAYS = 364
 
 # A week's norm is only meaningful if the pooled years agree reasonably well.
-# ISO weeks 1 and 52 straddle the New Year shutdown and mix holiday-thin dates
-# with normal ones, so their interquartile spread runs ~138% of the median
-# (week 1: median 16,578, p25 8,041, p75 30,993) against ~33% for an ordinary
-# week. Quoting "-59% vs norm" off a baseline that spans 8,041 to 30,993 would
-# read as precision where there is none, so those weeks are flagged instead.
+# ISO weeks 1 and 52 straddle the New Year shutdown and mix closed days with
+# normal ones, so their interquartile spread runs far wider than an ordinary
+# week's ~33%. Quoting a confident percentage off that would be false precision.
 NORM_MAX_SPREAD = 0.75
 
+# Cumulative totals scale with how many days a year published, not only with
+# how many cattle sold. Above this gap in date counts, say so.
+YTD_MAX_DATE_GAP = 0.05
+
+
+# ---------------------------------------------------------------- window view
 
 def load_series(conn):
     """
-    {iso_date: (head, is_estimate)} -- CME's published head where it exists,
-    our reconstruction only for dates CME has not printed.
+    {iso_date: (window_head, is_estimate)} -- CME's published 7-day window head,
+    with our reconstruction only for dates CME has not printed.
 
     Weekend index dates from our own table are dropped: CME does not publish
-    them (Saturday and Sunday sales count as Monday), so including them would
-    put rows in the series that no historical comparison can match.
+    them (Saturday and Sunday sales count as Monday), so they would sit in the
+    series with nothing in history to compare against.
     """
     out = {}
     for rd, head in conn.cursor().execute(
@@ -71,9 +90,7 @@ def load_series(conn):
             "SELECT report_date, total_head FROM fci_daily "
             "WHERE total_head IS NOT NULL").fetchall():
         iso = str(db.iso(rd))
-        if iso in out:
-            continue
-        if date.fromisoformat(iso).weekday() >= 5:
+        if iso in out or date.fromisoformat(iso).weekday() >= 5:
             continue
         out[iso] = (int(head), True)
     return out
@@ -88,22 +105,15 @@ def _at(series, target: date):
     return None, None
 
 
-def seasonal_norm(series, target: date):
-    """
-    (median, p25, p75, n) for target's ISO week across NORM_FIRST..LAST_YEAR.
-
-    Pooling a whole ISO week rather than a single date is deliberate: one
-    year-ago date is noisy, and holiday placement drifts between years, so a
-    week's worth of dates per year gives a baseline that a single Labor Day
-    shift cannot swing.
-    """
+def _norm_for(series, target: date, first_year, last_year):
+    """(median, p25, p75, n) for target's ISO week over a year range."""
     wk = target.isocalendar()[1]
     vals = []
     for iso, (head, est) in series.items():
         if est:
-            continue                     # never let our own estimate into history
+            continue                      # never let our estimate into history
         d = date.fromisoformat(iso)
-        if NORM_FIRST_YEAR <= d.year <= NORM_LAST_YEAR and d.isocalendar()[1] == wk:
+        if first_year <= d.year <= last_year and d.isocalendar()[1] == wk:
             vals.append(head)
     if len(vals) < 5:
         return None, None, None, len(vals)
@@ -114,10 +124,11 @@ def seasonal_norm(series, target: date):
 
 def compare(conn, index_date_iso=None):
     """
-    Volume for an index date against last week, last year and the seasonal norm.
+    Window head for an index date against last week, last year, and each
+    seasonal norm in PERIODS.
 
-    Percentages are None where the comparison basis is missing, never zero --
-    a missing baseline and an unchanged one are different facts.
+    Percentages are None where the basis is missing, never zero -- a missing
+    baseline and an unchanged one are different facts.
     """
     series = load_series(conn)
     if index_date_iso is None:
@@ -130,101 +141,98 @@ def compare(conn, index_date_iso=None):
 
     wk_head, wk_used = _at(series, target - timedelta(days=7))
     yr_head, yr_used = _at(series, target - timedelta(days=YEAR_AGO_DAYS))
-    norm, p25, p75, n = seasonal_norm(series, target)
-
     pct = lambda base: (100.0 * (head - base) / base) if base else None
-    return {
-        "date": used,
-        "head": head,
-        "is_estimate": series[used][1],
+
+    out = {
+        "date": used, "head": head, "is_estimate": series[used][1],
         "week_ago": wk_head, "week_ago_date": wk_used, "week_pct": pct(wk_head),
         "year_ago": yr_head, "year_ago_date": yr_used, "year_pct": pct(yr_head),
-        "norm": norm, "norm_p25": p25, "norm_p75": p75, "norm_n": n,
-        "norm_pct": pct(norm),
-        "norm_reliable": bool(
-            norm and p25 is not None and (p75 - p25) / norm <= NORM_MAX_SPREAD),
-        "norm_spread_pct": (100.0 * (p75 - p25) / norm) if norm else None,
-        "iso_week": target.isocalendar()[1],
+        "iso_week": target.isocalendar()[1], "norms": {},
     }
+    for key, (y0, y1) in PERIODS.items():
+        norm, p25, p75, n = _norm_for(series, target, y0, y1)
+        out["norms"][key] = {
+            "label": f"{y1 - y0 + 1}-Yr", "years": (y0, y1),
+            "norm": norm, "p25": p25, "p75": p75, "n": n, "pct": pct(norm),
+            "reliable": bool(norm and p25 is not None
+                             and (p75 - p25) / norm <= NORM_MAX_SPREAD),
+            "spread_pct": (100.0 * (p75 - p25) / norm) if norm else None,
+        }
+    return out
 
 
-# A YTD comparison is only honest if both years published a comparable number
-# of dates -- a year with more publication days totals more head for that reason
-# alone. Beyond this fraction of difference the comparison is flagged. 2025 and
-# 2026 both had exactly 190 dates through ISO week 37, so the current headline
-# is clean; earlier years run 182-204 and need the caveat.
-YTD_MAX_DATE_GAP = 0.05
-
+# ------------------------------------------------------------ cumulative view
 
 def ytd(conn, index_date_iso=None):
     """
-    Year-to-date head through an index date's ISO week, against the same week
-    last year and the eleven-year average.
+    Cumulative head through an index date's point in the week, against last
+    year and each period average.
 
-    Sums cme_ftp_locations, which is SAME-DAY constituents -- verified against
-    our own same_day_head (2026-09-08 -> 690, 09-04 -> 3,104, 09-03 -> 3,906,
-    09-02 -> 2,129, all exact). That distinction is the whole reason this
-    function exists rather than summing cme_ftp_daily.total_head: total_head is
-    a 7-DAY ROLLING window, so adding it across a year counts every animal
-    about five times over and the total is meaningless.
-
-    Also reports the date count per year, because a YTD total scales with how
-    many days a year published, not only with how many cattle sold.
+    Sums same_day_head (CME's DAILY TOTALS), which is non-overlapping. Cuts
+    every year at the same (ISO week, ISO weekday) so a partial current week is
+    not compared against complete ones -- see the module note for what that
+    error did to the sign.
     """
     rows = conn.cursor().execute(
-        "SELECT report_date, SUM(head_count) FROM cme_ftp_locations "
-        "WHERE head_count IS NOT NULL GROUP BY report_date").fetchall()
+        "SELECT report_date, same_day_head FROM cme_ftp_daily "
+        "WHERE same_day_head IS NOT NULL").fetchall()
+    parsed = [(date.fromisoformat(str(db.iso(rd))), int(h)) for rd, h in rows]
+    if not parsed:
+        return {"head": None}
 
-    if index_date_iso is None:
-        index_date_iso = max(str(db.iso(r[0])) for r in rows)
-    target = date.fromisoformat(index_date_iso)
-    wk = target.isocalendar()[1]
+    target = (date.fromisoformat(index_date_iso) if index_date_iso
+              else max(d for d, _ in parsed))
+    cut = (target.isocalendar()[1], target.isocalendar()[2])
 
-    per_year = {}
-    for rd, head in rows:
-        d = date.fromisoformat(str(db.iso(rd)))
-        if d.isocalendar()[1] > wk:
-            continue
-        tot, n = per_year.get(d.year, (0, 0))
-        per_year[d.year] = (tot + int(head), n + 1)
+    agg = {}
+    for d, h in parsed:
+        if (d.isocalendar()[1], d.isocalendar()[2]) <= cut:
+            tot, n = agg.get(d.year, (0, 0))
+            agg[d.year] = (tot + h, n + 1)
 
-    cur_year = target.year
-    cur = per_year.get(cur_year)
-    prev = per_year.get(cur_year - 1)
-    hist = [v for y, v in per_year.items()
-            if NORM_FIRST_YEAR <= y <= NORM_LAST_YEAR and y != cur_year]
+    year = target.year
+    cur = agg.get(year)
+    if not cur:
+        return {"head": None}
+    prev = agg.get(year - 1)
 
-    out = {"iso_week": wk, "year": cur_year,
-           "head": cur[0] if cur else None, "dates": cur[1] if cur else None,
+    out = {"iso_week": cut[0], "iso_weekday": cut[1], "year": year,
+           "head": cur[0], "dates": cur[1], "prev_year": year - 1,
            "prev_head": prev[0] if prev else None,
            "prev_dates": prev[1] if prev else None,
-           "prev_year": cur_year - 1}
-    if cur and prev:
+           "periods": {}}
+
+    if prev:
         out["prev_pct"] = 100.0 * (cur[0] - prev[0]) / prev[0]
         gap = abs(cur[1] - prev[1]) / max(cur[1], prev[1])
         out["dates_comparable"] = gap <= YTD_MAX_DATE_GAP
         out["date_gap_pct"] = 100.0 * gap
     else:
-        out["prev_pct"] = None
-        out["dates_comparable"] = None
-        out["date_gap_pct"] = None
-    if hist:
-        out["hist_head"] = sum(h for h, _ in hist) / len(hist)
-        out["hist_years"] = len(hist)
-        out["hist_pct"] = (100.0 * (cur[0] - out["hist_head"]) / out["hist_head"]
-                           if cur else None)
-    else:
-        out["hist_head"] = out["hist_years"] = out["hist_pct"] = None
+        out["prev_pct"] = out["dates_comparable"] = out["date_gap_pct"] = None
+
+    for key, (y0, y1) in PERIODS.items():
+        vals = [agg[y] for y in range(y0, y1 + 1) if y in agg]
+        if not vals:
+            out["periods"][key] = {"label": f"{y1 - y0 + 1}-Yr", "avg": None}
+            continue
+        avg = sum(h for h, _ in vals) / len(vals)
+        out["periods"][key] = {
+            "label": f"{y1 - y0 + 1}-Yr", "years": (y0, y1), "n": len(vals),
+            "avg": avg, "avg_dates": sum(n for _, n in vals) / len(vals),
+            "pct": 100.0 * (cur[0] - avg) / avg,
+        }
     return out
 
 
-def history(conn, years=(2026, 2025), weeks_back=None):
+def history(conn, years=(2026, 2025)):
     """
-    {year: [(iso_week, head)]} for charting, plus a norm band per ISO week.
-    Published data only -- our estimate is excluded so the chart never mixes
-    measured history with a forecast.
+    {year: [(iso_week, window_head)]} plus a per-week band from the LONGEST
+    configured period. Published data only, so the chart never mixes measured
+    history with a forecast.
     """
     series = load_series(conn)
+    y0 = min(p[0] for p in PERIODS.values())
+    y1 = max(p[1] for p in PERIODS.values())
     byyear = {y: [] for y in years}
     band = {}
     for iso, (head, est) in sorted(series.items()):
@@ -232,7 +240,7 @@ def history(conn, years=(2026, 2025), weeks_back=None):
         wk = d.isocalendar()[1]
         if d.year in byyear and not est:
             byyear[d.year].append((wk, head))
-        if not est and NORM_FIRST_YEAR <= d.year <= NORM_LAST_YEAR:
+        if not est and y0 <= d.year <= y1:
             band.setdefault(wk, []).append(head)
     norm = {}
     for wk, vals in band.items():
@@ -241,42 +249,36 @@ def history(conn, years=(2026, 2025), weeks_back=None):
         vals.sort()
         q = lambda p: vals[min(len(vals) - 1, int(p * len(vals)))]
         norm[wk] = (median(vals), q(0.25), q(0.75))
-    return byyear, norm
+    return byyear, norm, (y0, y1)
 
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
     conn = db.get_conn()
-    series = load_series(conn)
-    print(f"series: {len(series)} dates, "
-          f"{sum(1 for v in series.values() if v[1])} from our estimate")
-    for d in (None, "2026-09-08", "2026-09-04", "2026-07-15", "2026-01-15"):
-        c = compare(conn, d)
-        if c["head"] is None:
-            print(f"\n{d}: no data")
-            continue
-        f = lambda v: f"{v:,}" if v is not None else "n/a"
-        p = lambda v: f"{v:+.1f}%" if v is not None else "n/a"
-        print(f"\n{c['date']} (ISO week {c['iso_week']})"
-              f"{'  [OUR ESTIMATE]' if c['is_estimate'] else ''}")
-        print(f"   head            {f(c['head'])}")
-        print(f"   vs last week    {f(c['week_ago'])} on {c['week_ago_date']}"
-              f"   {p(c['week_pct'])}")
-        print(f"   vs last year    {f(c['year_ago'])} on {c['year_ago_date']}"
-              f"   {p(c['year_pct'])}")
-        print(f"   vs 11-yr norm   {f(c['norm'])} (p25 {f(c['norm_p25'])} - "
-              f"p75 {f(c['norm_p75'])}, n={c['norm_n']})   {p(c['norm_pct'])}"
-              f"{'' if c['norm_reliable'] else '   [UNRELIABLE: years spread %.0f%% of the median]' % c['norm_spread_pct']}")
+    f = lambda v: f"{v:,.0f}" if v is not None else "n/a"
+    p = lambda v: f"{v:+.1f}%" if v is not None else "n/a"
+
+    c = compare(conn)
+    print(f"WINDOW  {c['date']} (ISO week {c['iso_week']})"
+          f"{'  [OUR ESTIMATE]' if c['is_estimate'] else ''}")
+    print(f"   head           {f(c['head'])}")
+    print(f"   vs last week   {f(c['week_ago'])} on {c['week_ago_date']}   {p(c['week_pct'])}")
+    print(f"   vs last year   {f(c['year_ago'])} on {c['year_ago_date']}   {p(c['year_pct'])}")
+    for k, nm in c["norms"].items():
+        flag = "" if nm["reliable"] else f"   [UNRELIABLE: spread {nm['spread_pct']:.0f}%]"
+        print(f"   vs {nm['label']:<6} norm  {f(nm['norm'])} "
+              f"(p25 {f(nm['p25'])}-{f(nm['p75'])}, n={nm['n']})   {p(nm['pct'])}{flag}")
 
     y = ytd(conn)
-    print("")
-    print(f"--- YTD through ISO week {y['iso_week']} ---")
-    print(f"   {y['year']}   {y['head']:,} head over {y['dates']} dates")
-    print(f"   {y['prev_year']}   {y['prev_head']:,} head over {y['prev_dates']} dates"
-          f"   -> {y['prev_pct']:+.1f}%")
-    print(f"   dates comparable: {y['dates_comparable']} "
-          f"(gap {y['date_gap_pct']:.1f}%)")
-    print(f"   {y['hist_years']}-year average {y['hist_head']:,.0f}"
-          f"   -> {y['hist_pct']:+.1f}%")
+    print(f"\nCUMULATIVE through ISO week {y['iso_week']} day {y['iso_weekday']}")
+    print(f"   {y['year']}           {f(y['head'])} over {y['dates']} dates")
+    print(f"   {y['prev_year']}           {f(y['prev_head'])} over {y['prev_dates']} dates"
+          f"   {p(y['prev_pct'])}   (dates comparable: {y['dates_comparable']},"
+          f" gap {y['date_gap_pct']:.1f}%)")
+    for k, pr in y["periods"].items():
+        if pr["avg"] is None:
+            continue
+        print(f"   {pr['label']:<6} avg   {f(pr['avg'])} over {pr['avg_dates']:.0f} dates"
+              f" ({pr['years'][0]}-{pr['years'][1]}, n={pr['n']})   {p(pr['pct'])}")
     conn.close()

@@ -248,7 +248,29 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
     for ln in data_lines:
         prefix, blob = ln[:prefix_len], ln[prefix_len:]
         toks = _tokenize(blob)
-        is_totals = "TOTALS" in prefix
+        # CME files carry TWO totals blocks, and the distinction matters.
+        #
+        # The official one sits in the main table in UPPERCASE -- "DAILY TOTALS"
+        # and "SEVEN-DAY TOTALS" -- and shares the table's column layout.
+        #
+        # Some files (observed in December 2018) add a second block near the
+        # foot under a "*Comments Included" header, in lowercase, with a
+        # DIFFERENT layout: head, weight, wtd-avg weight, total price, avg
+        # price. On 2018-12-28 that row reads "7-day totals 392 299672 764
+        # 43507001.50 145.18" -- head is 392 and 299,672 is total POUNDS.
+        #
+        # Read with the main table's offsets it yielded a location called
+        # "7-Day Totals   392" carrying 299,672 head at -$2.62. Two such rows
+        # (12-28 and 12-31) put ~599,000 phantom head in the archive and were
+        # the entire reason 2018 looked a 43% heavier year than its neighbours.
+        #
+        # So: ANY case of "totals" disqualifies a row from being a location,
+        # but only UPPERCASE supplies the official aggregates. Matching
+        # case-insensitively for the aggregates would let the lowercase block
+        # overwrite the real seven-day total with its mis-columned 299,672.
+        upper_prefix = prefix.upper()
+        is_totals = "TOTALS" in upper_prefix
+        is_official_totals = "TOTALS" in prefix
         if len(toks) == 5:
             head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks)
         elif len(toks) == 29:
@@ -257,12 +279,13 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             continue  # unparseable row -- skip rather than guess
 
         if is_totals:
-            agg = {"head": int(head), "avg_weight": avg_w, "avg_price": avg_p}
-            if "SEVEN-DAY" in prefix:
-                seven_day = agg
-            elif "DAILY" in prefix:
-                daily = agg
-            continue
+            if is_official_totals:
+                agg = {"head": int(head), "avg_weight": avg_w, "avg_price": avg_p}
+                if "SEVEN-DAY" in prefix or "7-DAY" in prefix:
+                    seven_day = agg
+                elif "DAILY" in prefix:
+                    daily = agg
+            continue        # never a location, whatever the case
 
         # Search the FULL line (not the prefix slice) -- slicing at
         # prefix_len can cut off the trailing digit this pattern needs to
@@ -295,6 +318,21 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             "avg_weight": avg_w,
             "avg_price": avg_p,
         })
+
+    # Structural guard, independent of how CME words its summary rows. A single
+    # location cannot contribute more head than the whole seven-day window
+    # contains -- that is arithmetic, not a heuristic -- so anything that does
+    # is a mis-parsed aggregate rather than a barn. The case fix above stops the
+    # known 2018 wording; this stops the next wording nobody has seen yet.
+    if seven_day and seven_day.get("head"):
+        cap = seven_day["head"]
+        kept = [r for r in locations if r["head"] <= cap]
+        for r in locations:
+            if r["head"] > cap:
+                print(f"  [!] {file_date}: dropping {r['location']!r} with "
+                      f"{r['head']:,} head -- exceeds the file's own seven-day "
+                      f"total of {cap:,}, so it is a mis-parsed summary row")
+        locations = kept
 
     reported_index, reported_change = _parse_reported(text)
 

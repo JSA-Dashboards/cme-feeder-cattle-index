@@ -28,7 +28,8 @@ except Exception:
 import snowflake_db as db
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
-from volumes import compare as volume_compare, history as volume_history
+from volumes import (compare as volume_compare, history as volume_history,
+                     ytd as volume_ytd)
 
 FORECAST_HORIZON_DAYS = 10  # business days
 FORECAST_CI = 0.80  # 80% prediction interval
@@ -656,12 +657,13 @@ def _load_volumes():
     volumes.py for why our reconstruction cannot carry the history.
     """
     if not db.use_snowflake() and not MARS_DB_PATH.exists():
-        return None, None, None
+        return None, None, None, None
     conn = db.get_conn()
     try:
-        return (volume_compare(conn),) + volume_history(conn, years=(2026, 2025))
+        return ((volume_compare(conn),) + volume_history(conn, years=(2026, 2025))
+                + (volume_ytd(conn),))
     except Exception:
-        return None, None, None
+        return None, None, None, None
     finally:
         conn.close()
 
@@ -1299,7 +1301,7 @@ st.caption(
 # missing whole components and any year-over-year figure off it would measure
 # our data collection, not the market.
 
-_vol, _vol_years, _vol_norm = _load_volumes()
+_vol, _vol_years, _vol_norm, _vol_ytd = _load_volumes()
 if _vol and _vol.get("head"):
     st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
     st.markdown('<div class="sec-header">Index Volume</div>', unsafe_allow_html=True)
@@ -1342,6 +1344,42 @@ if _vol and _vol.get("head"):
                 f"days with normal ones. Last week and last year are unaffected."
             )
         st.caption(_norm_cap)
+
+    # Year to date, which answers a different question from the tiles above and
+    # frequently disagrees with them. The window tiles are a point-in-time
+    # reading dominated by the last few weeks; the YTD total smooths the whole
+    # year. Right now the window is -57% against the year-ago date while YTD is
+    # -1.4% against 2025 -- both true, and showing only one would mislead.
+    if _vol_ytd and _vol_ytd.get("head"):
+        _y = _vol_ytd
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        _d1, _d2, _d3 = st.columns(3)
+        with _d1:
+            st.markdown(tile(f"{_y['year']} YTD Head", f"{_y['head']:,}"),
+                        unsafe_allow_html=True)
+        with _d2:
+            st.markdown(tile(f"vs {_y['prev_year']} YTD",
+                             f"{_y['prev_head']:,}" if _y['prev_head'] else "—",
+                             pct_delta_html(_y["prev_pct"])), unsafe_allow_html=True)
+        with _d3:
+            st.markdown(tile("vs 11-Yr Avg YTD",
+                             f"{_y['hist_head']:,.0f}" if _y['hist_head'] else "—",
+                             pct_delta_html(_y["hist_pct"])), unsafe_allow_html=True)
+
+        _cap = (f"Cumulative head sold through ISO week {_y['iso_week']}, summed from "
+                f"CME's own per-location rows — those are same-day figures, so this "
+                f"is a true total. (The window head above is a 7-day *rolling* "
+                f"average; adding it across a year would count every animal about "
+                f"five times.) {_y['year']}: {_y['dates']} published dates · "
+                f"{_y['prev_year']}: {_y['prev_dates']}.")
+        if _y.get("dates_comparable") is False:
+            st.warning(
+                f"**The two years published different numbers of dates** "
+                f"({_y['dates']} vs {_y['prev_dates']}, a {_y['date_gap_pct']:.0f}% "
+                f"gap), so part of this difference is calendar coverage rather than "
+                f"cattle. Treat the percentage as indicative."
+            )
+        st.caption(_cap)
 
     # Seasonal volume chart: this year and last against the 11-year middle half.
     if _vol_years and _vol_norm:

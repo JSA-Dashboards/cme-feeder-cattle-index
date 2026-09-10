@@ -148,6 +148,76 @@ def compare(conn, index_date_iso=None):
     }
 
 
+# A YTD comparison is only honest if both years published a comparable number
+# of dates -- a year with more publication days totals more head for that reason
+# alone. Beyond this fraction of difference the comparison is flagged. 2025 and
+# 2026 both had exactly 190 dates through ISO week 37, so the current headline
+# is clean; earlier years run 182-204 and need the caveat.
+YTD_MAX_DATE_GAP = 0.05
+
+
+def ytd(conn, index_date_iso=None):
+    """
+    Year-to-date head through an index date's ISO week, against the same week
+    last year and the eleven-year average.
+
+    Sums cme_ftp_locations, which is SAME-DAY constituents -- verified against
+    our own same_day_head (2026-09-08 -> 690, 09-04 -> 3,104, 09-03 -> 3,906,
+    09-02 -> 2,129, all exact). That distinction is the whole reason this
+    function exists rather than summing cme_ftp_daily.total_head: total_head is
+    a 7-DAY ROLLING window, so adding it across a year counts every animal
+    about five times over and the total is meaningless.
+
+    Also reports the date count per year, because a YTD total scales with how
+    many days a year published, not only with how many cattle sold.
+    """
+    rows = conn.cursor().execute(
+        "SELECT report_date, SUM(head_count) FROM cme_ftp_locations "
+        "WHERE head_count IS NOT NULL GROUP BY report_date").fetchall()
+
+    if index_date_iso is None:
+        index_date_iso = max(str(db.iso(r[0])) for r in rows)
+    target = date.fromisoformat(index_date_iso)
+    wk = target.isocalendar()[1]
+
+    per_year = {}
+    for rd, head in rows:
+        d = date.fromisoformat(str(db.iso(rd)))
+        if d.isocalendar()[1] > wk:
+            continue
+        tot, n = per_year.get(d.year, (0, 0))
+        per_year[d.year] = (tot + int(head), n + 1)
+
+    cur_year = target.year
+    cur = per_year.get(cur_year)
+    prev = per_year.get(cur_year - 1)
+    hist = [v for y, v in per_year.items()
+            if NORM_FIRST_YEAR <= y <= NORM_LAST_YEAR and y != cur_year]
+
+    out = {"iso_week": wk, "year": cur_year,
+           "head": cur[0] if cur else None, "dates": cur[1] if cur else None,
+           "prev_head": prev[0] if prev else None,
+           "prev_dates": prev[1] if prev else None,
+           "prev_year": cur_year - 1}
+    if cur and prev:
+        out["prev_pct"] = 100.0 * (cur[0] - prev[0]) / prev[0]
+        gap = abs(cur[1] - prev[1]) / max(cur[1], prev[1])
+        out["dates_comparable"] = gap <= YTD_MAX_DATE_GAP
+        out["date_gap_pct"] = 100.0 * gap
+    else:
+        out["prev_pct"] = None
+        out["dates_comparable"] = None
+        out["date_gap_pct"] = None
+    if hist:
+        out["hist_head"] = sum(h for h, _ in hist) / len(hist)
+        out["hist_years"] = len(hist)
+        out["hist_pct"] = (100.0 * (cur[0] - out["hist_head"]) / out["hist_head"]
+                           if cur else None)
+    else:
+        out["hist_head"] = out["hist_years"] = out["hist_pct"] = None
+    return out
+
+
 def history(conn, years=(2026, 2025), weeks_back=None):
     """
     {year: [(iso_week, head)]} for charting, plus a norm band per ISO week.
@@ -198,4 +268,15 @@ if __name__ == "__main__":
         print(f"   vs 11-yr norm   {f(c['norm'])} (p25 {f(c['norm_p25'])} - "
               f"p75 {f(c['norm_p75'])}, n={c['norm_n']})   {p(c['norm_pct'])}"
               f"{'' if c['norm_reliable'] else '   [UNRELIABLE: years spread %.0f%% of the median]' % c['norm_spread_pct']}")
+
+    y = ytd(conn)
+    print("")
+    print(f"--- YTD through ISO week {y['iso_week']} ---")
+    print(f"   {y['year']}   {y['head']:,} head over {y['dates']} dates")
+    print(f"   {y['prev_year']}   {y['prev_head']:,} head over {y['prev_dates']} dates"
+          f"   -> {y['prev_pct']:+.1f}%")
+    print(f"   dates comparable: {y['dates_comparable']} "
+          f"(gap {y['date_gap_pct']:.1f}%)")
+    print(f"   {y['hist_years']}-year average {y['hist_head']:,.0f}"
+          f"   -> {y['hist_pct']:+.1f}%")
     conn.close()

@@ -49,22 +49,35 @@ LOCATION_BUCKET_SHIFT_DAYS = {
     "clovis": 1,
 }
 
+# EL RENO OK (OKC West): CME buckets its sale on WEDNESDAY, essentially always
+# -- 555 of 563 rows across 2015-01-07..2026-09-02 (99%), while USDA reports the
+# sale itself on Tuesday (115 of 122 reports, 94%). Expressed as a weekday snap
+# rather than a day count because that is what the evidence actually shows, and
+# because it is idempotent: a report already on Wednesday is left alone.
+#
+# This CORRECTS an earlier decision recorded here as settled. A blanket +1 day
+# shift was tried, measured, and rejected because it took 2026-09-02 from +0.07
+# to +1.36 and the MAE from 0.0134 to 0.1966. That measurement was right and the
+# conclusion drawn from it was wrong: the damage came from DOUBLE-shifting the
+# one week in nine where detect_final_sale_day() had already moved the report
+# (2026-09-01 Tue -> 09-02 Wed, from its narrative), not from the offset being
+# spurious. A weekday snap cannot double-apply, so it fixes the other weeks
+# without breaking that one.
+#
+# What the mis-rejection cost, verified against CME's own published files: our
+# buckets agreed with CME on 1 of the last 14 El Reno sales. CME's 09/08 print
+# ($327.43 on 9,829 head) contains NO El Reno row, because that Tuesday sale
+# belongs to CME's 09/09 index -- so including it on 09/08 moved our estimate to
+# $327.7606 against CME's $327.4300, a +0.33 miss, where the frozen pre-shift
+# call had matched to +0.0006 on an identical 9,829 head.
+LOCATION_BUCKET_WEEKDAY = {
+    "el reno": 2,          # 2 = Wednesday (Monday is 0)
+}
+
 # Locations whose apparent offset has been investigated and DELIBERATELY not
 # corrected. check_bucket_drift() stays silent about these -- a check that
 # flagged them every morning would be noise, and noise gets ignored.
-BUCKET_SHIFT_REJECTED = {
-    "el reno": (
-        "Flagged as offset on 12 of 13 sales -- apparently a stronger pattern "
-        "than Clovis -- but shifting it takes 2026-09-02 from +0.07 to +1.36 "
-        "and the MAE from 0.0134 to 0.1966. El Reno is ALREADY corrected by "
-        "detect_final_sale_day(), which moves its multi-day sales to their true "
-        "final day from the report narrative and fires on 1 week in 9; a "
-        "blanket shift applies that a second time on the 8 weeks needing "
-        "nothing. The matcher below cannot tell 'CME buckets this later' from "
-        "'the matcher paired the wrong two sales', so a detected pattern is a "
-        "hypothesis to measure, never a licence to act."
-    ),
-}
+BUCKET_SHIFT_REJECTED = {}
 
 # A location needs at least this many matched sales before its offset is worth
 # an opinion, and this share of them must agree, before the check says anything.
@@ -98,9 +111,26 @@ def shifted_bucket_date(location, report_date) -> str:
     report_date moved by this location's bucketing correction, if any, as an
     ISO string. Accepts a str, date, datetime or pandas Timestamp -- see
     _as_date() for why that matters.
+
+    Two kinds of correction, and the difference matters:
+
+      LOCATION_BUCKET_WEEKDAY snaps FORWARD to the next occurrence of a fixed
+      weekday, and is a no-op if already on it. Idempotent, so it composes
+      safely with detect_final_sale_day() having already moved the report.
+
+      LOCATION_BUCKET_SHIFT_DAYS adds a fixed number of days. NOT idempotent --
+      applying it on top of another correction double-counts, which is exactly
+      how the El Reno rule came to be wrongly rejected. Only use it where the
+      target weekday is not stable.
     """
-    n = LOCATION_BUCKET_SHIFT_DAYS.get((location or "").strip().lower())
+    key = (location or "").strip().lower()
     d = _as_date(report_date)
+
+    target = LOCATION_BUCKET_WEEKDAY.get(key)
+    if target is not None:
+        return (d + timedelta(days=(target - d.weekday()) % 7)).isoformat()
+
+    n = LOCATION_BUCKET_SHIFT_DAYS.get(key)
     return (d + timedelta(days=n) if n else d).isoformat()
 
 
@@ -159,14 +189,20 @@ def check_bucket_drift(conn, lookback_days=120):
         if len(deltas) < _MIN_MATCHES:
             continue
 
-        expected = LOCATION_BUCKET_SHIFT_DAYS.get(key, 0)
-        agreeing = sum(1 for d in deltas if d == expected)
+        # Expected offset per sale, not a constant: a weekday snap's offset
+        # depends on which weekday the sale itself fell on.
+        expected_for = {}
+        for rd, _h, _p, loc in ours[key]:
+            expected_for[rd] = (date.fromisoformat(shifted_bucket_date(loc, rd))
+                                - date.fromisoformat(rd)).days
+        expected = max(set(expected_for.values()), key=list(expected_for.values()).count)             if expected_for else 0
+        agreeing = sum(1 for d in deltas if d in set(expected_for.values()))
         if agreeing / len(deltas) >= _AGREEMENT:
             continue                              # behaving as configured
 
         modal = max(set(deltas), key=deltas.count)
         share = deltas.count(modal) / len(deltas)
-        if key in LOCATION_BUCKET_SHIFT_DAYS:
+        if key in LOCATION_BUCKET_SHIFT_DAYS or key in LOCATION_BUCKET_WEEKDAY:
             warnings.append(
                 f"BUCKET DRIFT: {label} is configured to shift {expected:+d}d but "
                 f"only {agreeing}/{len(deltas)} recent sales match that; the "
@@ -204,6 +240,17 @@ if __name__ == "__main__":
         assert _got == _THU, f"Clovis {type(_v).__name__} -> {_got}, want {_THU}"
         _got = shifted_bucket_date("Joplin", _v)      # unconfigured: no shift
         assert _got == _WED, f"Joplin {type(_v).__name__} -> {_got}, want {_WED}"
+
+    # The weekday snap, including its idempotence -- the property whose absence
+    # caused the original blanket +1 shift to double-apply and be rejected.
+    assert shifted_bucket_date("El Reno", "2026-09-08") == "2026-09-09"   # Tue -> Wed
+    assert shifted_bucket_date("El Reno", "2026-09-09") == "2026-09-09"   # already Wed
+    assert shifted_bucket_date("El Reno", "2026-09-02") == "2026-09-02"   # Wed, no-op
+    assert shifted_bucket_date("El Reno", "2026-09-07") == "2026-09-09"   # Mon -> Wed
+    assert shifted_bucket_date("El Reno", "2026-09-10") == "2026-09-16"   # Thu -> next Wed
+    # Snapping twice must equal snapping once.
+    _once = shifted_bucket_date("El Reno", "2026-09-08")
+    assert shifted_bucket_date("El Reno", _once) == _once
 
     # Case and surrounding whitespace must not decide whether a shift applies.
     for _name in ("clovis", "CLOVIS", "  Clovis  "):

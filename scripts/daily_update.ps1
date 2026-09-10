@@ -2,6 +2,20 @@
 # (see scripts/README-schedule.md). Runs update_index.py against the repo's venv and
 # appends stdout/stderr to logs/update_<date>.log.
 #
+# TWO TRIGGERS, one script. 07:30 local is the morning call -- the number that goes
+# out and the one comparable to CIH's and Compass's morning sheets. 13:00 is the
+# settled pass, and it exists because USDA publication is not finished by 07:30:
+# measured 2026-09-09 over 80 auctions and 246 reports, 85.2% of a sale day's
+# qualifying head is fetchable by 07:30 the next morning, but 95.8% by noon. Nearly
+# all of that gap is OKC West (El Reno), which publishes its previous-day sale at a
+# median of +1 day 11:13 and had missed the morning run 7 times out of 7; folding its
+# 09/08 sale in moved that date's estimate +0.33, about 80x the scorecard's MAE.
+#
+# The script needs no argument to tell the runs apart: snapshots.run_slot() reads the
+# clock, files anything before 11:00 as 'am' and the rest as 'pm', and freezes each
+# slot's estimate INSERT-OR-IGNORE so the afternoon pass cannot overwrite the morning
+# call it is meant to be compared against.
+#
 # Working directory MUST be the repo root: update_index.py calls load_dotenv(), which
 # resolves .env relative to the current directory, and that's where MARS_API_KEY lives.
 

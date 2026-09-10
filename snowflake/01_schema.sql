@@ -25,6 +25,20 @@ CREATE TABLE IF NOT EXISTS fci_daily (
 -- own issue date. Created 2026-09-09 by SYSADMIN, which owns it -- note that
 -- Snowflake uses only the PRIMARY role for DDL, so this needed
 -- SNOWFLAKE_ROLE=SYSADMIN rather than a secondary-role grant.
+-- Our own estimate frozen at each run, so the head-to-head against
+-- peer_estimates compares like with like. fci_daily holds only the latest value
+-- per date and is rewritten every run; see snapshots.py.
+CREATE TABLE IF NOT EXISTS fci_snapshots (
+    index_date DATE NOT NULL,
+    run_date DATE NOT NULL,
+    run_slot VARCHAR NOT NULL,
+    captured_at VARCHAR NOT NULL,
+    fci_value FLOAT NOT NULL,
+    total_head NUMBER,
+    n_locations NUMBER,
+    PRIMARY KEY (index_date, run_date, run_slot)
+);
+
 CREATE TABLE IF NOT EXISTS peer_estimates (
     index_date DATE NOT NULL,
     source VARCHAR NOT NULL,

@@ -27,6 +27,7 @@ except Exception:
 
 import snowflake_db as db
 from bucketing import shifted_bucket_date
+from snapshots import opening_calls
 
 FORECAST_HORIZON_DAYS = 10  # business days
 FORECAST_CI = 0.80  # 80% prediction interval
@@ -538,6 +539,28 @@ def _load_recon_index():
     df["date"] = pd.to_datetime(df["date"])
     return (df.rename(columns={"fci_value": "recon"})
               .sort_values("date").reset_index(drop=True))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_opening_calls():
+    """
+    Our own estimate frozen at the first morning run after each sale day.
+
+    The Versus panel needs this rather than the live value: fci_daily is
+    rewritten every run, so our number keeps improving as late auctions publish
+    while CIH's and Compass's stay fixed at what they printed that morning.
+    Scoring our hindsight against their same-morning call would flatter us by
+    roughly the size of one late auction -- +0.33 on 09/08. See snapshots.py.
+    """
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return {}
+    conn = db.get_conn()
+    try:
+        return opening_calls(conn)
+    except Exception:
+        return {}          # table absent on this backend yet
+    finally:
+        conn.close()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1446,8 +1469,25 @@ if not _peers.empty:
     _piv = _peers.pivot_table(index="date", columns="source", values="value",
                               aggfunc="last")
     _srcs = [c for c in sorted(_piv.columns)]
-    _ours_s = (_recon.set_index("date")["recon"] if not _recon.empty
+    # Our column is the FROZEN opening call wherever we have one, so this table
+    # compares same-morning against same-morning. Dates predating fci_snapshots
+    # fall back to the live value and are marked in the caption, because a
+    # silent mix of frozen and revised numbers would be worse than either.
+    _openings = _load_opening_calls()
+    _live_s = (_recon.set_index("date")["recon"] if not _recon.empty
                else pd.Series(dtype=float))
+    _ours_s = _live_s.copy()
+    _frozen_dates = set()
+    for _d in list(_ours_s.index):
+        _k = _d.strftime("%Y-%m-%d")
+        if _k in _openings:
+            _ours_s.loc[_d] = _openings[_k]
+            _frozen_dates.add(_d)
+    for _k, _v in _openings.items():          # frozen dates absent from _recon
+        _ts = pd.Timestamp(_k)
+        if _ts not in _ours_s.index:
+            _ours_s.loc[_ts] = _v
+            _frozen_dates.add(_ts)
     _cme_s = (official_rows.set_index("date")["fci_value"] if len(official_rows)
               else pd.Series(dtype=float))
 
@@ -1498,7 +1538,14 @@ if not _peers.empty:
             _e = (_scored[_s] - _scored["__cme"]).abs().dropna()
             if len(_e):
                 _bits.append(f"{_short(_s)} {_e.mean():.3f} ({len(_e)})")
-        st.caption("Mean absolute miss, dates scored in brackets: " + " · ".join(_bits))
+        _n_frozen = len([d for d in _scored.index if d in _frozen_dates])
+        _prov = (f" Our figure is the frozen 07:30 call on {_n_frozen} of "
+                 f"{len(_scored)} scored date(s)"
+                 + (", and the current revised value on the rest — those flatter us, "
+                    "since they have seen data the competitors' morning sheets had not."
+                    if _n_frozen < len(_scored) else ", so this is like-for-like."))
+        st.caption("Mean absolute miss, dates scored in brackets: "
+                   + " · ".join(_bits) + "." + _prov)
     else:
         st.caption("No date here has been printed by CME yet, so nobody is scored.")
 

@@ -50,6 +50,7 @@ load_dotenv()
 import snowflake_db as db
 from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
 from bucketing import check_bucket_drift, shifted_bucket_date
+from snapshots import capture_snapshots
 from video_reports import (VIDEO_MAX_AGE_DAYS, VIDEO_REPORT_SLUGS,
                            fetch_all_video_rows)
 
@@ -162,6 +163,22 @@ def init_db(conn):
             fci_value REAL NOT NULL,
             note TEXT,
             PRIMARY KEY (index_date, source)
+        )
+    """)
+    # Our estimate as it stood at each run, frozen. fci_daily keeps only the
+    # LATEST value per date, so without this our number quietly improves as
+    # late auctions land while competitors' stay fixed at what they printed --
+    # see snapshots.py for the measured size of that (worth +0.33 on 09/08).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fci_snapshots (
+            index_date TEXT NOT NULL,
+            run_date TEXT NOT NULL,
+            run_slot TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            fci_value REAL NOT NULL,
+            total_head INTEGER,
+            n_locations INTEGER,
+            PRIMARY KEY (index_date, run_date, run_slot)
         )
     """)
     conn.execute("""
@@ -470,12 +487,19 @@ def run_update(since: date, verbose=True):
 
     n_written, first_date, last_date = recompute_fci_daily(conn)
 
+    # Freeze this run's estimates before anything can revise them. Must come
+    # after the recompute and before the process exits, or the morning call is
+    # lost for good -- fci_daily is overwritten wholesale by the next run.
+    n_frozen = capture_snapshots(conn)
+
     if verbose:
         print(f"\nInserted/kept {total_inserted} sale rows: {total_inserted - direct_inserted - video_inserted} "
               f"auction rows across {len(roster)} locations, {direct_inserted} direct-trade rows across "
               f"{len(direct_results)} states, {video_inserted} video-auction rows across {len(video_results)} reports.")
         print(f"Recomputed FCI (7-day rolling window) for {n_written} dates "
               f"({first_date or '—'} to {last_date or '—'}).")
+        print(f"Froze {n_frozen} new estimate snapshot(s) for this run's slot "
+              f"(0 is normal for a repeat run in the same slot).")
         recent = conn.cursor().execute(
             "SELECT report_date, fci_value, n_locations FROM fci_daily ORDER BY report_date DESC LIMIT 8"
         ).fetchall()

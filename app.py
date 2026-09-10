@@ -541,6 +541,103 @@ def _load_recon_index():
               .sort_values("date").reset_index(drop=True))
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_last_refresh():
+    """
+    When the pipeline last wrote to the backend THIS PAGE READS, as a naive
+    America/Chicago timestamp, or None if unknown.
+
+    Deliberately read from the live backend rather than the local SQLite file:
+    the failure this exists to catch is the one daily_update.ps1 gives its own
+    exit code -- the USDA refresh and recompute succeed, the Snowflake push
+    fails, and so the local file is perfectly current while the dashboard
+    quietly serves yesterday's numbers. A check against the local file would
+    report "healthy" in exactly that case.
+
+    fci_snapshots.captured_at is written by the job as a naive local timestamp
+    on the Central-time machine that runs it, so it is compared against Central
+    time below, NOT against the server clock -- Streamlit Cloud runs in UTC and
+    would otherwise read every run as five hours fresher than it is.
+    """
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return None
+    conn = db.get_conn()
+    try:
+        row = conn.cursor().execute(
+            "SELECT MAX(captured_at) FROM fci_snapshots").fetchone()
+    except Exception:
+        return None          # table absent on this backend yet
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        return datetime.fromisoformat(str(db.iso(row[0])))
+    except ValueError:
+        return None
+
+
+# The pipeline runs at 07:30 and 13:00 Central, so the longest HEALTHY gap is
+# the overnight one: 13:00 to 07:30 is 18.5 hours. Past 20 means a scheduled
+# run did not land; past 30 means more than one did not.
+_STALE_WARN_HOURS = 20
+_STALE_ALERT_HOURS = 30
+
+
+def _central_now():
+    """Now, in Central, as a naive datetime -- or None if the zone is unavailable."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Chicago")).replace(tzinfo=None)
+    except Exception:
+        # No IANA database (bare Windows without tzdata). Rather than silently
+        # compare against a server clock in the wrong zone -- which is how a
+        # staleness check ends up lying -- decline to judge.
+        return None
+
+
+def _render_freshness():
+    last = _load_last_refresh()
+    now = _central_now()
+    if last is None:
+        st.caption("Data freshness unknown — no pipeline run has been recorded yet.")
+        return
+    # " 0" -> " " strips the leading zero from both the day and the hour;
+    # %-I is not portable to Windows, where this job actually runs.
+    stamp = last.strftime("%b %d at %I:%M %p").replace(" 0", " ")
+    if now is None:
+        st.caption(f"Last refreshed {stamp} Central.")
+        return
+    hours = (now - last).total_seconds() / 3600.0
+    if hours < -0.5:
+        # A run stamped in the future. Means the pipeline machine's clock is
+        # ahead of Central, or a row was written by hand. Say so rather than
+        # letting it read as healthy -- a future timestamp would otherwise
+        # suppress this warning permanently, which is the exact silent failure
+        # this check exists to prevent.
+        st.warning(
+            f"**The last recorded run is dated in the future** ({stamp} Central, "
+            f"{abs(hours):.1f}h ahead). Freshness cannot be judged until that is "
+            f"corrected — check the pipeline machine's clock."
+        )
+        return
+    if hours >= _STALE_ALERT_HOURS:
+        st.error(
+            f"**This page is {hours:.0f} hours out of date.** The last pipeline run "
+            f"recorded was {stamp} Central; at least two scheduled runs (07:30 and "
+            f"13:00) have not reached the database behind this page. Treat every "
+            f"figure below as historical until this clears."
+        )
+    elif hours >= _STALE_WARN_HOURS:
+        st.warning(
+            f"**A scheduled run appears to have been missed.** Last refresh was "
+            f"{stamp} Central, {hours:.0f} hours ago — longer than the 18.5-hour "
+            f"overnight gap between the 13:00 and 07:30 runs."
+        )
+    else:
+        st.caption(f"Last refreshed {stamp} Central ({hours:.1f}h ago).")
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_opening_calls():
     """
@@ -795,6 +892,11 @@ with c2:
     )
 
 st.markdown("<hr style='margin:10px 0 18px;'>", unsafe_allow_html=True)
+
+# Freshness first, above the numbers. Every figure on this page renders
+# identically whether the pipeline ran twenty minutes ago or failed days ago,
+# and the numbers are traded on -- so say how old they are before showing them.
+_render_freshness()
 
 
 # ── KPI Tiles ─────────────────────────────────────────────────────────────────

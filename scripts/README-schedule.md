@@ -132,10 +132,27 @@ RBALDWIN does not have. That route is closed without an admin.
 
 - **Peer estimates.** CIH's and Compass's figures are hand-entered with
   `add_peer_estimate.py`; nothing scrapes them.
-- **Task Scheduler history.** The `Microsoft-Windows-TaskScheduler/Operational`
-  log is disabled by default, so there is no record of whether the task fired.
-  Enabling it needs an elevated shell:
+- **The dead-man's switch**, until `HEALTHCHECK_URL` is set — see above.
+
+## Already done, recorded so it is not repeated
+
+- **Task Scheduler history is enabled** (2026-09-09). Windows ships the
+  `Microsoft-Windows-TaskScheduler/Operational` channel disabled, which is why
+  diagnosing the 07:51 start on 2026-09-09 required reconstructing it from
+  sleep/wake power events instead of simply reading task history. If it ever
+  reverts — a machine rebuild, a policy push — re-enable it from an ELEVATED
+  shell (it fails with access denied otherwise):
 
   ```
   wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
   ```
+
+  Verify without elevation:
+
+  ```
+  Get-WinEvent -ListLog Microsoft-Windows-TaskScheduler/Operational |
+      Select-Object IsEnabled, RecordCount
+  ```
+
+  Event 107 means triggered on schedule, 118 triggered by boot, 110 triggered
+  by a user — that distinction is the one worth having.

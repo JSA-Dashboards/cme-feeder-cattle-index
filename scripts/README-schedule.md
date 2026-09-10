@@ -90,9 +90,11 @@ CME's own files, all idempotent per date:
 The bracket table exists because the row-level average weight hides the mix. An
 804 lb average can be everything at 800-849 or a barbell of 700-749 and
 850-899, and those mean different things for an index that only counts 700-899.
-Backfilled 2016-2026 for ISO weeks 33-41 (473 dates, ~22,300 rows); the daily
-run extends it forward. Widen the history with a scoped backfill rather than
-re-fetching the whole 3,000-file archive.
+Coverage: **daily from 2022-01-01**, plus ISO weeks 33-41 back to 2016 for
+seasonal comparison -- 1,463 dates, ~71,900 rows. The daily run extends it
+forward. Widen the history with a scoped backfill rather than re-fetching the
+whole 3,000-file archive; the 2022-onward continuous range was added because a
+nine-week annual band cannot show WHEN a mix shifted, only that it did.
 
 Verified by round trip: deleting one date's brackets and re-running the daily
 step rebuilt them exactly (25 brackets, 1,647 head on 2026-09-01), so the job

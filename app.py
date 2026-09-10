@@ -28,6 +28,8 @@ except Exception:
 import snowflake_db as db
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
+from composition import (BRACKETS as COMP_BRACKETS, mix_effect,
+                         window_composition)
 from volumes import (compare as volume_compare, history as volume_history,
                      ytd as volume_ytd)
 
@@ -650,6 +652,26 @@ def _render_freshness():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def _load_composition(index_date_iso):
+    """
+    The window broken out by weight bracket and muscle grade, plus what the
+    grade mix is doing to the price. Built from our own mars_sales so it
+    covers the LIVE estimate -- CME's published brackets only exist for dates
+    CME has already printed. See composition.py.
+    """
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return None, None
+    conn = db.get_conn()
+    try:
+        return (window_composition(conn, index_date_iso),
+                mix_effect(conn, index_date_iso))
+    except Exception:
+        return None, None
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def _load_volumes():
     """
     Index volume: the window comparison, the cumulative comparison, and the
@@ -1161,6 +1183,59 @@ st.caption(
     "separately. A blank row means that location's next scheduled sale hasn't landed yet."
 )
 
+
+# ── Index Composition ───────────────────────────────────────────────────────────────────────
+# A deeper cut of the same window shown above: which weight brackets and
+# muscle grades the index is actually built from. Worth its place because the
+# grade mix moves the printed level in a way the headline price cannot show --
+# the #1-2 share of pounds has drifted up for four and a half years and now
+# costs the index real money. Decomposes to the index exactly: the blended
+# price and head count below equal the figures in the tiles.
+
+_comp, _mix = _load_composition(pd.Timestamp(last_date).strftime("%Y-%m-%d"))
+if _comp:
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="sec-header">Index Composition by Weight &amp; Grade</div>',
+                unsafe_allow_html=True)
+    st.caption(
+        f"The 7-day window ending **{pd.Timestamp(last_date).strftime('%b %d, %Y')}**, "
+        f"split by CME's own weight brackets and muscle grades. Prices are "
+        f"pound-weighted, the same basis as the index."
+    )
+
+    _grand = sum(c["head"] for c in _comp.values())
+    _rows = []
+    for _wl in COMP_BRACKETS:
+        _a = _comp.get((_wl, "1"), {})
+        _b = _comp.get((_wl, "1-2"), {})
+        _tot = _a.get("head", 0) + _b.get("head", 0)
+        _rows.append({
+            "Bracket": f"{_wl}–{_wl + 49} lb",
+            "#1 Head": f"{_a.get('head', 0):,}" if _a.get("head") else "—",
+            "#1 Price": f"${_a['price']:.2f}" if _a.get("price") else "—",
+            "#1-2 Head": f"{_b.get('head', 0):,}" if _b.get("head") else "—",
+            "#1-2 Price": f"${_b['price']:.2f}" if _b.get("price") else "—",
+            "Total Head": f"{_tot:,}",
+            "Share": f"{100 * _tot / _grand:.1f}%" if _grand else "—",
+        })
+    with st.container(key="wm-composition"):
+        st.dataframe(pd.DataFrame(_rows), use_container_width=True,
+                     hide_index=True, height=180)
+
+    if _mix:
+        # Sign convention: a NEGATIVE effect means the current mix is holding
+        # the index below where the baseline composition would put it.
+        _dirn = "below" if _mix["effect"] < 0 else "above"
+        st.caption(
+            f"**Grade mix** — #1-2 steers are **{100 * _mix['share_now']:.1f}%** of "
+            f"window pounds against a {100 * _mix['share_base']:.1f}% baseline for this "
+            f"ISO week ({_mix['baseline_years']} years of CME's published brackets). "
+            f"#1 averages \\${_mix['price_1']:.2f} and #1-2 \\${_mix['price_1_2']:.2f}, "
+            f"a \\${abs(_mix['spread']):.2f} discount — so the current mix holds the "
+            f"index about **\\${abs(_mix['effect']):.2f}/cwt {_dirn}** where the baseline "
+            f"composition would put it (\\${_mix['actual']:.2f} against "
+            f"\\${_mix['counterfactual']:.2f})."
+        )
 
 # ── FCI Trend Chart ───────────────────────────────────────────────────────────
 

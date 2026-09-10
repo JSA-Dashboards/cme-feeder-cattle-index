@@ -75,6 +75,29 @@ Wake timers are enabled on AC and this is a desktop with no battery, so the
 `WakeToRun` setting is not silently vetoed by power policy. (On a laptop it
 would be: wake timers are disabled on battery by default.)
 
+## What the CME step maintains
+
+`backfill_ftp.py` (run daily with a 10-day lookback) writes four tables from
+CME's own files, all idempotent per date:
+
+| Table | Contents |
+|---|---|
+| `cme_ftp_daily` | the published index, plus DAILY and SEVEN-DAY totals |
+| `cme_ftp_locations` | per-location rows behind each date |
+| `cme_ftp_brackets` | per-location **weight/grade brackets** — #1 and #1-2 Steers at 700-749 / 750-799 / 800-849 / 850-899 |
+| (and the Snowflake push carries all of them) |
+
+The bracket table exists because the row-level average weight hides the mix. An
+804 lb average can be everything at 800-849 or a barbell of 700-749 and
+850-899, and those mean different things for an index that only counts 700-899.
+Backfilled 2016-2026 for ISO weeks 33-41 (473 dates, ~22,300 rows); the daily
+run extends it forward. Widen the history with a scoped backfill rather than
+re-fetching the whole 3,000-file archive.
+
+Verified by round trip: deleting one date's brackets and re-running the daily
+step rebuilt them exactly (25 brackets, 1,647 head on 2026-09-01), so the job
+maintains the table rather than merely leaving it alone.
+
 ## Exit codes
 
 | Code | Meaning |

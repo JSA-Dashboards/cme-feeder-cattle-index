@@ -32,8 +32,49 @@ Log ''
 Log ('=' * 70)
 Log ("run started  {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'))
 
-if (-not (Test-Path $py))                    { Log 'FATAL: venv python missing'; exit 2 }
-if (-not (Test-Path (Join-Path $repo '.env'))) { Log 'FATAL: .env missing - MARS_API_KEY unavailable'; exit 3 }
+# -- Dead-man's switch --------------------------------------------------------
+# HEALTHCHECK_URL is an opaque capability URL from an external monitor
+# (healthchecks.io free tier is enough). It has to be EXTERNAL, and that is the
+# whole point: nothing running on this desktop can report that this desktop is
+# asleep, powered off, or that Task Scheduler never fired at all. The monitor
+# alerts on the ABSENCE of a ping, so silence is the signal and no cooperation
+# from the failing component is required.
+#
+# /start on begin, the bare URL on success, /fail on a failure -- so an alert
+# can distinguish "never ran" from "ran and broke" and carry the exit codes.
+# The /fail pings are a courtesy only; the guarantee comes from absence.
+#
+# Every ping is best-effort and logged, never fatal: an outage at the monitor,
+# or no URL configured at all, must not stop the pipeline. Unset = inert.
+$hcUrl = $null
+$envFile = Join-Path $repo '.env'
+if (Test-Path $envFile) {
+    $m = Select-String -Path $envFile -Pattern '^\s*HEALTHCHECK_URL\s*=\s*(\S+)' |
+            Select-Object -First 1
+    if ($m) { $hcUrl = $m.Matches[0].Groups[1].Value.Trim().Trim('"').Trim("'") }
+}
+
+function Ping-Health {
+    param([string]$Suffix = '', [string]$Body = '')
+    if (-not $hcUrl) { return }
+    $label = if ($Suffix) { $Suffix.TrimStart('/') } else { 'success' }
+    try {
+        # PS 5.1 does not negotiate TLS 1.2 by default on this build; without
+        # this the request fails with an opaque "could not create SSL/TLS
+        # secure channel".
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri ($hcUrl.TrimEnd('/') + $Suffix) -Method Post `
+            -Body $Body -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
+        Log ("healthcheck: {0} ping sent" -f $label)
+    } catch {
+        Log ("WARN: healthcheck {0} ping failed - {1}" -f $label, $_.Exception.Message)
+    }
+}
+
+if ($hcUrl) { Ping-Health '/start' } else { Log 'healthcheck: HEALTHCHECK_URL not set, monitoring inert' }
+
+if (-not (Test-Path $py))                    { Log 'FATAL: venv python missing'; Ping-Health '/fail' 'venv python missing'; exit 2 }
+if (-not (Test-Path (Join-Path $repo '.env'))) { Log 'FATAL: .env missing - MARS_API_KEY unavailable'; exit 3 }   # no .env means no URL to ping; absence is the alert
 
 # Separate temp files, then fold into the log. Redirecting a native exe's stderr
 # inside PowerShell 5.1 wraps each line in an ErrorRecord and corrupts $? -- this
@@ -157,6 +198,18 @@ Log ("run finished  update_exit={0}  cme_exit={1}  push_exit={2}  {3}" -f $code,
 Get-ChildItem $logDir -Filter 'update_*.log' -ErrorAction SilentlyContinue |
     Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
     Remove-Item -Force -ErrorAction SilentlyContinue
+
+# Tell the monitor how it went. A partial success still counts as a FAILURE
+# here: if the Snowflake push did not land, the dashboard is stale, and that is
+# precisely the silent failure this is meant to surface -- the local run having
+# "worked" is no comfort to someone reading the page.
+$summary = ("update_exit={0} cme_exit={1} push_exit={2} finished={3}" -f `
+            $code, $cmeCode, $pushCode, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+if ($code -eq 0 -and $pushCode -eq 0) {
+    Ping-Health '' $summary
+} else {
+    Ping-Health '/fail' $summary
+}
 
 # Distinct exit codes so Task Scheduler's LastTaskResult says WHICH half failed:
 # the update itself, or only the publish step.

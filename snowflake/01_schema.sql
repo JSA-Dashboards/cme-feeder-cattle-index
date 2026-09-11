@@ -177,3 +177,46 @@ CREATE TABLE IF NOT EXISTS census_cattle_imports (
     unit_qy1 VARCHAR,
     PRIMARY KEY (period, commodity, port_code)
 );
+
+-- AMS head counts, added 2026-09-10 after discovering that MARS report SECTIONS
+-- are PATH segments (/reports/3486/Report%20Volume). Requesting a report
+-- without a section returns only its header -- narrative and dates, nothing
+-- numeric -- which is why this source was first believed to carry no data.
+
+-- Daily receipts by crossing point, from 3486 "Report Volume". ESTIMATES,
+-- rounded to the nearest ~100 head. is_total flags AMS's own grand-total row:
+-- the per-crossing rows are hierarchical rollups that triple-count if summed,
+-- and they disagreed with the published total on 19 of 463 days measured, so
+-- readers must filter on is_total rather than aggregate the detail.
+CREATE TABLE IF NOT EXISTS border_receipts (
+    report_date DATE NOT NULL,
+    published_date DATE,
+    crossing_point VARCHAR NOT NULL,
+    crossing_state VARCHAR NOT NULL,
+    commodity VARCHAR,
+    receipts_est INTEGER,
+    receipts_wtd_est INTEGER,
+    is_total INTEGER,
+    PRIMARY KEY (report_date, crossing_point, crossing_state)
+);
+
+-- Weekly volumes from 3629 "Report Volume". ACTUALS, with AMS's own
+-- year-to-date and prior-year-to-date already computed -- so the dashboard
+-- never has to cut a partial year itself and cannot get the comparison point
+-- wrong. A week behind the daily series above.
+CREATE TABLE IF NOT EXISTS border_volumes (
+    report_begin DATE NOT NULL,
+    report_end DATE,
+    published_date DATE,
+    category VARCHAR NOT NULL,
+    commodity VARCHAR NOT NULL,
+    origin VARCHAR NOT NULL,
+    destination VARCHAR NOT NULL,
+    current_volume INTEGER,
+    current_ytd INTEGER,
+    prior_volume INTEGER,
+    prior_ytd INTEGER,
+    current_year INTEGER,
+    prior_year INTEGER,
+    PRIMARY KEY (report_begin, category, commodity, origin, destination)
+);

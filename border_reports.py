@@ -1,14 +1,54 @@
 """
-AMS US/Mexico border cattle reports: trade status and market commentary.
+AMS US/Mexico border cattle reports: head counts, trade status, and commentary.
 
-WHAT THIS SOURCE DOES AND DOES NOT GIVE. Every one of AMS's seven
-International Livestock reports returns ZERO structured data fields through the
-MARS API -- no head_count, no avg_price, no volumes. Verified 2026-09-10 across
-all seven. The import tables exist only in the published report body on
-mymarketnews, not in the API. So this module deliberately stores TEXT, and the
-volume series has to come from Census trade statistics instead.
+READ THIS BEFORE CONCLUDING A MARS REPORT HAS NO DATA.
 
-What it does give is worth having:
+An earlier version of this module asserted that all seven International
+Livestock reports "return ZERO structured data fields -- no head_count, no
+avg_price, no volumes", and built the whole dashboard around that. It was
+WRONG, and the mistake is worth recording because it is easy to repeat.
+
+A MARS report is divided into SECTIONS, and the section is a PATH segment:
+
+    /reports/3486/Report%20Volume          <- correct
+    /reports/3486?section=Report Volume    <- silently ignored, returns the header
+
+Asking for the report without a section returns only "Report Header", whose
+rows carry narrative and dates and nothing numeric. That looks exactly like a
+report with no data. The section list is in the response's `reportSections`
+key, which the first version never read.
+
+What the sections actually hold:
+
+  3486 "Report Volume"           DAILY receipts by crossing point --
+                                 receipts_current_est and the week-to-date
+                                 running total. 2023 to date.
+  3486 "Report Detail Current"   per-class prices and weight breaks.
+  3629 "Report Volume"           WEEKLY volumes with AMS's own year-to-date and
+                                 prior-year-to-date totals, by commodity,
+                                 origin and destination.
+
+ESTIMATES vs ACTUALS -- do not mix them. 3486's fields are named
+receipts_current_EST and arrive rounded to the nearest 50-100 head; 3629's
+current_volume/currentytd_volume are exact (104, 2557, 228194). The daily
+series is the timely one, the weekly is the accurate one, and the page must say
+which it is showing.
+
+NEVER RECONSTRUCT THE TOTAL FROM THE CROSSINGS. Each day carries hierarchical
+rollup rows -- ("All Crossing Points", "All Crossing States"), then one per
+state, then one per crossing -- so summing every row triple-counts. Worse, the
+parts do not always add up: measured over 463 days, sum(named crossings)
+disagreed with AMS's published grand total on 19 of them (e.g. 2025-03-03,
+Arizona totals 800 while Douglas and Nogales each report 800; 2024-01-18, the
+Texas crossings sum to 800 against a published Texas total of 600). AMS's own
+"All Crossing Points / All Crossing States" row is authoritative; the
+per-crossing rows are detail, and are labelled as such. This is the same lesson
+as the CME TOTALS bug: use the published total, do not rebuild it.
+
+Census (census_imports.py) is still worth keeping alongside: it is the official
+customs count with seven years of history, against AMS's timeliness.
+
+The narrative sections give what no number can:
 
   special_notes (3629)  the official trade status, weekly and machine-readable.
                         Currently "*** EXPORTS TO MEXICO REMAIN SUSPENDED UNTIL
@@ -69,6 +109,20 @@ BORDER_SLUGS = {
 COLUMNS = ["report_date", "report_begin", "report_end", "published_date",
            "slug_id", "kind", "title", "special_notes", "narrative"]
 
+# AMS's own grand-total row. Authoritative -- see the module note on why the
+# per-crossing rows must not be summed to rebuild it.
+ALL_POINTS = "All Crossing Points"
+ALL_STATES = "All Crossing States"
+
+RECEIPT_COLUMNS = ["report_date", "published_date", "crossing_point",
+                   "crossing_state", "commodity", "receipts_est",
+                   "receipts_wtd_est", "is_total"]
+
+VOLUME_COLUMNS = ["report_begin", "report_end", "published_date", "category",
+                  "commodity", "origin", "destination", "current_volume",
+                  "current_ytd", "prior_volume", "prior_ytd",
+                  "current_year", "prior_year"]
+
 
 def init_tables(conn):
     conn.execute("""
@@ -88,9 +142,148 @@ def init_tables(conn):
     conn.commit()
 
 
+def init_receipt_tables(conn):
+    # is_total marks AMS's own grand-total row so a reader can pick the
+    # authoritative number without re-deriving the rollup rule.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS border_receipts (
+            report_date TEXT NOT NULL,
+            published_date TEXT,
+            crossing_point TEXT NOT NULL,
+            crossing_state TEXT NOT NULL,
+            commodity TEXT,
+            receipts_est INTEGER,
+            receipts_wtd_est INTEGER,
+            is_total INTEGER,
+            PRIMARY KEY (report_date, crossing_point, crossing_state)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS border_volumes (
+            report_begin TEXT NOT NULL,
+            report_end TEXT,
+            published_date TEXT,
+            category TEXT NOT NULL,
+            commodity TEXT NOT NULL,
+            origin TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            current_volume INTEGER,
+            current_ytd INTEGER,
+            prior_volume INTEGER,
+            prior_ytd INTEGER,
+            current_year INTEGER,
+            prior_year INTEGER,
+            PRIMARY KEY (report_begin, category, commodity, origin, destination)
+        )
+    """)
+    conn.commit()
+
+
 def get_auth():
     import os
     return (os.environ["MARS_API_KEY"], "")
+
+
+def _section(slug_id: int, section: str, since: date, until: date):
+    """
+    Fetch one SECTION of a MARS report.
+
+    The section is a PATH segment. Passing it as a query parameter is accepted
+    and silently ignored, returning the header section -- which is how this
+    source was mistaken for having no data at all. See the module docstring.
+    """
+    from urllib.parse import quote
+    s, u = since.strftime("%m/%d/%Y"), until.strftime("%m/%d/%Y")
+    r = requests.get(f"{MARS_BASE}/reports/{slug_id}/{quote(section)}",
+                     auth=get_auth(),
+                     params={"q": f"report_begin_date={s}:{u}"},
+                     timeout=(5, 120))
+    if r.status_code in (204, 404):
+        return []
+    r.raise_for_status()
+    d = r.json()
+    return d.get("results", []) if isinstance(d, dict) else (d or [])
+
+
+def _int(v):
+    """AMS sends numbers as strings, sometimes with commas, often None/''."""
+    if v is None:
+        return None
+    t = str(v).strip().replace(",", "")
+    if not t or t.upper() in ("NA", "N/A", "NULL", "-"):
+        return None
+    try:
+        return int(float(t))
+    except ValueError:
+        return None
+
+
+def ingest_receipts(conn, since: date, until: date, verbose=True):
+    """
+    Daily head counts by crossing point, from 3486 "Report Volume".
+
+    Stores every row INCLUDING the rollups, flagged via is_total, rather than
+    filtering to the total on the way in. Keeping the detail means the by-port
+    view is possible, and keeping the flag means no reader has to re-derive
+    which row is authoritative -- filtering on ingest would have thrown away
+    the breakdown, and storing without the flag invites someone to SUM() the
+    lot and triple-count.
+    """
+    rows = _section(3486, "Report Volume", since, until)
+    n = 0
+    for r in rows:
+        iso = _mdy_to_iso(r.get("report_date"))
+        if not iso:
+            continue
+        point = (r.get("crossing_point") or "").strip()
+        state = (r.get("crossing_state") or "").strip()
+        if not point or not state:
+            continue
+        db.merge_replace(
+            conn, "border_receipts", RECEIPT_COLUMNS,
+            (iso, _mdy_to_iso(r.get("published_date")), point, state,
+             r.get("commodity"), _int(r.get("receipts_current_est")),
+             _int(r.get("receipts_current_wtd_est")),
+             1 if (point == ALL_POINTS and state == ALL_STATES) else 0),
+            ["report_date", "crossing_point", "crossing_state"])
+        n += 1
+    conn.commit()
+    if verbose:
+        print(f"  3486 Report Volume (daily receipts)            {n:>5} rows")
+    return n
+
+
+def ingest_volumes(conn, since: date, until: date, verbose=True):
+    """
+    Weekly volumes with AMS's own YTD, from 3629 "Report Volume".
+
+    These are ACTUALS, unlike 3486's rounded estimates, and AMS publishes the
+    year-to-date and prior-year-to-date already computed -- so the page does not
+    have to sum a partial year itself and cannot get the cut-off point wrong.
+    """
+    rows = _section(3629, "Report Volume", since, until)
+    n = 0
+    for r in rows:
+        begin = _mdy_to_iso(r.get("report_begin_date"))
+        cat = (r.get("category") or "").strip()
+        com = (r.get("commodity") or "").strip()
+        org = (r.get("country_of_origin") or "").strip()
+        dst = (r.get("destination") or "").strip()
+        if not (begin and cat and com and org and dst):
+            continue
+        db.merge_replace(
+            conn, "border_volumes", VOLUME_COLUMNS,
+            (begin, _mdy_to_iso(r.get("report_end_date")),
+             _mdy_to_iso(r.get("published_date")), cat, com, org, dst,
+             _int(r.get("current_volume")), _int(r.get("currentytd_volume")),
+             _int(r.get("prior_volume")), _int(r.get("priorytd_volume")),
+             _int(r.get("current_year")), _int(r.get("prior_year"))),
+            ["report_begin", "category", "commodity", "origin", "destination"])
+        n += 1
+    conn.commit()
+    if verbose:
+        print(f"  3629 Report Volume (weekly + YTD actuals)      {n:>5} rows")
+    return n
 
 
 def _mdy_to_iso(s):
@@ -279,10 +472,13 @@ def main():
 
     conn = db.get_conn()
     init_tables(conn)
+    init_receipt_tables(conn)
     if not args.show:
         since = date.fromisoformat(args.since) if args.since else date(2023, 1, 1)
         print(f"Fetching border reports, {since} .. today\n")
         n = ingest(conn, since, date.today())
+        n += ingest_receipts(conn, since, date.today())
+        n += ingest_volumes(conn, since, date.today())
         print(f"\nstored {n:,} rows")
 
     st = current_status(conn)

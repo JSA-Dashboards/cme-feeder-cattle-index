@@ -55,6 +55,12 @@ def main() -> int:
         since = date.today() - timedelta(days=AMS_LOOKBACK_DAYS)
         print(f"--- AMS border reports since {since} ---")
         n = border_reports.ingest(conn, since, date.today())
+        border_reports.init_receipt_tables(conn)
+        n += border_reports.ingest_receipts(conn, since, date.today())
+        # 3629 carries AMS's running YTD, so a short window would only ever
+        # refresh the latest week's figure -- fine, since the YTD is restated
+        # in full on every week's row.
+        n += border_reports.ingest_volumes(conn, since, date.today())
         print(f"    {n:,} rows")
         st = border_reports.current_status(conn)
         if st and st.get("notes"):

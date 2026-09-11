@@ -90,6 +90,46 @@ function Ping-Health {
     }
 }
 
+# Start a python step, wait for it, and fold its output into the log. The same
+# redirect-to-temp-files dance appeared three times before the reorder needed a
+# fourth, and PS 5.1's handling of a native exe's stderr (see the note above
+# $outFile) is subtle enough that it should be written down once.
+function Invoke-Py {
+    param([string[]]$Arguments, [string]$Tag)
+    $o = Join-Path $env:TEMP ('fci_{0}_out_{1}.txt' -f $Tag, $PID)
+    $e = Join-Path $env:TEMP ('fci_{0}_err_{1}.txt' -f $Tag, $PID)
+    try {
+        $pr = Start-Process -FilePath $py -ArgumentList (@('-u') + $Arguments) `
+                -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
+                -RedirectStandardOutput $o -RedirectStandardError $e
+        $rc = $pr.ExitCode
+    } catch {
+        Log ("WARN: could not start {0} - {1}" -f $Tag, $_.Exception.Message)
+        $rc = 8
+    }
+    foreach ($f in @($o, $e)) {
+        if (Test-Path $f) {
+            $c = Get-Content $f | Where-Object { $_ -ne '' }
+            if ($c) { $c | ForEach-Object { Log $_ } }
+            Remove-Item $f -Force
+        }
+    }
+    return $rc
+}
+
+# Fold any WAL contents back into the .db before a push reads it. update_index.py
+# normally checkpoints on close, but an interrupted run can leave rows stranded
+# in data/mars_history.db-wal, and the push would then upload a dataset missing
+# that day's rows. Needed before BOTH pushes now, for the same reason.
+function Checkpoint-Wal {
+    try {
+        & $py -c "import sqlite3,os; d=os.path.join(r'$repo','data','mars_history.db'); c=sqlite3.connect(d); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); print('wal checkpointed; fci rows =', c.execute('select count(*) from fci_daily').fetchone()[0]); c.close()" 2>&1 |
+            ForEach-Object { Log $_ }
+    } catch {
+        Log ("WARN: wal checkpoint failed - {0}" -f $_.Exception.Message)
+    }
+}
+
 if ($hcUrl) { Log ("healthcheck: pinging the {0} check" -f $slotNow); Ping-Health '/start' }
 else { Log ("healthcheck: no HEALTHCHECK_URL_{0} or HEALTHCHECK_URL in .env, monitoring inert" -f $slotNow.ToUpper()) }
 
@@ -162,81 +202,28 @@ if ($code -eq 0) {
     }
 }
 
-# Refresh the Mexican feeder import sources (AMS border reports + Census trade
-# data) before the push. NON-FATAL on purpose: neither feeds the FCI estimate,
-# so an outage at AMS or Census must not stop the index from publishing. The
-# worst case is one stale dashboard tab.
-$impCode = 0
-if ($code -eq 0) {
-    Log '--- refreshing Mexican feeder import sources ---'
-    $iOut = Join-Path $env:TEMP ('fci_imp_out_{0}.txt' -f $PID)
-    $iErr = Join-Path $env:TEMP ('fci_imp_err_{0}.txt' -f $PID)
-    try {
-        $ip = Start-Process -FilePath $py -ArgumentList '-u', 'update_imports.py' `
-                -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
-                -RedirectStandardOutput $iOut -RedirectStandardError $iErr
-        $impCode = $ip.ExitCode
-    } catch {
-        Log ("WARN: could not start the import refresh - {0}" -f $_.Exception.Message)
-        $impCode = 8
-    }
-    foreach ($f in @($iOut, $iErr)) {
-        if (Test-Path $f) {
-            $c = Get-Content $f | Where-Object { $_ -ne '' }
-            if ($c) { $c | ForEach-Object { Log $_ } }
-            Remove-Item $f -Force
-        }
-    }
-    if ($impCode -ne 0) {
-        Log ("WARN: import refresh failed (exit {0}). Continuing - the FCI " +
-             "estimate is unaffected; the Mexican Feeder Imports tab will be " +
-             "stale." -f $impCode)
-    }
-}
-
-# Fold any WAL contents back into the .db before the push reads it.
-# update_index.py normally checkpoints on close, but an interrupted run can
-# leave rows stranded in data/mars_history.db-wal, and the push would then
-# upload a dataset missing that day's rows.
-if ($code -eq 0) {
-    try {
-        & $py -c "import sqlite3,os; d=os.path.join(r'$repo','data','mars_history.db'); c=sqlite3.connect(d); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); print('wal checkpointed; fci rows =', c.execute('select count(*) from fci_daily').fetchone()[0]); c.close()" 2>&1 |
-            ForEach-Object { Log $_ }
-    } catch {
-        Log ("WARN: wal checkpoint failed - {0}" -f $_.Exception.Message)
-    }
-}
-
-# Push SQLite -> Snowflake. THIS is the step that refreshes the dashboard:
-# production reads JSA.CME_FEEDER_CATTLE, not the local file. Skipped when the
-# USDA refresh failed -- publishing a partial dataset is worse than publishing
-# yesterday's complete one. Connection settings come from .env; the key
-# passphrase from SNOWFLAKE_PRIVATE_KEY_PASSPHRASE in the environment.
+# ORDER MATTERS HERE, and it was wrong until 2026-09-11: the optional ingests
+# now run AFTER the index is published, not before.
+#
+# update_imports.py takes about eight minutes -- calf_sales alone re-walks the
+# full auction roster that update_index.py just walked (409s measured) and
+# corn_bids adds 52s. Ahead of the push, every one of those minutes sat between
+# a finished index and a published one. Worse, it put third-party API calls on
+# the critical path: the 13:00 run hung and was killed on 2026-09-10, and a hang
+# in that position would now strand a perfectly good index unpublished.
+#
+# So: publish the index, then ingest, then push what the ingest produced. The
+# CRITICAL/OPTIONAL split that makes this possible lives in 02_migrate_data.py
+# rather than in an array here, so adding a table cannot silently leave it out.
 $pushCode = 0
 if ($code -eq 0) {
-    Log '--- pushing to Snowflake (JSA.CME_FEEDER_CATTLE) ---'
-    $pOut = Join-Path $env:TEMP ('fci_push_out_{0}.txt' -f $PID)
-    $pErr = Join-Path $env:TEMP ('fci_push_err_{0}.txt' -f $PID)
-    try {
-        $pp = Start-Process -FilePath $py -ArgumentList '-u', 'snowflake/02_migrate_data.py' `
-                -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
-                -RedirectStandardOutput $pOut -RedirectStandardError $pErr
-        $pushCode = $pp.ExitCode
-    } catch {
-        Log ("FATAL: could not start the Snowflake push - {0}" -f $_.Exception.Message)
-        $pushCode = 6
-    }
-    foreach ($f in @($pOut, $pErr)) {
-        if (Test-Path $f) {
-            $c = Get-Content $f | Where-Object { $_ -ne '' }
-            if ($c) { $c | ForEach-Object { Log $_ } }
-            Remove-Item $f -Force
-        }
-    }
+    Checkpoint-Wal
+    Log '--- pushing the index to Snowflake (JSA.CME_FEEDER_CATTLE) ---'
+    $pushCode = Invoke-Py @('snowflake/02_migrate_data.py', '--critical-only') 'push'
     if ($pushCode -eq 0) {
-        Log 'Snowflake push OK - dashboard is serving current data'
+        Log 'index push OK - dashboard is serving current data'
     } else {
-        Log ("ERROR: Snowflake push failed (exit {0}). Local SQLite is current but " +
+        Log ("ERROR: index push failed (exit {0}). Local SQLite is current but " +
              "the DASHBOARD IS STALE - each table rolls back individually, so " +
              "Snowflake still holds its previous contents." -f $pushCode)
     }
@@ -244,7 +231,36 @@ if ($code -eq 0) {
     Log 'skipping Snowflake push: the USDA refresh failed, nothing good to publish'
 }
 
-Log ("run finished  update_exit={0}  cme_exit={1}  imp_exit={2}  push_exit={3}  {4}" -f $code, $cmeCode, $impCode, $pushCode, (Get-Date -Format 'HH:mm:ss'))
+# Everything past this point is dashboards, not the index, and is NON-FATAL
+# throughout: none of it feeds the FCI estimate, which is already published
+# above. The worst case is a stale tab.
+#
+# Deliberately NOT gated on $pushCode. A Snowflake outage during the index push
+# is no reason to also skip collecting today's border, calf and corn data --
+# that data is only published once, and the local ingest is what makes tomorrow
+# able to catch up.
+$impCode = 0
+if ($code -eq 0) {
+    Log '--- refreshing the supply-side sources (border, census, calf, corn) ---'
+    $impCode = Invoke-Py @('update_imports.py') 'imp'
+    if ($impCode -ne 0) {
+        Log ("WARN: import refresh failed (exit {0}). Continuing - the FCI " +
+             "estimate is unaffected; the supply-side tabs will be stale." -f $impCode)
+    }
+}
+
+$optCode = 0
+if ($code -eq 0 -and $impCode -eq 0) {
+    Checkpoint-Wal
+    Log '--- pushing the dashboard tables to Snowflake ---'
+    $optCode = Invoke-Py @('snowflake/02_migrate_data.py', '--optional-only') 'opt'
+    if ($optCode -ne 0) {
+        Log ("WARN: dashboard push failed (exit {0}). The index published " +
+             "normally; the supply-side tabs will be stale." -f $optCode)
+    }
+}
+
+Log ("run finished  update_exit={0}  cme_exit={1}  push_exit={2}  imp_exit={3}  opt_push_exit={4}  {5}" -f $code, $cmeCode, $pushCode, $impCode, $optCode, (Get-Date -Format 'HH:mm:ss'))
 
 # Prune logs older than 30 days so this doesn't grow without bound.
 Get-ChildItem $logDir -Filter 'update_*.log' -ErrorAction SilentlyContinue |

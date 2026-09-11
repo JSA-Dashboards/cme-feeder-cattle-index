@@ -40,12 +40,20 @@ OPTIONAL_TABLES = ["replacement_sales", "border_reports",
 TABLES = CRITICAL_TABLES + OPTIONAL_TABLES
 
 
-def main(only=None):
+def main(only=None, group=None):
     """
     Push SQLite -> Snowflake. `only` restricts the push to a subset of tables,
     which is what the 10:15 CME-print pull uses: it changes two tables and has
     no business spending a minute re-uploading 73k replacement sales and 72k
     bracket rows to land them.
+
+    `group` is "critical" or "optional" and exists so the daily job can publish
+    the index BEFORE spending eight minutes ingesting auction and corn data it
+    does not need. The split lives here rather than in daily_update.ps1 on
+    purpose: a table added to OPTIONAL_TABLES above must not require a matching
+    edit to a PowerShell array that nobody would remember to make, and the
+    failure mode of forgetting -- a table that is never pushed at all -- is
+    silent.
     """
     from snowflake.connector.pandas_tools import write_pandas
 
@@ -62,11 +70,14 @@ def main(only=None):
     failed_optional = []
 
     tables = TABLES
+    if group:
+        tables = {"critical": CRITICAL_TABLES, "optional": OPTIONAL_TABLES}[group]
+        print(f"pushing the {group} tables: {', '.join(tables)}")
     if only:
         unknown = [t for t in only if t not in TABLES]
         if unknown:
             raise SystemExit(f"unknown table(s): {', '.join(unknown)}")
-        tables = [t for t in TABLES if t in only]   # keep the critical-first order
+        tables = [t for t in tables if t in only]   # keep the critical-first order
         print(f"pushing {len(tables)} of {len(TABLES)} tables: {', '.join(tables)}")
 
     for table in tables:
@@ -138,5 +149,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--tables", default=None,
                     help="comma-separated subset to push (default: all)")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--critical-only", action="store_true",
+                   help="push only the index tables, so it publishes first")
+    g.add_argument("--optional-only", action="store_true",
+                   help="push only the dashboard tables")
     a = ap.parse_args()
-    main(only=[t.strip() for t in a.tables.split(",")] if a.tables else None)
+    main(only=[t.strip() for t in a.tables.split(",")] if a.tables else None,
+         group=("critical" if a.critical_only else
+                "optional" if a.optional_only else None))

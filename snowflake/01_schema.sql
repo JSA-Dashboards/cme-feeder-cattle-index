@@ -137,3 +137,43 @@ CREATE TABLE IF NOT EXISTS cme_ftp_locations (
     avg_price FLOAT NOT NULL,
     PRIMARY KEY (report_date, location)
 );
+
+-- ---------------------------------------------------------------------------
+-- Mexican feeder imports. Two sources because neither is sufficient alone:
+-- AMS carries the trade STATUS with no numbers, Census carries the numbers
+-- about six weeks late. Added 2026-09-10.
+-- ---------------------------------------------------------------------------
+
+-- AMS US/Mexico border reports, stored as TEXT on purpose: all seven of AMS's
+-- International Livestock reports return zero structured data fields through
+-- MARS, so the narrative and special_notes ARE the data. Upsert-safe (one
+-- narrative per report_date), unlike replacement_sales.
+CREATE TABLE IF NOT EXISTS border_reports (
+    report_date DATE NOT NULL,
+    report_begin DATE,
+    report_end DATE,
+    published_date DATE,
+    slug_id INTEGER NOT NULL,
+    kind VARCHAR,
+    title VARCHAR,
+    special_notes VARCHAR,
+    narrative VARCHAR,
+    PRIMARY KEY (slug_id, report_date)
+);
+
+-- Census live-cattle imports from Mexico, monthly by HS10 commodity, and by
+-- port of entry where port_code is set. port_code is '' for a national row
+-- rather than NULL because it is part of the key and NULL never matches NULL
+-- in a MERGE. head is whatever UNIT_QY1 says it is -- checked on ingest to be
+-- "NO." (number of head) rather than assumed.
+CREATE TABLE IF NOT EXISTS census_cattle_imports (
+    period VARCHAR NOT NULL,
+    commodity VARCHAR NOT NULL,
+    descr VARCHAR,
+    port_code VARCHAR NOT NULL,
+    port_name VARCHAR,
+    head BIGINT,
+    value_usd BIGINT,
+    unit_qy1 VARCHAR,
+    PRIMARY KEY (period, commodity, port_code)
+);

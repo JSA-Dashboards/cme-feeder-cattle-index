@@ -142,6 +142,38 @@ if ($code -eq 0) {
     }
 }
 
+# Refresh the Mexican feeder import sources (AMS border reports + Census trade
+# data) before the push. NON-FATAL on purpose: neither feeds the FCI estimate,
+# so an outage at AMS or Census must not stop the index from publishing. The
+# worst case is one stale dashboard tab.
+$impCode = 0
+if ($code -eq 0) {
+    Log '--- refreshing Mexican feeder import sources ---'
+    $iOut = Join-Path $env:TEMP ('fci_imp_out_{0}.txt' -f $PID)
+    $iErr = Join-Path $env:TEMP ('fci_imp_err_{0}.txt' -f $PID)
+    try {
+        $ip = Start-Process -FilePath $py -ArgumentList '-u', 'update_imports.py' `
+                -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
+                -RedirectStandardOutput $iOut -RedirectStandardError $iErr
+        $impCode = $ip.ExitCode
+    } catch {
+        Log ("WARN: could not start the import refresh - {0}" -f $_.Exception.Message)
+        $impCode = 8
+    }
+    foreach ($f in @($iOut, $iErr)) {
+        if (Test-Path $f) {
+            $c = Get-Content $f | Where-Object { $_ -ne '' }
+            if ($c) { $c | ForEach-Object { Log $_ } }
+            Remove-Item $f -Force
+        }
+    }
+    if ($impCode -ne 0) {
+        Log ("WARN: import refresh failed (exit {0}). Continuing - the FCI " +
+             "estimate is unaffected; the Mexican Feeder Imports tab will be " +
+             "stale." -f $impCode)
+    }
+}
+
 # Fold any WAL contents back into the .db before the push reads it.
 # update_index.py normally checkpoints on close, but an interrupted run can
 # leave rows stranded in data/mars_history.db-wal, and the push would then
@@ -192,7 +224,7 @@ if ($code -eq 0) {
     Log 'skipping Snowflake push: the USDA refresh failed, nothing good to publish'
 }
 
-Log ("run finished  update_exit={0}  cme_exit={1}  push_exit={2}  {3}" -f $code, $cmeCode, $pushCode, (Get-Date -Format 'HH:mm:ss'))
+Log ("run finished  update_exit={0}  cme_exit={1}  imp_exit={2}  push_exit={3}  {4}" -f $code, $cmeCode, $impCode, $pushCode, (Get-Date -Format 'HH:mm:ss'))
 
 # Prune logs older than 30 days so this doesn't grow without bound.
 Get-ChildItem $logDir -Filter 'update_*.log' -ErrorAction SilentlyContinue |

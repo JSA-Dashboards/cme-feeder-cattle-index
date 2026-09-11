@@ -22,7 +22,7 @@ DB_PATH = HERE / "data" / "mars_history.db"
 
 TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily", "cme_ftp_locations",
           "cme_ftp_brackets", "peer_estimates", "fci_snapshots",
-          "replacement_sales"]
+          "replacement_sales", "border_reports", "census_cattle_imports"]
 
 
 def main():

@@ -70,6 +70,7 @@ exists to be compared against.
 |---|---|---|
 | `WakeToRun` | **True** | The machine sleeps overnight. Without this the job waits for someone to wake the PC: on four of the five weekdays before it was enabled, the 20-minute run would have finished *after* the 08:15 deadline. |
 | `StartWhenAvailable` | **True** | Covers a full power-off, which no scheduled task can wake from — the run then happens at next boot. |
+| `ExecutionTimeLimit` | **PT90M** | Was `PT45M`. On 2026-09-10 the 13:00 run hung 16s in and Task Scheduler killed it at 13:45 with `0xC000013A` (terminated) — correctly, but silently. 90 minutes is 6x a normal 5.6-minute run and 6x the slowest legitimate one observed (14.5 min), so it still fails fast rather than grinding for hours. Do **not** raise it further: a long limit turns a hang into a wasted afternoon instead of an early failure. |
 
 Wake timers are enabled on AC and this is a desktop with no battery, so the
 `WakeToRun` setting is not silently vetoed by power policy. (On a laptop it
@@ -109,6 +110,18 @@ maintains the table rather than merely leaving it alone.
 | 3 | `.env` missing (no `MARS_API_KEY`). |
 | 5 | The refresh worked but the **Snowflake push failed** — local data is current, the dashboard is stale. |
 | other | Propagated from `update_index.py`. |
+
+`imp_exit` covers the Mexican feeder import refresh (`update_imports.py`: AMS
+border reports + Census trade data). Like `cme_exit` it is logged as a warning
+and never fails the run — neither source feeds the FCI estimate, so the worst
+case is a stale *Mexican Feeder Imports* tab. It returns 1 only if **both**
+sources fail, which points at a missing `MARS_API_KEY` / `CENSUS_API_KEY` or no
+network rather than a bad day at one agency.
+
+The two sources take deliberately different lookbacks: 30 days for AMS (these
+publish same-day and are never revised) and **15 months** for Census, which is
+mandatory rather than generous — Census revises prior months for months
+afterwards, so a short window would freeze the first, provisional print.
 
 A non-zero `cme_exit` is logged as a warning and does **not** fail the run: a
 stale CME series is a smaller problem than skipping the publish, and CME's FTP

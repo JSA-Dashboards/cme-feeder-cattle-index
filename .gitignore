@@ -41,3 +41,8 @@ data/*.db-shm
 
 # Scratch downloads (AMS video-sale PDFs fetched during parsing)
 .tmp/
+
+# Local dev launcher. Points at a session-specific scratchpad path and loads
+# .env into a Streamlit process for testing the portal against Snowflake --
+# useful on this machine, meaningless anywhere else.
+.claude/

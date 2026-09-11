@@ -39,7 +39,13 @@ OPTIONAL_TABLES = ["replacement_sales", "border_reports",
 TABLES = CRITICAL_TABLES + OPTIONAL_TABLES
 
 
-def main():
+def main(only=None):
+    """
+    Push SQLite -> Snowflake. `only` restricts the push to a subset of tables,
+    which is what the 10:15 CME-print pull uses: it changes two tables and has
+    no business spending a minute re-uploading 73k replacement sales and 72k
+    bracket rows to land them.
+    """
     from snowflake.connector.pandas_tools import write_pandas
 
     # Auth goes through snowflake_db.get_conn() so there is exactly one
@@ -54,7 +60,15 @@ def main():
     sqlite_conn = sqlite3.connect(DB_PATH)
     failed_optional = []
 
-    for table in TABLES:
+    tables = TABLES
+    if only:
+        unknown = [t for t in only if t not in TABLES]
+        if unknown:
+            raise SystemExit(f"unknown table(s): {', '.join(unknown)}")
+        tables = [t for t in TABLES if t in only]   # keep the critical-first order
+        print(f"pushing {len(tables)} of {len(TABLES)} tables: {', '.join(tables)}")
+
+    for table in tables:
         df = pd.read_sql(f"SELECT * FROM {table}", sqlite_conn)
         sqlite_count = len(df)
         # Snowflake column names are case-insensitive when unquoted, but
@@ -119,4 +133,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tables", default=None,
+                    help="comma-separated subset to push (default: all)")
+    a = ap.parse_args()
+    main(only=[t.strip() for t in a.tables.split(",")] if a.tables else None)

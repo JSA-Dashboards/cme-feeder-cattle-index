@@ -4,6 +4,31 @@
 Snowflake, which is what the dashboard reads. It runs from Windows Task
 Scheduler as **`JSA FCI daily update`**.
 
+## Three triggers, two scripts
+
+`daily_update.ps1` at 07:30 and 13:00 (below), plus `cme_pull.ps1` at 10:15.
+
+### The 10:15 CME print pull
+
+CME publishes each index date's file the NEXT business day. Measured from their
+own FTP `MDTM` timestamps over 14 consecutive files:
+
+    earliest 08:35    median 09:05    latest 10:05    (Central)
+
+So **07:30 is always too early** -- the morning run can never carry yesterday's
+official number -- and 13:00 was the first poll that saw it. The published print
+and the whole forecast scorecard therefore ran about four hours behind CME every
+morning: a 09:05 print did not reach the dashboard until 13:05.
+
+10:15 clears the 10:05 worst case by ten minutes. The job fetches, stores, and
+pushes only `cme_ftp_daily`, `cme_ftp_locations` and `cme_ftp_brackets` -- about
+25 seconds, against the main pipeline's 12 minutes. It recomputes nothing: CME's
+value does not feed the estimate, it is what the estimate is scored against.
+
+It has **no healthcheck ping on purpose**. It is an accelerator, not a
+guarantee: if it fails, the 13:00 run pulls the same file with a wider lookback
+and the only cost is that the print appears when it always used to.
+
 ## Two triggers, one script
 
 | Trigger | Purpose |
@@ -70,7 +95,7 @@ exists to be compared against.
 |---|---|---|
 | `WakeToRun` | **True** | The machine sleeps overnight. Without this the job waits for someone to wake the PC: on four of the five weekdays before it was enabled, the 20-minute run would have finished *after* the 08:15 deadline. |
 | `StartWhenAvailable` | **True** | Covers a full power-off, which no scheduled task can wake from — the run then happens at next boot. |
-| `ExecutionTimeLimit` | **PT90M** | Was `PT45M`. On 2026-09-10 the 13:00 run hung 16s in and Task Scheduler killed it at 13:45 with `0xC000013A` (terminated) — correctly, but silently. 90 minutes is 6x a normal 5.6-minute run and 6x the slowest legitimate one observed (14.5 min), so it still fails fast rather than grinding for hours. Do **not** raise it further: a long limit turns a hang into a wasted afternoon instead of an early failure. |
+| `ExecutionTimeLimit` | **PT90M** (PT20M on the CME pull) | Was `PT45M`. On 2026-09-10 the 13:00 run hung 16s in and Task Scheduler killed it at 13:45 with `0xC000013A` (terminated) — correctly, but silently. 90 minutes is 6x a normal 5.6-minute run and 6x the slowest legitimate one observed (14.5 min), so it still fails fast rather than grinding for hours. Do **not** raise it further: a long limit turns a hang into a wasted afternoon instead of an early failure. |
 
 Wake timers are enabled on AC and this is a desktop with no battery, so the
 `WakeToRun` setting is not silently vetoed by power policy. (On a laptop it
@@ -130,6 +155,28 @@ is a third party we do not control.
 Logs land in `logs/update_<date>.log` and are pruned after 30 days.
 
 ## Dead-man's switch
+
+**Two checks, one per slot.** A five-field cron shares a single minute field, so
+07:30 and 13:00 cannot be expressed together -- `30 7,13 * * *` means 07:30 and
+13:30 and would cry wolf every afternoon. Configure the monitor with:
+
+| check | cron | grace | alerts |
+|---|---|---|---|
+| morning | `30 7 * * *` | 45 min | 08:15 |
+| afternoon | `0 13 * * *` | 45 min | 13:45 |
+
+in `America/Chicago`, and put the ping URLs in `.env` as `HEALTHCHECK_URL_AM`
+and `HEALTHCHECK_URL_PM`. A single `HEALTHCHECK_URL` is still honoured for both
+slots as a fallback.
+
+Monitoring BOTH matters. The failure that prompted this was the 13:00 run
+hanging on 2026-09-10 and being killed at its time limit. A killed process never
+reaches its `/fail` line, so ABSENCE of a ping is the only signal available --
+and a morning-only check would have stayed green straight through it.
+
+Grace of 45 minutes covers the wake overhead: the trigger fires at 07:30, the
+machine wakes around 07:33, the task starts about 07:39 and the success ping
+lands near 07:51.
 
 The freshness banner on the dashboard reports staleness, but only when somebody
 opens the page. To be told about a failure with nobody watching, the alert has

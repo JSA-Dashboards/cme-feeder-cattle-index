@@ -46,13 +46,32 @@ Log ("run started  {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'))
 #
 # Every ping is best-effort and logged, never fatal: an outage at the monitor,
 # or no URL configured at all, must not stop the pipeline. Unset = inert.
-$hcUrl = $null
-$envFile = Join-Path $repo '.env'
-if (Test-Path $envFile) {
-    $m = Select-String -Path $envFile -Pattern '^\s*HEALTHCHECK_URL\s*=\s*(\S+)' |
+# ONE CHECK PER SLOT, because a five-field cron shares a single minute field
+# and this job runs at 07:30 and 13:00 -- "30 7,13 * * *" would expect 07:30 and
+# 13:30 and cry wolf every afternoon. So the monitor gets two checks, each with
+# its own cron ("30 7 * * *" and "0 13 * * *"), and this script pings whichever
+# one matches the slot it is running in.
+#
+# Monitoring BOTH matters: the failure that prompted all this was the 13:00 run
+# hanging and being killed on 2026-09-10. A killed process never reaches its
+# /fail line, so absence is the only signal, and a morning-only check would have
+# stayed green through it.
+#
+# HEALTHCHECK_URL (unsuffixed) is still honoured as a single check for both
+# slots, so an existing setup keeps working.
+$slotNow = if ((Get-Date).Hour -lt 11) { 'am' } else { 'pm' }   # same 11:00 boundary as snapshots.run_slot()
+
+function Get-EnvValue([string]$Name) {
+    $envFile = Join-Path $repo '.env'
+    if (-not (Test-Path $envFile)) { return $null }
+    $m = Select-String -Path $envFile -Pattern ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(\S+)') |
             Select-Object -First 1
-    if ($m) { $hcUrl = $m.Matches[0].Groups[1].Value.Trim().Trim('"').Trim("'") }
+    if ($m) { return $m.Matches[0].Groups[1].Value.Trim().Trim('"').Trim("'") }
+    return $null
 }
+
+$hcUrl = Get-EnvValue ('HEALTHCHECK_URL_' + $slotNow.ToUpper())
+if (-not $hcUrl) { $hcUrl = Get-EnvValue 'HEALTHCHECK_URL' }
 
 function Ping-Health {
     param([string]$Suffix = '', [string]$Body = '')
@@ -71,7 +90,8 @@ function Ping-Health {
     }
 }
 
-if ($hcUrl) { Ping-Health '/start' } else { Log 'healthcheck: HEALTHCHECK_URL not set, monitoring inert' }
+if ($hcUrl) { Log ("healthcheck: pinging the {0} check" -f $slotNow); Ping-Health '/start' }
+else { Log ("healthcheck: no HEALTHCHECK_URL_{0} or HEALTHCHECK_URL in .env, monitoring inert" -f $slotNow.ToUpper()) }
 
 if (-not (Test-Path $py))                    { Log 'FATAL: venv python missing'; Ping-Health '/fail' 'venv python missing'; exit 2 }
 if (-not (Test-Path (Join-Path $repo '.env'))) { Log 'FATAL: .env missing - MARS_API_KEY unavailable'; exit 3 }   # no .env means no URL to ping; absence is the alert

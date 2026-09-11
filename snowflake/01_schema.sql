@@ -220,3 +220,33 @@ CREATE TABLE IF NOT EXISTS border_volumes (
     prior_year INTEGER,
     PRIMARY KEY (report_begin, category, commodity, origin, destination)
 );
+
+-- Border feeder-cattle prices by class, weight and grade, from 3486
+-- "Report Detail Current". Every row is Per Cwt / F.O.B. (verified across all
+-- 10,401 rows 2023-2026) -- the same basis as the CME index, which is what
+-- makes the border-to-index spread a legitimate subtraction.
+--
+-- AMS's weight brackets MOVED between 2024 and 2025 (300-400/400-500/500-600
+-- became 500-600/600-700/700-800), so any average across that boundary that
+-- does not hold weight_low constant measures the bracket change rather than
+-- the market. frame and muscle_grade are '' rather than NULL when absent
+-- (~11% of rows): they are part of the key, and NULL never matches NULL in a
+-- MERGE.
+CREATE TABLE IF NOT EXISTS border_prices (
+    report_date DATE NOT NULL,
+    published_date DATE,
+    crossing_point VARCHAR NOT NULL,
+    crossing_state VARCHAR,
+    class_desc VARCHAR NOT NULL,
+    frame VARCHAR NOT NULL,
+    muscle_grade VARCHAR NOT NULL,
+    weight_low INTEGER NOT NULL,
+    weight_high INTEGER,
+    low_price FLOAT,
+    high_price FLOAT,
+    avg_price FLOAT,
+    price_unit VARCHAR,
+    freight VARCHAR,
+    PRIMARY KEY (report_date, crossing_point, class_desc, frame,
+                 muscle_grade, weight_low)
+);

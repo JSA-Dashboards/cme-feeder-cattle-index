@@ -22,11 +22,22 @@ What the sections actually hold:
 
   3486 "Report Volume"           DAILY receipts by crossing point --
                                  receipts_current_est and the week-to-date
-                                 running total. 2023 to date.
-  3486 "Report Detail Current"   per-class prices and weight breaks.
+                                 running total. 5,507 rows, 2023 to date.
+  3486 "Report Detail Current"   prices by class, weight break and muscle
+                                 grade. 10,401 rows. Every one is Per Cwt and
+                                 F.O.B. -- the SAME basis as the CME index,
+                                 which is what makes a border-to-index spread
+                                 a legitimate subtraction rather than a rough
+                                 comparison.
   3629 "Report Volume"           WEEKLY volumes with AMS's own year-to-date and
                                  prior-year-to-date totals, by commodity,
-                                 origin and destination.
+                                 origin and destination. 2,436 rows.
+
+AND THE PRICE BRACKETS MOVED. AMS quoted 300-400 / 400-500 / 500-600 through
+2024 and 500-600 / 600-700 / 700-800 from 2025, so an average across that
+boundary that does not hold weight constant measures the bracket change, not
+the market. The index-comparable 700-800 bracket does not exist before
+February 2025 at all.
 
 ESTIMATES vs ACTUALS -- do not mix them. 3486's fields are named
 receipts_current_EST and arrive rounded to the nearest 50-100 head; 3629's
@@ -53,8 +64,9 @@ The narrative sections give what no number can:
   special_notes (3629)  the official trade status, weekly and machine-readable.
                         Currently "*** EXPORTS TO MEXICO REMAIN SUSPENDED UNTIL
                         FURTHER NOTICE. ***". For a border page, "is the border
-                        open" is the single most important field, and MARS
-                        carries it reliably even though it carries no numbers.
+                        open" is the single most important field, and no volume
+                        series answers it -- a quiet week and a closed border
+                        look identical in the numbers.
 
   report_narrative      port-level market colour: which crossing, trade tone,
   (3486)                weight ranges. "Douglas, AZ - Compared to Tuesday,
@@ -118,6 +130,11 @@ RECEIPT_COLUMNS = ["report_date", "published_date", "crossing_point",
                    "crossing_state", "commodity", "receipts_est",
                    "receipts_wtd_est", "is_total"]
 
+PRICE_COLUMNS = ["report_date", "published_date", "crossing_point",
+                 "crossing_state", "class_desc", "frame", "muscle_grade",
+                 "weight_low", "weight_high", "low_price", "high_price",
+                 "avg_price", "price_unit", "freight"]
+
 VOLUME_COLUMNS = ["report_begin", "report_end", "published_date", "category",
                   "commodity", "origin", "destination", "current_volume",
                   "current_ytd", "prior_volume", "prior_ytd",
@@ -156,6 +173,26 @@ def init_receipt_tables(conn):
             receipts_wtd_est INTEGER,
             is_total INTEGER,
             PRIMARY KEY (report_date, crossing_point, crossing_state)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS border_prices (
+            report_date TEXT NOT NULL,
+            published_date TEXT,
+            crossing_point TEXT NOT NULL,
+            crossing_state TEXT,
+            class_desc TEXT NOT NULL,
+            frame TEXT NOT NULL,
+            muscle_grade TEXT NOT NULL,
+            weight_low INTEGER NOT NULL,
+            weight_high INTEGER,
+            low_price REAL,
+            high_price REAL,
+            avg_price REAL,
+            price_unit TEXT,
+            freight TEXT,
+            PRIMARY KEY (report_date, crossing_point, class_desc, frame,
+                         muscle_grade, weight_low)
         )
     """)
     conn.execute("""
@@ -251,6 +288,82 @@ def ingest_receipts(conn, since: date, until: date, verbose=True):
     if verbose:
         print(f"  3486 Report Volume (daily receipts)            {n:>5} rows")
     return n
+
+
+def ingest_prices(conn, since: date, until: date, verbose=True):
+    """
+    Border feeder-cattle prices by class, weight and grade, from 3486
+    "Report Detail Current".
+
+    Uniform where it matters, verified over all 10,401 rows 2023-2026:
+    price_unit is "Per Cwt" on every row and freight is "F.O.B." on every row.
+    That is worth stating because the replacement-report ingest was bitten by
+    assuming exactly this and being wrong -- here it was checked, not assumed,
+    and the check is repeated on every run below.
+
+    THE WEIGHT BRACKETS MOVED. AMS reported 300-400 / 400-500 / 500-600 through
+    2024 and 500-600 / 600-700 / 700-800 from 2025. So any average taken across
+    that boundary without holding weight constant measures the bracket change,
+    not the market -- and the index-comparable 700-800 bracket does not exist
+    before 2025 at all. Nothing is aggregated on ingest for that reason; the
+    bracket is stored and the reader holds it fixed.
+
+    frame and muscle_grade are empty on ~11% of rows and are part of the key,
+    so they are coalesced to '' -- NULL never equals NULL in a Snowflake MERGE,
+    and a NULL here would make every such row insert as a fresh duplicate while
+    behaving perfectly well on SQLite.
+    """
+    rows = _section(3486, "Report Detail Current", since, until)
+    n, units, freights = 0, set(), set()
+    for r in rows:
+        iso = _mdy_to_iso(r.get("report_date"))
+        if not iso:
+            continue
+        lo, hi = _num(r.get("low_price")), _num(r.get("high_price"))
+        if lo is None and hi is None:
+            continue
+        units.add((r.get("price_unit") or "").strip())
+        freights.add((r.get("freight") or "").strip())
+        mid = (lo + hi) / 2 if (lo is not None and hi is not None) else (lo or hi)
+        db.merge_replace(
+            conn, "border_prices", PRICE_COLUMNS,
+            (iso, _mdy_to_iso(r.get("published_date")),
+             (r.get("crossing_point") or "").strip(),
+             (r.get("crossing_state") or "").strip(),
+             (r.get("class") or "").strip(),
+             (r.get("frame") or "").strip(),
+             # MARS really does capitalise this one field oddly.
+             (r.get("muscle_Grade") or r.get("muscle_grade") or "").strip(),
+             _int(r.get("weight_break_low")), _int(r.get("weight_break_high")),
+             lo, hi, mid, (r.get("price_unit") or "").strip(),
+             (r.get("freight") or "").strip()),
+            ["report_date", "crossing_point", "class_desc", "frame",
+             "muscle_grade", "weight_low"])
+        n += 1
+    conn.commit()
+    if verbose:
+        print(f"  3486 Report Detail Current (prices)            {n:>5} rows")
+        odd_u = units - {"Per Cwt", ""}
+        odd_f = freights - {"F.O.B.", ""}
+        if odd_u or odd_f:
+            # Loud, not silent: a different unit or basis means the stored
+            # numbers are not what every consumer assumes they are.
+            print(f"  [!] unexpected price_unit={sorted(odd_u)} "
+                  f"freight={sorted(odd_f)} -- prices may not be $/cwt FOB")
+    return n
+
+
+def _num(v):
+    """Float parse for prices; same tolerance for AMS's string numerics."""
+    if v is None:
+        return None
+    t = str(v).strip().replace(",", "").replace("$", "")
+    if not t:
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
 
 
 def ingest_volumes(conn, since: date, until: date, verbose=True):
@@ -479,6 +592,7 @@ def main():
         n = ingest(conn, since, date.today())
         n += ingest_receipts(conn, since, date.today())
         n += ingest_volumes(conn, since, date.today())
+        n += ingest_prices(conn, since, date.today())
         print(f"\nstored {n:,} rows")
 
     st = current_status(conn)

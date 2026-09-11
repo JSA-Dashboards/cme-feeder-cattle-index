@@ -20,10 +20,23 @@ load_dotenv()
 HERE = Path(__file__).parent.parent
 DB_PATH = HERE / "data" / "mars_history.db"
 
-TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily", "cme_ftp_locations",
-          "cme_ftp_brackets", "peer_estimates", "fci_snapshots",
-          "replacement_sales", "border_reports", "census_cattle_imports",
-          "border_receipts", "border_volumes"]
+# CRITICAL is the feeder cattle index itself: if any of these fails to land,
+# the dashboard is serving stale numbers and somebody needs to know tonight.
+CRITICAL_TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily",
+                   "cme_ftp_locations", "cme_ftp_brackets", "peer_estimates",
+                   "fci_snapshots"]
+
+# OPTIONAL feeds the supply-side dashboards. A failure here means one tab is
+# stale; it must NOT be reported as an index failure. Before this split, any
+# border-table problem aborted the whole push with a non-zero exit, which
+# daily_update.ps1 read as push_exit != 0 -- logging "DASHBOARD IS STALE" and
+# emailing a failure about an index that was already safely committed, since
+# the critical tables are pushed first and each table commits on its own.
+OPTIONAL_TABLES = ["replacement_sales", "border_reports",
+                   "census_cattle_imports", "border_receipts",
+                   "border_volumes", "border_prices"]
+
+TABLES = CRITICAL_TABLES + OPTIONAL_TABLES
 
 
 def main():
@@ -39,6 +52,7 @@ def main():
 
     sf_conn = db.get_conn()
     sqlite_conn = sqlite3.connect(DB_PATH)
+    failed_optional = []
 
     for table in TABLES:
         df = pd.read_sql(f"SELECT * FROM {table}", sqlite_conn)
@@ -75,10 +89,16 @@ def main():
             if not success:
                 raise RuntimeError(f"write_pandas reported failure for {table}")
             cur.execute("COMMIT")
-        except Exception:
+        except Exception as e:
             cur.execute("ROLLBACK")
             print(f"{table}: FAILED - rolled back, table left as it was")
-            raise
+            if table in CRITICAL_TABLES:
+                raise
+            # Optional table: report it and keep going. Each table commits
+            # independently, so the ones already pushed are safe.
+            print(f"{table}: NON-CRITICAL - continuing. {type(e).__name__}: {e}")
+            failed_optional.append(table)
+            continue
         cur.execute(f"SELECT COUNT(*) FROM {table}")
         sf_count = cur.fetchone()[0]
 
@@ -87,6 +107,15 @@ def main():
 
     sf_conn.close()
     sqlite_conn.close()
+
+    if failed_optional:
+        # Visible in the log, but exit 0: the index published fine, and calling
+        # this a failure would train someone to ignore a real one.
+        print("")
+        print(f"WARNING: {len(failed_optional)} non-critical table(s) failed "
+              f"and were skipped: {', '.join(failed_optional)}. The feeder "
+              f"cattle index published normally; the affected dashboard tab(s) "
+              f"will be stale.")
 
 
 if __name__ == "__main__":

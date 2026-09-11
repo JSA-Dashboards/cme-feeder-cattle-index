@@ -1090,6 +1090,31 @@ with cols[2]:
 with cols[3]:
     st.markdown(tile("Month Change", fmt_price(month_chg), delta_html(month_chg)), unsafe_allow_html=True)
 
+# ── Daily (same-day, non-rolling) snapshot ─────────────────────────────────────
+# MUST STAY DIRECTLY UNDER THE KPI TILES. This is a caption on the headline
+# number, not a section of its own: it gives the latest date's OWN weighted
+# average against the 7-day rolling Current Index in the tiles above. Moving the
+# Index Volume boxes up on 2026-09-10 pushed this line below them, which
+# separated it from the number it describes and read as though it had been
+# removed. Anything inserted between the tiles and here will do that again.
+# Mirrors the "Daily: $X on Y head and Z lbs average" line under CME subscriber
+# reports — the single date's own weighted average, distinct from the 7-day
+# rolling Current Index above it.
+last_row = fci_df.iloc[-1]
+sd_price = last_row.get("same_day_price")
+sd_head = last_row.get("same_day_head")
+sd_weight = last_row.get("same_day_avg_weight")
+if pd.notna(sd_price) and pd.notna(sd_head):
+    weight_part = f" and <b style='color:{TEXT}'>{sd_weight:.0f} lbs</b> average" if pd.notna(sd_weight) else ""
+    st.markdown(
+        f"<div style='color:{MUTED};font-size:0.82rem;margin-top:10px;'>"
+        f"Daily: <b style='color:{TEXT}'>${sd_price:.2f}</b> on "
+        f"<b style='color:{TEXT}'>{int(sd_head):,}</b> head{weight_part}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ── Index Volume ───────────────────────────────────────────────────────────────────────────
 # How much cattle is behind the index, which the price alone does not say: a
 # two-cent move on 9,000 head is a different fact from the same move on 25,000.
@@ -1211,25 +1236,6 @@ if _vol and _vol.get("head"):
             f"{_y['year']}: {_y['dates']} published dates · {_y['prev_year']}: "
             f"{_y['prev_dates']}."
         )
-
-# ── Daily (same-day, non-rolling) snapshot ─────────────────────────────────────
-# Mirrors the "Daily: $X on Y head and Z lbs average" line under CME subscriber
-# reports — the single date's own weighted average, distinct from the 7-day
-# rolling Current Index above it.
-last_row = fci_df.iloc[-1]
-sd_price = last_row.get("same_day_price")
-sd_head = last_row.get("same_day_head")
-sd_weight = last_row.get("same_day_avg_weight")
-if pd.notna(sd_price) and pd.notna(sd_head):
-    weight_part = f" and <b style='color:{TEXT}'>{sd_weight:.0f} lbs</b> average" if pd.notna(sd_weight) else ""
-    st.markdown(
-        f"<div style='color:{MUTED};font-size:0.82rem;margin-top:10px;'>"
-        f"Daily: <b style='color:{TEXT}'>${sd_price:.2f}</b> on "
-        f"<b style='color:{TEXT}'>{int(sd_head):,}</b> head{weight_part}"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
 
 # ── 7-Day Window (rolling index composition) ──────────────────────────────────
 # Mirrors the top "Daily Totals" box in Compass's own report -- shows the

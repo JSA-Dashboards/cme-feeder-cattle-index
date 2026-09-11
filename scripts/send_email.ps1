@@ -75,6 +75,39 @@ if (-not (Test-Path $subjectFile) -or -not (Test-Path $bodyFile)) {
 $subject = (Get-Content $subjectFile -Raw -Encoding utf8).Trim()
 $body    = Get-Content $bodyFile -Raw -Encoding utf8
 
+# --- drop a copy into OneDrive ----------------------------------------------
+# This happens BEFORE (and regardless of) the SMTP attempt, because it is the
+# delivery path that actually works here.
+#
+# Ross's tenant has app passwords disabled -- "Add a sign-in method" offers
+# Authenticator, hardware token, phone and email, and nothing else -- and MFA is
+# enforced, so SMTP basic auth can never succeed for this account no matter what
+# password is used. Rather than wait on IT for an app registration, the estimate
+# is written to OneDrive for Business, which syncs to the cloud on its own. A
+# Power Automate scheduled flow then reads the file and sends the mail using
+# Ross's OWN identity through the Office 365 Outlook connector: no password is
+# stored anywhere, no app registration, no admin consent.
+#
+# Stable filenames on purpose -- a Power Automate "Get file content using path"
+# step wants one fixed path, not a dated one.
+$drop = Read-EnvValue 'EMAIL_DROP_DIR'
+if (-not $drop -and $env:OneDriveCommercial) {
+    $drop = Join-Path $env:OneDriveCommercial 'JSA FCI'
+}
+if ($drop) {
+    try {
+        if (-not (Test-Path $drop)) { New-Item -ItemType Directory -Path $drop -Force | Out-Null }
+        # NO BOM. PowerShell 5.1's -Encoding utf8 writes one, and Power Automate
+        # would carry it into the subject line as a stray leading character.
+        $utf8 = New-Object Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText((Join-Path $drop 'latest_estimate.html'), $body, $utf8)
+        [IO.File]::WriteAllText((Join-Path $drop 'latest_subject.txt'), $subject, $utf8)
+        Write-Output ("email: dropped to OneDrive -> {0}" -f $drop)
+    } catch {
+        Write-Output ("email: WARN OneDrive drop failed - {0}" -f $_.Exception.Message)
+    }
+}
+
 # --- send it ----------------------------------------------------------------
 $smtpHost = Read-EnvValue 'SMTP_HOST'; if (-not $smtpHost) { $smtpHost = 'smtp.office365.com' }
 $smtpPort = Read-EnvValue 'SMTP_PORT'; if (-not $smtpPort) { $smtpPort = '587' }
@@ -100,8 +133,12 @@ if ($Preview) {
 }
 
 if (-not $smtpUser -or -not $smtpPass) {
-    Write-Output ('email: SMTP not configured - add SMTP_USER and SMTP_PASSWORD ' +
-                  '(an APP PASSWORD, not your account password) to .env. Nothing sent.')
+    # Verified 2026-09-11: this tenant does not offer app passwords at all, and
+    # MFA is enforced, so SMTP basic auth CANNOT work for this account. The
+    # OneDrive drop above is the live delivery path; SMTP stays here only for a
+    # future mailbox that does permit it.
+    Write-Output ('email: SMTP not configured (this tenant has app passwords ' +
+                  'disabled) - delivery is via the OneDrive drop above.')
     exit 0
 }
 

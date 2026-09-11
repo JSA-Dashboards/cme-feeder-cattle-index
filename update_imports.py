@@ -72,6 +72,30 @@ def main() -> int:
         traceback.print_exc(file=sys.stdout)
 
     try:
+        import calf_sales
+        calf_sales.init_tables(conn)
+        since = date.today() - timedelta(days=AMS_LOOKBACK_DAYS)
+        print(f"--- calf/feeder auction rows since {since} ---")
+        n = calf_sales.ingest(conn, since, date.today(), verbose=False)
+        print(f"    {n:,} rows")
+        ok.append("calf")
+    except Exception:
+        print("[!] calf sales FAILED:")
+        traceback.print_exc(file=sys.stdout)
+
+    try:
+        import corn_bids
+        corn_bids.init_tables(conn)
+        since = date.today() - timedelta(days=AMS_LOOKBACK_DAYS)
+        print(f"--- cash corn bids since {since} ---")
+        n = corn_bids.ingest(conn, since, date.today(), verbose=False)
+        print(f"    {n:,} rows")
+        ok.append("corn")
+    except Exception:
+        print("[!] corn bids FAILED:")
+        traceback.print_exc(file=sys.stdout)
+
+    try:
         import census_imports
         census_imports.init_tables(conn)
         start = _months_ago(CENSUS_LOOKBACK_MONTHS)

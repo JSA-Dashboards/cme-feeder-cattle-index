@@ -250,3 +250,54 @@ CREATE TABLE IF NOT EXISTS border_prices (
     PRIMARY KEY (report_date, crossing_point, class_desc, frame,
                  muscle_grade, weight_low)
 );
+
+-- ---------------------------------------------------------------------------
+-- Backgrounding / cost-of-gain inputs, added 2026-09-11. NEITHER table feeds
+-- the feeder cattle index.
+-- ---------------------------------------------------------------------------
+
+-- Auction rows across a WIDER weight band than the index uses: 400-650 lb (the
+-- backgrounding buy side) plus 700-850 mirrored from the index band so one
+-- series covers both ends of the trade.
+--
+-- THIS EXISTS AS A SEPARATE TABLE FOR A REASON. recompute_fci_daily() reads
+-- mars_sales with NO WHERE CLAUSE -- every row there is treated as
+-- index-qualifying, the filtering having happened once on the way in. Widening
+-- that ingest would have blended 500 lb calves at $400/cwt straight into the
+-- published index, silently. Nothing reads calf_sales when computing the index.
+CREATE TABLE IF NOT EXISTS calf_sales (
+    report_date DATE NOT NULL,
+    raw_date DATE,
+    published_date DATE,
+    slug_id INTEGER NOT NULL,
+    location VARCHAR NOT NULL,
+    state VARCHAR,
+    weight_low INTEGER NOT NULL,
+    weight_high INTEGER,
+    muscle_grade VARCHAR NOT NULL,
+    head_count INTEGER,
+    avg_weight FLOAT,
+    avg_price FLOAT,
+    PRIMARY KEY (report_date, slug_id, weight_low, muscle_grade,
+                 avg_price, head_count)
+);
+
+-- Cash corn bids by state, for the cost-of-gain build-up. CASH, not futures: a
+-- feeder buys from an elevator down the road, and that basis varies by several
+-- dimes across the feeding states -- Nebraska bid 5.31 the same day Kansas bid
+-- 5.11. Pricing cost of gain off Chicago would be wrong in a direction that
+-- changes by geography.
+CREATE TABLE IF NOT EXISTS corn_bids (
+    report_date DATE NOT NULL,
+    published_date DATE,
+    state VARCHAR NOT NULL,
+    slug_id INTEGER NOT NULL,
+    trade_loc VARCHAR NOT NULL,
+    delivery_point VARCHAR NOT NULL,
+    grain_class VARCHAR,
+    price_min FLOAT,
+    price_max FLOAT,
+    avg_price FLOAT,
+    price_unit VARCHAR,
+    PRIMARY KEY (report_date, state, trade_loc, delivery_point, grain_class)
+);

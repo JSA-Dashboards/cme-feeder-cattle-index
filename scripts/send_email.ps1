@@ -1,18 +1,32 @@
-# Send the daily FCI estimate through Outlook.
+# Send the daily FCI estimate by SMTP.
 #
-#     powershell -File scripts\send_email.ps1 -Preview      # open it, do NOT send
+#     powershell -File scripts\send_email.ps1 -Preview      # write a .eml, do NOT send
 #     powershell -File scripts\send_email.ps1               # send
 #     powershell -File scripts\send_email.ps1 -Failed "update_exit=4 push_exit=0"
 #
-# Outlook COM rather than SMTP, deliberately: it uses the mail profile already
-# authenticated on this machine, so there is NO password stored in .env, no
-# SMTP AUTH exemption to request from IT (Microsoft 365 disables basic auth by
-# default), and no third-party mail service holding a key. The trade is that it
-# needs an interactive session -- fine here, because the machine sleeps rather
-# than shutting down and WakeToRun brings it back with the session intact.
+# WHY NOT OUTLOOK ANY MORE. This used Outlook COM so that no password had to be
+# stored anywhere -- it borrowed the mail profile already authenticated on the
+# machine. That reasoning was sound and is now moot: Ross runs the NEW Outlook
+# (olk.exe), and Microsoft removed the COM automation interface from it
+# entirely. There is no scripting hook to call. Classic OUTLOOK.EXE is still on
+# disk and the Outlook.Application CLSID is still registered, which is the trap:
+# COM happily resolves, tries to LAUNCH classic Outlook, and fails -- burning 60
+# seconds every morning before giving up with CO_E_SERVER_EXEC_FAILURE.
 #
-# Inert unless EMAIL_TO is set in .env. Never fatal: a mail failure must not
-# fail the pipeline, which has already done its real work by this point.
+# So: SMTP submission to Microsoft 365. Probed 2026-09-11 from this machine --
+# smtp.office365.com:587 reachable, STARTTLS to TLS 1.3, and after the upgrade
+# the server advertises "AUTH LOGIN XOAUTH2". jpsi.com is on Microsoft 365
+# (MX -> jpsi-com.mail.protection.outlook.com), so this is first-party.
+#
+# THE PASSWORD. SMTP_PASSWORD goes in .env, which is gitignored. Use an APP
+# PASSWORD, not the account password. If the tenant has SMTP AUTH disabled for
+# the mailbox -- Microsoft turns it off by default -- the send fails with
+# "5.7.139 ... SmtpClientAuthentication is disabled", and the fix is an admin
+# enabling it for this one mailbox, or moving to Graph. The error is reported
+# verbatim so that distinction is obvious rather than guessed at.
+#
+# Inert unless EMAIL_TO and the SMTP settings are present. Never fatal: a mail
+# failure must not fail the pipeline, which has already done its real work.
 param(
     [switch]$Preview,
     [string]$Failed = '',
@@ -61,76 +75,63 @@ if (-not (Test-Path $subjectFile) -or -not (Test-Path $bodyFile)) {
 $subject = (Get-Content $subjectFile -Raw -Encoding utf8).Trim()
 $body    = Get-Content $bodyFile -Raw -Encoding utf8
 
-# --- hand it to Outlook ------------------------------------------------------
-# Outlook has to be RUNNING. If it is not, COM tries to launch it and can fail
-# with 0x80080005 (CO_E_SERVER_EXEC_FAILURE) -- which is what happens from a
-# sandboxed or non-desktop process. Start it ourselves first, minimised, and
-# give it time to load the profile. On a normal morning Outlook is already open
-# and this costs nothing.
-# Returns nothing on purpose. The first version returned $true/$false and was
-# called as `$null = Ensure-Outlook`, which in PowerShell discards the whole
-# output stream -- so every diagnostic Write-Output inside it vanished too, and
-# the 2026-09-10 failure logged only the bare COM error with no clue whether
-# Outlook had been started. Status is not used by the caller anyway; the COM
-# call below either works or does not.
-function Ensure-Outlook {
-    if (Get-Process OUTLOOK -ErrorAction SilentlyContinue) {
-        Write-Output 'email: classic Outlook already running'
-        return
-    }
-    # The NEW Outlook for Windows (olk.exe, the Microsoft.OutlookForWindows
-    # store app) is a WebView2 wrapper around the web client and exposes NO COM
-    # automation at all -- no Outlook.Application, no MAPI. If that is the mail
-    # client in use, waiting 60s for classic to appear and then failing on COM
-    # wastes a minute of every run and logs a misleading error. Say so and stop.
-    if (Get-Process olk -ErrorAction SilentlyContinue) {
-        Write-Output ('email: the NEW Outlook (olk.exe) is running, which has no COM ' +
-                      'automation interface. Classic OUTLOOK.EXE is required for this ' +
-                      'transport, or switch to SMTP/Graph -- see README-schedule.md.')
-        return
-    }
-    Write-Output 'email: classic Outlook not running, starting it'
-    try {
-        Start-Process 'outlook.exe' -WindowStyle Minimized -ErrorAction Stop
-    } catch {
-        Write-Output ("email: could not start Outlook - {0}" -f $_.Exception.Message)
-        return
-    }
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Seconds 2
-        if (Get-Process OUTLOOK -ErrorAction SilentlyContinue) {
-            Write-Output ("email: Outlook started after {0}s, waiting for the profile" -f (($i + 1) * 2))
-            Start-Sleep -Seconds 5
-            return
-        }
-    }
-    Write-Output 'email: Outlook did not start within 60s'
-}
+# --- send it ----------------------------------------------------------------
+$smtpHost = Read-EnvValue 'SMTP_HOST'; if (-not $smtpHost) { $smtpHost = 'smtp.office365.com' }
+$smtpPort = Read-EnvValue 'SMTP_PORT'; if (-not $smtpPort) { $smtpPort = '587' }
+$smtpUser = Read-EnvValue 'SMTP_USER'
+$smtpPass = Read-EnvValue 'SMTP_PASSWORD'
+$from     = Read-EnvValue 'EMAIL_FROM'; if (-not $from) { $from = $smtpUser }
+# Preview runs before credentials exist, so fall back to the recipient purely
+# so the previewed headers are not misleadingly blank.
+if (-not $from) { $from = $to }
 
-Ensure-Outlook
-if ((Get-Process olk -ErrorAction SilentlyContinue) -and
-    -not (Get-Process OUTLOOK -ErrorAction SilentlyContinue)) {
-    Write-Output 'email: skipping the send - no COM-capable Outlook available'
+# Preview comes BEFORE the credential check on purpose: its whole job is to let
+# you inspect the message, which is most useful precisely when SMTP is not
+# working yet. Requiring credentials to preview would be backwards.
+if ($Preview) {
+    # No Outlook to open a draft in any more, so a preview writes the message to
+    # a .eml file instead. Double-click it to see exactly what would go out.
+    $eml = Join-Path $tmp 'preview.eml'
+    @("From: $from", "To: $to", $(if ($cc) { "Cc: $cc" }), "Subject: $subject",
+      'MIME-Version: 1.0', 'Content-Type: text/html; charset=utf-8', '', $body) |
+        Where-Object { $_ -ne $null } | Set-Content -Path $eml -Encoding utf8
+    Write-Output ("email: PREVIEW written to {0} - '{1}' to {2} (nothing sent)" -f $eml, $subject, $to)
     exit 0
 }
+
+if (-not $smtpUser -or -not $smtpPass) {
+    Write-Output ('email: SMTP not configured - add SMTP_USER and SMTP_PASSWORD ' +
+                  '(an APP PASSWORD, not your account password) to .env. Nothing sent.')
+    exit 0
+}
+
 try {
-    $outlook = New-Object -ComObject Outlook.Application
-    $mail = $outlook.CreateItem(0)            # 0 = olMailItem
-    $mail.Subject = $subject
-    $mail.To = $to
-    if ($cc) { $mail.CC = $cc }
-    $mail.HTMLBody = $body
-    if ($Preview) {
-        $mail.Display($false)                 # opens a window; sends nothing
-        Write-Output ("email: PREVIEW opened in Outlook - '{0}' to {1}" -f $subject, $to)
-    } else {
-        $mail.Send()
-        Write-Output ("email: sent '{0}' to {1}" -f $subject, $to)
-    }
+    # TLS 1.2 minimum: PS 5.1 still defaults to SSL3/TLS1.0 on this build and
+    # Microsoft 365 refuses those outright.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    $msg = New-Object Net.Mail.MailMessage
+    $msg.From = New-Object Net.Mail.MailAddress($from)
+    foreach ($a in ($to -split '[;,]')) { if ($a.Trim()) { $msg.To.Add($a.Trim()) } }
+    if ($cc) { foreach ($a in ($cc -split '[;,]')) { if ($a.Trim()) { $msg.CC.Add($a.Trim()) } } }
+    $msg.Subject = $subject
+    $msg.Body = $body
+    $msg.IsBodyHtml = $true
+
+    $client = New-Object Net.Mail.SmtpClient($smtpHost, [int]$smtpPort)
+    $client.EnableSsl = $true                  # STARTTLS on 587
+    $client.Credentials = New-Object Net.NetworkCredential($smtpUser, $smtpPass)
+    $client.Timeout = 30000
+    $client.Send($msg)
+    $msg.Dispose(); $client.Dispose()
+    Write-Output ("email: sent '{0}' to {1}" -f $subject, $to)
 } catch {
-    # Most likely causes, in order: no interactive session (a scheduled task
-    # running with nobody logged on), Outlook blocked by antivirus programmatic
-    # -access settings, or Outlook mid-upgrade. None are worth failing over.
-    Write-Output ("email: WARN send failed - {0}" -f $_.Exception.Message)
+    # Report the server's own text. "5.7.139 SmtpClientAuthentication is
+    # disabled" means the mailbox needs SMTP AUTH enabled and is NOT a bug here;
+    # "5.7.57"/"535" means the credential is wrong, most often the account
+    # password used where an app password is required.
+    $m = $_.Exception.Message
+    if ($_.Exception.InnerException) { $m += ' | ' + $_.Exception.InnerException.Message }
+    Write-Output ("email: WARN send failed - {0}" -f $m)
 }
 exit 0

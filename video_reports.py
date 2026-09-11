@@ -6,18 +6,31 @@ whole sale-barn roster combined), plus Cattle Country Video (Torrington,
 WY), CMS (Amarillo, TX), LiveAg (Fort Worth, TX), and Northern Livestock
 (Billings, MT) -- confirmed 2026-08-29 to use the identical AMS report
 template (same region headers, same weight-bracket table layout), so no
-parser changes were needed to add them, just their slugs below. The
-smaller per-city video add-ons listed on that same page (for cities
-already in the auction roster -- Carthage MO, West Plains MO, Bassett/
-Burwell/Crawford/Ericson/Valentine/Kearney NE, Apache/Beaver OK, Wildorado
-TX, a 2nd Billings MT company) were checked too and skipped: their MARS
-API rows are narrative-only stubs (all fields None, same limitation the
-Direct Cattle Reports had before PDF-parsing), and spot-checking their
-actual PDFs showed tiny, often non-feeder-steer volume (e.g. West Plains'
-report that week was a 90-head bred-heifer replacement sale in the
-Southeast region) -- not worth building out unless one of them turns out
-to matter later. Western Video Market and Overland/Producers (CA/FL) are
-outside the 12-state region, not relevant regardless.
+parser changes were needed to add them, just their slugs below.
+
+The smaller per-city video add-ons on that same page (for cities already in
+the auction roster -- Carthage MO, West Plains MO, Bassett/Burwell/Crawford/
+Ericson/Valentine/Kearney NE, Apache/Beaver OK, Wildorado TX, a 2nd Billings
+MT company) were originally checked and SKIPPED, on the grounds that their
+MARS API rows are narrative-only stubs and their PDFs showed tiny, often
+non-feeder-steer volume -- "not worth building out unless one of them turns
+out to matter later".
+
+One of them mattered. On 2026-09-02 Apache OK sold 25 head at $303.00 and
+880 lb. Twenty-five head is trivial volume, but this index is weighted by
+POUNDS, and that lot is both heavy and about $24 below the index, so omitting
+it biased the reconstruction roughly +0.05 high for every index date whose
+7-day window contained 09-02. CME includes it -- its own file carries
+"Apache Video (Sc)". Adding it moved 2026-09-03, 09-04 and 09-07 from
++0.06/+0.05/+0.06 against CME to +0.01/+0.00/+0.00.
+
+The original reasoning weighed volume and missed that a small lot at an
+extreme price still moves a pound-weighted average. All of these reports are
+now ingested; they share Superior's template exactly, so again only slugs
+were needed -- plus the staleness guard below, which they do require.
+
+Western Video Market and Overland/Producers (CA/FL) are outside the 12-state
+region, not relevant regardless.
 
 Same position-based parsing technique as direct_reports.py (no visible
 table structure -- clusters pdfplumber word coordinates into rows/columns),
@@ -69,7 +82,45 @@ VIDEO_REPORT_SLUGS = {
     # under class/frame/grade section headers, not fixed 50lb brackets, and
     # a delivery label that's often omitted on a row (continuation of the
     # last one seen). Needs its own parser -- see parse_western_video_pdf().
+
+    # --- per-city video add-ons, all inside the CME 12-state region ------
+    # Verified 2026-09-09: every one parses with parse_video_pdf() unchanged,
+    # carrying the same North Central / South Central region headers and
+    # fixed weight brackets as Superior.
+    "APACHE": 3102,          # Apache Livestock Video/Internet - Apache, OK (Wed)
+    "BEAVER": 3879,          # Beaver Livestock - Beaver, OK (Monthly)
+    "JOPLIN": 2934,          # Joplin Regional Stockyards - Carthage, MO (Monthly)
+    "OZARKS": 3416,          # Ozarks Regional Stockyards - West Plains, MO (Weekly)
+    "BILLINGS_LC": 3631,     # Billings Livestock Commission - Billings, MT (Seasonal)
+    "BASSETT": 3417,         # Bassett Livestock - Bassett, NE (Seasonal - Wed)
+    "BURWELL": 2937,         # Burwell Livestock Market - Burwell, NE (Seasonal)
+    "CRAWFORD": 3412,        # Crawford Livestock Market - Crawford, NE (Seasonal)
+    "ERICSON": 3459,         # Ericson Livestock Market - Ericson, NE (Seasonal - Sat)
+    "HUSS_LEXINGTON": 2938,  # Huss and Lexington Livestock - Kearney, NE (Monthly)
+    "VALENTINE": 3418,       # Valentine Livestock - Valentine, NE (Seasonal - Thu)
+    "LONESTAR": 3620,        # Lonestar Stockyards - Wildorado, TX (Tue)
+    # Deliberately NOT included:
+    #   ams_3103 Superior Livestock Video (Website Catalog) -- dormant, its
+    #     live edition is still 2023-08-17. CME dropped it too: its own
+    #     "Superior Vid Website" location stops in late 2023.
+    #   ams_3882 Superior Livestock HOLSTEIN -- dairy, which CME excludes
+    #     ("predominantly dairy, exotic or Brahma breeding").
+    #   Everything on the AMS page outside the 12 states (AL, AR, GA, KY, TN,
+    #     NC, SC, NY, FL, CA, UT, WA, VA) -- ineligible by region.
 }
+
+# AMS leaves the last edition of a SEASONAL report posted indefinitely, so a
+# fetch always succeeds and always returns something. A successful fetch is
+# therefore NOT evidence of a recent sale. Measured 2026-09-09, the live
+# edition of Billings Livestock Commission was still 2022-03-31 (450 head at
+# $153.00) and Lonestar/Wildorado was 2024-02-13 (180 head at $239.50).
+#
+# Ingesting those is not merely useless, it is harmful: Lonestar's date falls
+# inside the reconstruction's range and would corrupt real index dates, and a
+# pre-2024 one would extend the series backwards on the strength of a single
+# video sale, since recompute_fci_daily() runs from the earliest date present
+# in mars_sales. Only the CURRENT edition of a report is of interest.
+VIDEO_MAX_AGE_DAYS = 30
 
 REPORT_PDF_URL = "https://www.ams.usda.gov/mnreports/ams_{slug}.pdf"
 
@@ -90,6 +141,20 @@ SECTION_RE = re.compile(
 DATE_RANGE_RE = re.compile(
     r"Weighted Average Report for (\d{1,2}/\d{1,2}/\d{4})(?:\s*-\s*(\d{1,2}/\d{1,2}/\d{4}))?"
 )
+# The AMS header carries the date the report was PUBLISHED, which for a video
+# sale can lag the sale itself (e.g. the 9/3/2026 Labor Day sale was published
+# 9/4/2026). CME does not fold a video sale into an index date that precedes
+# its publication -- confirmed against CME's own FTP constituent lists, which
+# carry Superior on 8/21/2026 (published same day) but omit it from the
+# 9/3/2026 index (published 9/4). update_index.py gates on this.
+PUBLISHED_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October"
+    r"|November|December)\s+(\d{1,2})\s*,\s*(\d{4})\b"
+)
+_MONTHS = {m: i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"], start=1)}
+
 TARGET_GRADES = {"1", "1-2"}
 TARGET_BRACKETS = {700, 750, 800, 850}
 
@@ -127,6 +192,28 @@ def _parse_report_date(text):
     end = m.group(2) or m.group(1)
     mm, dd, yyyy = end.split("/")
     return date(int(yyyy), int(mm), int(dd))
+
+
+def _parse_published_date(text):
+    """
+    AMS stamps the publication date in the first few lines of page 1, above
+    the FEEDER CATTLE table. Restricted to the head of the page so a date
+    inside the narrative (e.g. "up to and including September 17, 2026")
+    can't be mistaken for it.
+    """
+    m = PUBLISHED_RE.search(text[:500])
+    if not m:
+        return None
+    month, day, year = m.group(1), int(m.group(2)), int(m.group(3))
+    return date(year, _MONTHS[month], day)
+
+
+def extract_published_date(pdf_bytes):
+    """Publication date off page 1's header, or None if absent/unparseable."""
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        if not pdf.pages:
+            return None
+        return _parse_published_date(pdf.pages[0].extract_text() or "")
 
 
 def fetch_video_pdf(name, timeout=60):
@@ -354,18 +441,27 @@ _PARSERS = {"WESTERN_VIDEO": parse_western_video_pdf}
 
 
 def fetch_all_video_rows(verbose=True):
-    """Returns {name: (report_date, rows)} for every configured video report."""
+    """
+    Returns {name: (report_date, published_date, rows)} for every configured
+    video report. published_date is the AMS header date (may be None if the
+    header can't be parsed -- update_index.py then treats the row as
+    available on its sale date, the pre-gating behaviour).
+    """
     out = {}
     for name in VIDEO_REPORT_SLUGS:
         parser = _PARSERS.get(name, parse_video_pdf)
         try:
             pdf_bytes = fetch_video_pdf(name)
             report_date, rows = parser(pdf_bytes)
+            published_date = extract_published_date(pdf_bytes)
         except Exception as e:
             if verbose:
                 print(f"  [skip] {name} video report: {e}")
             continue
-        out[name] = (report_date, rows)
+        out[name] = (report_date, published_date, rows)
         if verbose:
-            print(f"  {name} VIDEO  {report_date}  +{len(rows)} qualifying rows")
+            lag = ""
+            if report_date and published_date and published_date != report_date:
+                lag = f" (published {published_date}, +{(published_date - report_date).days}d)"
+            print(f"  {name} VIDEO  {report_date}{lag}  +{len(rows)} qualifying rows")
     return out

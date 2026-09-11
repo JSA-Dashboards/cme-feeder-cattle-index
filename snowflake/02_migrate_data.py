@@ -9,6 +9,7 @@ Snowflake cutover is fully confirmed.
 """
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -19,26 +20,67 @@ load_dotenv()
 HERE = Path(__file__).parent.parent
 DB_PATH = HERE / "data" / "mars_history.db"
 
-TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily", "cme_ftp_locations"]
+# CRITICAL is the feeder cattle index itself: if any of these fails to land,
+# the dashboard is serving stale numbers and somebody needs to know tonight.
+CRITICAL_TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily",
+                   "cme_ftp_locations", "cme_ftp_brackets", "peer_estimates",
+                   "fci_snapshots"]
+
+# OPTIONAL feeds the supply-side dashboards. A failure here means one tab is
+# stale; it must NOT be reported as an index failure. Before this split, any
+# border-table problem aborted the whole push with a non-zero exit, which
+# daily_update.ps1 read as push_exit != 0 -- logging "DASHBOARD IS STALE" and
+# emailing a failure about an index that was already safely committed, since
+# the critical tables are pushed first and each table commits on its own.
+OPTIONAL_TABLES = ["replacement_sales", "border_reports",
+                   "census_cattle_imports", "border_receipts",
+                   "border_volumes", "border_prices",
+                   "calf_sales", "corn_bids"]
+
+TABLES = CRITICAL_TABLES + OPTIONAL_TABLES
 
 
-def main():
-    import snowflake.connector as sc
+def main(only=None, group=None):
+    """
+    Push SQLite -> Snowflake. `only` restricts the push to a subset of tables,
+    which is what the 10:15 CME-print pull uses: it changes two tables and has
+    no business spending a minute re-uploading 73k replacement sales and 72k
+    bracket rows to land them.
+
+    `group` is "critical" or "optional" and exists so the daily job can publish
+    the index BEFORE spending eight minutes ingesting auction and corn data it
+    does not need. The split lives here rather than in daily_update.ps1 on
+    purpose: a table added to OPTIONAL_TABLES above must not require a matching
+    edit to a PowerShell array that nobody would remember to make, and the
+    failure mode of forgetting -- a table that is never pushed at all -- is
+    silent.
+    """
     from snowflake.connector.pandas_tools import write_pandas
 
-    sf_conn = sc.connect(
-        account=os.environ["SNOWFLAKE_ACCOUNT"],
-        user=os.environ["SNOWFLAKE_USER"],
-        password=os.environ["SNOWFLAKE_PASSWORD"],
-        role=os.environ.get("SNOWFLAKE_ROLE"),
-        warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE"),
-        database=os.environ.get("SNOWFLAKE_DATABASE", "JSA"),
-        schema=os.environ.get("SNOWFLAKE_SCHEMA", "CME_FEEDER_CATTLE"),
-        login_timeout=30,
-    )
-    sqlite_conn = sqlite3.connect(DB_PATH)
+    # Auth goes through snowflake_db.get_conn() so there is exactly one
+    # credential path in the codebase (key-pair, with a password fallback).
+    # USE_SNOWFLAKE is forced on here: this script's whole job is the upload,
+    # regardless of which backend the app itself is pointed at.
+    sys.path.insert(0, str(HERE))
+    os.environ["USE_SNOWFLAKE"] = "1"
+    import snowflake_db as db
 
-    for table in TABLES:
+    sf_conn = db.get_conn()
+    sqlite_conn = sqlite3.connect(DB_PATH)
+    failed_optional = []
+
+    tables = TABLES
+    if group:
+        tables = {"critical": CRITICAL_TABLES, "optional": OPTIONAL_TABLES}[group]
+        print(f"pushing the {group} tables: {', '.join(tables)}")
+    if only:
+        unknown = [t for t in only if t not in TABLES]
+        if unknown:
+            raise SystemExit(f"unknown table(s): {', '.join(unknown)}")
+        tables = [t for t in tables if t in only]   # keep the critical-first order
+        print(f"pushing {len(tables)} of {len(TABLES)} tables: {', '.join(tables)}")
+
+    for table in tables:
         df = pd.read_sql(f"SELECT * FROM {table}", sqlite_conn)
         sqlite_count = len(df)
         # Snowflake column names are case-insensitive when unquoted, but
@@ -47,8 +89,42 @@ def main():
         df.columns = [c.upper() for c in df.columns]
 
         cur = sf_conn.cursor()
-        cur.execute(f"TRUNCATE TABLE {table}")
-        success, nchunks, nrows, _ = write_pandas(sf_conn, df, table.upper())
+
+        # Only upload columns the target table actually has. update_index.py can
+        # add a column to SQLite (init_db migrates it) while the Snowflake table
+        # still lacks it, because ALTER there needs MODIFY, which SYSADMIN was
+        # not granted. Without this, write_pandas fails on the whole table for
+        # one absent column -- and none of the extras are read by app.py, so
+        # dropping them costs the dashboard nothing.
+        target_cols = {r[0].upper() for r in cur.execute(f"DESC TABLE {table}")}
+        extra = [c for c in df.columns if c not in target_cols]
+        if extra:
+            print(f"{table}: skipping column(s) absent in Snowflake: {', '.join(extra)}")
+            df = df[[c for c in df.columns if c in target_cols]]
+
+        # DELETE, not TRUNCATE: Snowflake gates TRUNCATE behind its own
+        # privilege, which SYSADMIN was not granted on these tables (it has
+        # SELECT/INSERT/UPDATE/DELETE only, and ACCOUNTADMIN owns them).
+        # DELETE is also transactional, which TRUNCATE-then-load was not --
+        # wrapping the swap means a failed upload can no longer leave the
+        # dashboard reading an empty table.
+        cur.execute("BEGIN")
+        try:
+            cur.execute(f"DELETE FROM {table}")
+            success, nchunks, nrows, _ = write_pandas(sf_conn, df, table.upper())
+            if not success:
+                raise RuntimeError(f"write_pandas reported failure for {table}")
+            cur.execute("COMMIT")
+        except Exception as e:
+            cur.execute("ROLLBACK")
+            print(f"{table}: FAILED - rolled back, table left as it was")
+            if table in CRITICAL_TABLES:
+                raise
+            # Optional table: report it and keep going. Each table commits
+            # independently, so the ones already pushed are safe.
+            print(f"{table}: NON-CRITICAL - continuing. {type(e).__name__}: {e}")
+            failed_optional.append(table)
+            continue
         cur.execute(f"SELECT COUNT(*) FROM {table}")
         sf_count = cur.fetchone()[0]
 
@@ -58,6 +134,27 @@ def main():
     sf_conn.close()
     sqlite_conn.close()
 
+    if failed_optional:
+        # Visible in the log, but exit 0: the index published fine, and calling
+        # this a failure would train someone to ignore a real one.
+        print("")
+        print(f"WARNING: {len(failed_optional)} non-critical table(s) failed "
+              f"and were skipped: {', '.join(failed_optional)}. The feeder "
+              f"cattle index published normally; the affected dashboard tab(s) "
+              f"will be stale.")
+
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tables", default=None,
+                    help="comma-separated subset to push (default: all)")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--critical-only", action="store_true",
+                   help="push only the index tables, so it publishes first")
+    g.add_argument("--optional-only", action="store_true",
+                   help="push only the dashboard tables")
+    a = ap.parse_args()
+    main(only=[t.strip() for t in a.tables.split(",")] if a.tables else None,
+         group=("critical" if a.critical_only else
+                "optional" if a.optional_only else None))

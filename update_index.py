@@ -49,7 +49,10 @@ load_dotenv()
 
 import snowflake_db as db
 from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
-from video_reports import VIDEO_REPORT_SLUGS, fetch_all_video_rows
+from bucketing import check_bucket_drift, shifted_bucket_date
+from snapshots import capture_snapshots
+from video_reports import (VIDEO_MAX_AGE_DAYS, VIDEO_REPORT_SLUGS,
+                           fetch_all_video_rows)
 
 HERE = Path(__file__).parent
 DATA_DIR = HERE / "data"
@@ -57,6 +60,25 @@ ROSTER_PATH = DATA_DIR / "mars_roster.json"
 DB_PATH = DATA_DIR / "mars_history.db"
 
 MARS_BASE = "https://marsapi.ams.usda.gov/services/v1.2"
+
+# How far back of already-stored dates each run re-asks USDA for. Every run
+# re-fetches this window in full and upserts, so a report that USDA publishes
+# LATE is only ever picked up if it lands inside it -- past that, no run asks
+# for that date again and the sale is invisible for good.
+#
+# Measured 2026-09-09 over 80 auctions and 246 reports: 98.3% of qualifying head
+# is published within 2 days of the sale and 99.9% within 3, but the tail is
+# real -- Roswell published 8 days late and Mid Missouri Stockyards 12 (72 head
+# between them, 0.13%). 7 days missed both. 14 covers everything observed with
+# room to spare.
+#
+# Free to widen, which is why it is 14 and not 8: the window is a QUERY
+# PARAMETER on one call per auction slug, so a wider one costs no extra
+# requests, and the two expensive stages -- fetch_all_direct_rows() and
+# fetch_all_video_rows(), which run pdfplumber over ~20 PDFs and dominate the
+# ~20 minute runtime -- take no date range at all and are completely unaffected.
+# The only cost is parsing more JSON rows per slug.
+REFETCH_LOOKBACK_DAYS = 14
 TARGET_GRADES = {"1", "1-2"}
 TARGET_BRACKETS = {700, 750, 800, 850}
 CONTINUATION_START = date(2026, 1, 24)  # day after the workbook's last date
@@ -125,6 +147,11 @@ def init_db(conn):
             head_count INTEGER NOT NULL,
             avg_weight REAL NOT NULL,
             avg_price REAL NOT NULL,
+            -- Date the source report was PUBLISHED, when that can lag the sale
+            -- (video/internet auctions). NULL for auction and direct rows,
+            -- which publish on their own report date. See the gate in
+            -- recompute_fci_daily().
+            published_date TEXT,
             PRIMARY KEY (report_date, slug_id, weight_low, muscle_grade, avg_price, head_count)
         )
     """)
@@ -133,6 +160,46 @@ def init_db(conn):
     if "raw_date" not in cols:
         conn.execute("ALTER TABLE mars_sales ADD COLUMN raw_date TEXT")
         conn.execute("UPDATE mars_sales SET raw_date = report_date WHERE raw_date IS NULL")
+    # Migration for DBs created before published_date existed. Left NULL --
+    # backfilling it would mean re-fetching PDFs AMS has already overwritten,
+    # and NULL is the correct "available on its sale date" default for every
+    # auction and direct row anyway.
+    if "published_date" not in cols:
+        conn.execute("ALTER TABLE mars_sales ADD COLUMN published_date TEXT")
+    # Competitors' published FCI estimates, hand-entered from their daily
+    # sheets (see add_peer_estimate.py). Kept in its own table rather than
+    # alongside ours because these are third-party numbers with no head count,
+    # weight or constituent detail behind them -- only a single figure per day.
+    #
+    # index_date is CME's index date, i.e. what their sheet is estimating, not
+    # the date the sheet was issued. CIH heads its sheet with the index date;
+    # Compass heads its with the issue date and names the index date in the
+    # body ("Tuesday, September 8, 2026"), so read Compass carefully.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS peer_estimates (
+            index_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            fci_value REAL NOT NULL,
+            note TEXT,
+            PRIMARY KEY (index_date, source)
+        )
+    """)
+    # Our estimate as it stood at each run, frozen. fci_daily keeps only the
+    # LATEST value per date, so without this our number quietly improves as
+    # late auctions land while competitors' stay fixed at what they printed --
+    # see snapshots.py for the measured size of that (worth +0.33 on 09/08).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fci_snapshots (
+            index_date TEXT NOT NULL,
+            run_date TEXT NOT NULL,
+            run_slot TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            fci_value REAL NOT NULL,
+            total_head INTEGER,
+            n_locations INTEGER,
+            PRIMARY KEY (index_date, run_date, run_slot)
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fci_daily (
             report_date TEXT PRIMARY KEY,
@@ -201,7 +268,8 @@ def recompute_fci_daily(conn):
     given table size). Returns (n_written, first_date, last_date | None).
     """
     all_rows = conn.cursor().execute(
-        "SELECT report_date, raw_date, head_count, avg_weight, avg_price FROM mars_sales ORDER BY report_date"
+        "SELECT report_date, raw_date, head_count, avg_weight, avg_price, published_date, "
+        "location FROM mars_sales ORDER BY report_date"
     ).fetchall()
     all_rows = [db.iso_row(r) for r in all_rows]
 
@@ -221,8 +289,35 @@ def recompute_fci_daily(conn):
     # cme_ftp_locations) -- CME's own files likewise keep a weekend row's
     # true date visible per-location while still folding its total into the
     # following business day's combined figure.
+    #
+    # A publication-date GATE was tried here on 2026-09-08 and REVERTED on
+    # 2026-09-09. Do not reintroduce it without reading this.
+    #
+    # The idea: a video sale is reported under its final sale day, but AMS may
+    # not publish it until the next business day, so it should arguably not
+    # count toward an index date preceding its publication. It appeared to be
+    # confirmed -- it fitted CME's then-current 9/3/2026 print of 328.80 to
+    # within 0.06, where the ungated figure was 0.79 out.
+    #
+    # That print was PRELIMINARY. CME later revised 9/3 to 329.53 on 13,485
+    # head -- up by exactly 1,376 head, which is precisely the Superior Labor
+    # Day video volume (116 North Central + 1,260 South Central). So CME does
+    # attribute a video sale to its SALE date. Its first print for a date
+    # simply omits reports that have not landed yet, and a revision adds them.
+    # Measured against the REVISED value, ungated is +0.06 and gated is -0.67.
+    #
+    # The lesson generalises: this reconstruction should be expected to track
+    # CME's FINAL value for a date, and to differ from CME's FIRST print by
+    # whatever had not yet been reported when CME computed it. Validating
+    # against a fresh CME print therefore risks fitting a provisional number.
+    #
+    # published_date is still recorded on mars_sales (see run_update) -- the
+    # lag is genuinely useful, since it explains why a first print and a final
+    # print differ -- but it must NOT filter the window.
     by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
-    for report_date, raw_date, head, wt, price in all_rows:
+    for report_date, raw_date, head, wt, price, published_date, location in all_rows:
+        # Bucket the way CME buckets -- see LOCATION_BUCKET_SHIFT_DAYS.
+        report_date = shifted_bucket_date(location, report_date)
         w = head * wt
         by_day.setdefault(report_date, []).append((w, w * price, head))
 
@@ -244,6 +339,7 @@ def recompute_fci_daily(conn):
         den = num = 0.0
         n_locs = 0
         total_head = 0
+        d_iso = d.isoformat()
         for wd in window_days:
             for w, dollars, head in by_day.get(wd, []):
                 den += w
@@ -257,7 +353,7 @@ def recompute_fci_daily(conn):
         # (weekends etc.), same as the report showing no standalone row then.
         sd_den = sd_num = 0.0
         sd_head = 0
-        for w, dollars, head in by_day.get(d.isoformat(), []):
+        for w, dollars, head in by_day.get(d_iso, []):
             sd_den += w
             sd_num += dollars
             sd_head += head
@@ -357,24 +453,63 @@ def run_update(since: date, verbose=True):
         print("\nVideo auction reports (this week only):")
     video_results = fetch_all_video_rows(verbose=verbose)
     video_inserted = 0
-    for name, (report_date_, rows) in video_results.items():
+    video_stale = 0
+    for name, (report_date_, published_date_, rows) in video_results.items():
         if report_date_ is None:
             continue
+        # AMS keeps the last edition of a seasonal report posted forever, so
+        # a successful fetch is NOT evidence of a recent sale. See
+        # VIDEO_MAX_AGE_DAYS in video_reports.py for what this prevents.
+        age_days = (date.today() - report_date_).days
+        if age_days > VIDEO_MAX_AGE_DAYS:
+            video_stale += 1
+            if verbose:
+                print(f"  [stale] {name} VIDEO {report_date_} is {age_days}d "
+                      f"old -- skipped (AMS still serves the last edition)")
+            continue
         iso_date = shift_weekend_to_monday(report_date_).isoformat()
+        # Gate the index on the LATER of the two: a sale shifted off a weekend
+        # can't become available before its report was actually published.
+        pub_iso = (
+            max(published_date_.isoformat(), iso_date) if published_date_ else None
+        )
         slug_id = VIDEO_REPORT_SLUGS[name]
         cols = ["report_date", "raw_date", "slug_id", "location", "state",
-                "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
+                "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price",
+                "published_date"]
         key_cols = ["report_date", "slug_id", "weight_low", "muscle_grade", "avg_price", "head_count"]
         for r in rows:
             values = (iso_date, report_date_.isoformat(), slug_id, f"{name} VIDEO ({r['region']})", r["region"],
                       r["weight_break_low"], r["muscle_grade"],
-                      r["head_count"], r["avg_weight"], r["avg_price"])
+                      r["head_count"], r["avg_weight"], r["avg_price"], pub_iso)
             db.merge_ignore(conn, "mars_sales", cols, values, key_cols)
+        # merge_ignore leaves an existing row untouched, so video rows stored
+        # before published_date existed keep a NULL and would slip past the
+        # gate in recompute_fci_daily(). Stamp them from this run's header.
+        if pub_iso:
+            ph = db.placeholders(1)
+            conn.cursor().execute(
+                f"UPDATE mars_sales SET published_date={ph} "
+                f"WHERE report_date={ph} AND slug_id={ph} AND published_date IS NULL",
+                (pub_iso, iso_date, slug_id),
+            )
         video_inserted += len(rows)
     total_inserted += video_inserted
     conn.commit()
 
+    # Verify the per-location bucketing corrections still describe CME's own
+    # files. These are observed patterns rather than published rules, so they
+    # can rot silently; this makes that loud instead. Warnings only -- a
+    # drifted assumption should not abort the day's refresh.
+    for _w in check_bucket_drift(conn):
+        print(f"  [!] {_w}")
+
     n_written, first_date, last_date = recompute_fci_daily(conn)
+
+    # Freeze this run's estimates before anything can revise them. Must come
+    # after the recompute and before the process exits, or the morning call is
+    # lost for good -- fci_daily is overwritten wholesale by the next run.
+    n_frozen = capture_snapshots(conn)
 
     if verbose:
         print(f"\nInserted/kept {total_inserted} sale rows: {total_inserted - direct_inserted - video_inserted} "
@@ -382,6 +517,8 @@ def run_update(since: date, verbose=True):
               f"{len(direct_results)} states, {video_inserted} video-auction rows across {len(video_results)} reports.")
         print(f"Recomputed FCI (7-day rolling window) for {n_written} dates "
               f"({first_date or '—'} to {last_date or '—'}).")
+        print(f"Froze {n_frozen} new estimate snapshot(s) for this run's slot "
+              f"(0 is normal for a repeat run in the same slot).")
         recent = conn.cursor().execute(
             "SELECT report_date, fci_value, n_locations FROM fci_daily ORDER BY report_date DESC LIMIT 8"
         ).fetchall()
@@ -404,7 +541,8 @@ if __name__ == "__main__":
         conn = db.get_conn()
         row = conn.cursor().execute("SELECT MAX(report_date) FROM fci_daily").fetchone()
         conn.close()
-        since = date.fromisoformat(db.iso(row[0])) - timedelta(days=7) if row and row[0] else CONTINUATION_START
+        since = (date.fromisoformat(db.iso(row[0])) - timedelta(days=REFETCH_LOOKBACK_DAYS)
+                 if row and row[0] else CONTINUATION_START)
     else:
         since = CONTINUATION_START
 

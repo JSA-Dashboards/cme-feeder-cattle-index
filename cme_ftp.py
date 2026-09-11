@@ -45,6 +45,7 @@ Format notes (reverse-engineered, not documented by CME):
     zero-head row, not a parse error.
 """
 import ftplib
+import time
 import io
 import re
 import zlib
@@ -54,6 +55,18 @@ import snowflake_db as db
 
 FTP_HOST = "ftp.cmegroup.com"
 FTP_BASE = "cash_settled_commodity_index_prices/daily_data/feeder_cattle"
+
+# The eight weight/grade brackets a data row carries, in file column order.
+# Header rows 3-4 of any file spell it out: four "#1 Steers" columns at
+# 700-749 / 750-799 / 800-849 / 850-899, then the same four for "#1-2 Steers".
+# Each bracket is three numbers (head, weight, price), so 24 tokens, followed
+# by five summary tokens (total head, total weight, wtd avg weight, total
+# price, wtd avg price) for 29 in all -- which is exactly the count the
+# existing parser tests for and then discards the first 24 of.
+BRACKETS = [
+    ("1", 700), ("1", 750), ("1", 800), ("1", 850),
+    ("1-2", 700), ("1-2", 750), ("1-2", 800), ("1-2", 850),
+]
 
 _DATE_ROW_RE = re.compile(r"^\s*\d{1,2}/\d{1,2}/\d{2}\s")
 _STATE_RE = re.compile(r"([A-Z]{1,2})\s+(-?\d)")
@@ -73,10 +86,33 @@ def file_path_for(d: date) -> str:
     return f"{FTP_BASE}/{fname}"
 
 
-def fetch_daily_file(d: date, timeout=20) -> str | None:
+class FetchFailed(RuntimeError):
     """
-    Returns the raw file text, or None if that date has no file (weekend/
-    holiday/not yet published/before the archive's coverage starts).
+    The file could not be retrieved for a reason that is NOT "it does not
+    exist" -- a transient block, a timeout, a reset. Distinct from None,
+    which means the server told us the path is genuinely absent.
+    """
+
+
+# Substrings that mark an ftplib.error_perm as "the path is not there"
+# rather than "something else went wrong".
+_MISSING_MARKERS = ("550", "no such file", "failed to open", "not found",
+                    "cannot find")
+
+
+def fetch_daily_file(d: date, timeout=20, attempts=3) -> str | None:
+    """
+    Returns the raw file text, or None if that date GENUINELY has no file
+    (weekend/holiday/not yet published/before the archive's coverage starts).
+    Raises FetchFailed for any other failure.
+
+    This distinction used to be absent: every ftplib error was swallowed
+    into None, so a transient block read exactly like an absent file, and
+    backfill_ftp.py reported both as "no file (weekend/holiday/unpublished)".
+    On 2026-09-09 that made the pipeline report CME as not having published
+    2026-09-07 when FC260907.txt had been on the server since 09-08 14:05.
+    Reporting a fetch failure as a non-publication is the worst possible
+    way to be wrong here, because it looks like news about CME.
 
     Uses ftplib directly with a fresh connection per call rather than
     urllib's ftp:// support -- urllib caches FTP control connections keyed
@@ -86,20 +122,32 @@ def fetch_daily_file(d: date, timeout=20) -> str | None:
     process silently fails by reusing the same broken connection. A fresh
     ftplib connection per call sidesteps that entirely.
     """
-    try:
-        ftp = ftplib.FTP(FTP_HOST, timeout=timeout)
+    last_err = None
+    for attempt in range(1, attempts + 1):
         try:
-            ftp.login()
-            buf = io.BytesIO()
-            ftp.retrbinary(f"RETR {file_path_for(d)}", buf.write)
-            content = buf.getvalue()
-        finally:
-            ftp.close()
-        if not content:
-            return None
-        return content.decode("utf-8", errors="replace")
-    except (*ftplib.all_errors, OSError):
-        return None
+            ftp = ftplib.FTP(FTP_HOST, timeout=timeout)
+            try:
+                ftp.login()
+                buf = io.BytesIO()
+                ftp.retrbinary(f"RETR {file_path_for(d)}", buf.write)
+                content = buf.getvalue()
+            finally:
+                ftp.close()
+            if not content:
+                return None
+            return content.decode("utf-8", errors="replace")
+        except ftplib.error_perm as e:
+            # A permanent refusal. If it names a missing path, the date
+            # simply has no file; anything else is a real problem.
+            if any(mark in str(e).lower() for mark in _MISSING_MARKERS):
+                return None
+            last_err = e
+        except (*ftplib.all_errors, OSError) as e:
+            last_err = e
+        if attempt < attempts:
+            time.sleep(1.5 * attempt)
+    raise FetchFailed(
+        "%s: %s: %s" % (file_path_for(d), type(last_err).__name__, last_err))
 
 
 def _tokenize(blob: str) -> list[str]:
@@ -113,6 +161,69 @@ def _mdy_to_iso(mdy: str, fallback_year: int) -> str:
     if y < 100:
         y += 2000
     return date(y, m, d).isoformat()
+
+
+def _parse_reported(text: str) -> tuple:
+    """
+    REPORTED INDEX / REPORTED CHANGE. Neither needs column arithmetic, so
+    this works on any file including one with no sales at all.
+
+    The change label is sometimes truncated to "REPORTED CHANG" -- observed
+    in FC260907.txt -- so the trailing E is optional. Requiring the full
+    spelling silently returned None for the change on those files.
+    """
+    idx = chg = None
+    for ln in text.splitlines():
+        m = re.search(r"REPORTED INDEX\s+(-?[\d.]+)", ln)
+        if m:
+            idx = float(m.group(1))
+        m = re.search(r"REPORTED CHANGE?\s+(-?[\d.]+)", ln)
+        if m:
+            chg = float(m.group(1))
+    return idx, chg
+
+
+def _parse_totals_only(text: str, file_date: date) -> dict:
+    """
+    Parse a file that has NO location rows -- a day on which no qualifying
+    sale was reported anywhere, so every location line is blank.
+
+    parse_daily_file() derives its fixed-width layout from the first data
+    row's state code, and such a file has none, so it cannot proceed. This
+    is the one case that defeats the width derivation, and also the case
+    that needs it least: the seven-day totals and the REPORTED INDEX are
+    the only numbers present and neither depends on column positions.
+
+    Observed on FC260907.txt (Labor Day 2026): zero daily head, seven-day
+    totals of 10,786 head, REPORTED INDEX 326.98. Before this the file
+    parsed to None and was recorded as "no file", i.e. as CME not having
+    published at all.
+
+    Slashes are the row's filler; replacing them with spaces lets the
+    trailing five figures tokenise without any width assumption.
+    """
+    daily = seven_day = None
+    for ln in text.splitlines():
+        if "TOTALS" not in ln:
+            continue
+        toks = _tokenize(ln.replace("/", " "))
+        if len(toks) < 5:
+            continue
+        head, _w_lbs, avg_w, _dollars, avg_p = (float(t) for t in toks[-5:])
+        agg = {"head": int(head), "avg_weight": avg_w, "avg_price": avg_p}
+        if "SEVEN-DAY" in ln:
+            seven_day = agg
+        elif "DAILY" in ln:
+            daily = agg
+    idx, chg = _parse_reported(text)
+    return {
+        "date": file_date.isoformat(),
+        "reported_index": idx,
+        "reported_change": chg,
+        "daily": daily,
+        "seven_day": seven_day,
+        "locations": [],
+    }
 
 
 def parse_daily_file(text: str, file_date: date) -> dict | None:
@@ -141,28 +252,64 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             prefix_len = m.end(1)
             break
     if prefix_len is None:
-        return None
+        # No state code anywhere: a day with no qualifying sales at all.
+        return _parse_totals_only(text, file_date)
 
     locations = []
     daily = seven_day = None
     for ln in data_lines:
         prefix, blob = ln[:prefix_len], ln[prefix_len:]
         toks = _tokenize(blob)
-        is_totals = "TOTALS" in prefix
+        # CME files carry TWO totals blocks, and the distinction matters.
+        #
+        # The official one sits in the main table in UPPERCASE -- "DAILY TOTALS"
+        # and "SEVEN-DAY TOTALS" -- and shares the table's column layout.
+        #
+        # Some files (observed in December 2018) add a second block near the
+        # foot under a "*Comments Included" header, in lowercase, with a
+        # DIFFERENT layout: head, weight, wtd-avg weight, total price, avg
+        # price. On 2018-12-28 that row reads "7-day totals 392 299672 764
+        # 43507001.50 145.18" -- head is 392 and 299,672 is total POUNDS.
+        #
+        # Read with the main table's offsets it yielded a location called
+        # "7-Day Totals   392" carrying 299,672 head at -$2.62. Two such rows
+        # (12-28 and 12-31) put ~599,000 phantom head in the archive and were
+        # the entire reason 2018 looked a 43% heavier year than its neighbours.
+        #
+        # So: ANY case of "totals" disqualifies a row from being a location,
+        # but only UPPERCASE supplies the official aggregates. Matching
+        # case-insensitively for the aggregates would let the lowercase block
+        # overwrite the real seven-day total with its mis-columned 299,672.
+        upper_prefix = prefix.upper()
+        is_totals = "TOTALS" in upper_prefix
+        is_official_totals = "TOTALS" in prefix
+        brackets = []
         if len(toks) == 5:
             head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks)
         elif len(toks) == 29:
             head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks[24:29])
+            # The first 24 tokens are the eight brackets this row is built
+            # from. The row-level average weight hides the mix: 804 lb can be
+            # everything sitting at 800-849, or a barbell of 700-749 and
+            # 850-899. Keeping the brackets is what makes the weight-shift
+            # question answerable rather than a matter of inference.
+            for i, (grade, wlow) in enumerate(BRACKETS):
+                b_head, b_wt, b_price = (float(t) for t in toks[i * 3:i * 3 + 3])
+                if b_head > 0:
+                    brackets.append({"grade": grade, "weight_low": wlow,
+                                     "head": int(b_head), "avg_weight": b_wt,
+                                     "avg_price": b_price})
         else:
             continue  # unparseable row -- skip rather than guess
 
         if is_totals:
-            agg = {"head": int(head), "avg_weight": avg_w, "avg_price": avg_p}
-            if "SEVEN-DAY" in prefix:
-                seven_day = agg
-            elif "DAILY" in prefix:
-                daily = agg
-            continue
+            if is_official_totals:
+                agg = {"head": int(head), "avg_weight": avg_w, "avg_price": avg_p}
+                if "SEVEN-DAY" in prefix or "7-DAY" in prefix:
+                    seven_day = agg
+                elif "DAILY" in prefix:
+                    daily = agg
+            continue        # never a location, whatever the case
 
         # Search the FULL line (not the prefix slice) -- slicing at
         # prefix_len can cut off the trailing digit this pattern needs to
@@ -188,6 +335,7 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
         except Exception:
             raw_date = file_date.isoformat()
         locations.append({
+            "brackets": brackets,
             "raw_date": raw_date,
             "location": loc_text.title(),
             "state": state,
@@ -196,14 +344,22 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             "avg_price": avg_p,
         })
 
-    reported_index = reported_change = None
-    for ln in lines:
-        m = re.search(r"REPORTED INDEX\s+(-?[\d.]+)", ln)
-        if m:
-            reported_index = float(m.group(1))
-        m = re.search(r"REPORTED CHANGE\s+(-?[\d.]+)", ln)
-        if m:
-            reported_change = float(m.group(1))
+    # Structural guard, independent of how CME words its summary rows. A single
+    # location cannot contribute more head than the whole seven-day window
+    # contains -- that is arithmetic, not a heuristic -- so anything that does
+    # is a mis-parsed aggregate rather than a barn. The case fix above stops the
+    # known 2018 wording; this stops the next wording nobody has seen yet.
+    if seven_day and seven_day.get("head"):
+        cap = seven_day["head"]
+        kept = [r for r in locations if r["head"] <= cap]
+        for r in locations:
+            if r["head"] > cap:
+                print(f"  [!] {file_date}: dropping {r['location']!r} with "
+                      f"{r['head']:,} head -- exceeds the file's own seven-day "
+                      f"total of {cap:,}, so it is a mis-parsed summary row")
+        locations = kept
+
+    reported_index, reported_change = _parse_reported(text)
 
     return {
         "date": file_date.isoformat(),
@@ -254,6 +410,25 @@ def init_official_tables(conn):
             same_day_price REAL,
             same_day_head INTEGER,
             same_day_avg_weight REAL
+        )
+    """)
+    # Per-bracket detail behind each location row: the eight grade/weight
+    # columns CME's files carry. The row-level average weight hides the mix --
+    # 804 lb can be everything at 800-849 or a barbell of 700-749 and 850-899 --
+    # and the mix is what tells you whether the index sample is capturing
+    # heavier cattle or simply different ones.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cme_ftp_brackets (
+            report_date TEXT NOT NULL,
+            raw_date TEXT,
+            location TEXT NOT NULL,
+            state TEXT,
+            grade TEXT NOT NULL,
+            weight_low INTEGER NOT NULL,
+            head_count INTEGER NOT NULL,
+            avg_weight REAL,
+            avg_price REAL,
+            PRIMARY KEY (report_date, location, grade, weight_low)
         )
     """)
     conn.execute("""

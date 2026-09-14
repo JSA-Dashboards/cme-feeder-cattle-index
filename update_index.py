@@ -226,6 +226,37 @@ def fetch_slug(slug_id, since_str, until_str, auth):
 
 
 def qualifying_rows(rows):
+    """
+    CME Rule 10203.A.1's sample: 700-899 lb Medium and Large Frame #1 and #1-2
+    feeder STEERS, from a final (not preliminary) report.
+
+    DO NOT ADD A lot_desc EXCLUSION HERE. Cattle reported as fancy, thin,
+    fleshy, gaunt or full USED to be excluded, and CME's own explainer PDF
+    "Understanding The CME Feeder Cattle Index" still says so -- but the rule
+    was amended by SER-8154 (notice 22 May 2018, effective with the May 2019
+    contract): "Rule 10203.A.1. shall no longer exclude cattle identified on
+    USDA-AMS reports as being fancy, thin, fleshy, gaunt or full." The current
+    rule text carries an orphan semicolon where that clause was cut out.
+
+    This was nearly "fixed" on 2026-09-14 after a 297-head Ericson lot marked
+    Fancy at $398.00/cwt moved the estimate $1.62. Excluding it was tested and
+    REFUTED against live data: 15 other flagged lots (Unweaned, Fleshy, Thin
+    Fleshed, Full) sit in the 2026-09-11 window, and INCLUDING all of them is
+    what reproduces the published 341.7073 -- CIH printed 341.71 for the same
+    date. Excluding them gives 341.9256, off by 22 cents. The empirical result
+    and the rule agree; a stale PDF is what disagrees.
+
+    The dairy/exotic/Brahma-breeding exclusion DID survive SER-8154, and is
+    satisfied here by construction rather than by a filter of its own: AMS
+    reports those cattle under their own class values, so the exact
+    class == "Steers" match already drops them. Measured over 12 auctions,
+    2026-08-20..09-14: Steers 829 rows, Dairy Steers 15, Beef/Dairy Steers 15.
+    There is no breed field on these rows at all -- the only descriptor fields
+    AMS carries are market_type, market_type_category, category and lot_desc,
+    and across 641 qualifying rows none contained dairy, Holstein, Brahma or
+    exotic wording. So loosening the class match to something like
+    class.endswith("Steers") would quietly pull dairy cattle into the index.
+    """
     out = []
     for r in rows:
         if (r.get("class") == "Steers"

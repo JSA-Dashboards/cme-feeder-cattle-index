@@ -672,18 +672,25 @@ def _load_composition(index_date_iso):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_volumes():
+def _load_volumes(index_date_iso=None):
     """
     Index volume: the window comparison, the cumulative comparison, and the
     chart series. All from CME's own published numbers -- see volumes.py for
     why our reconstruction cannot carry the history.
+
+    Takes the index date explicitly so this section reports the same date as the
+    headline. Left to its own default it picked the newest row it could find,
+    which on 2026-09-14 put "the 7-day window for Sep 14" -- and an ISO week 38
+    seasonal norm -- directly under a headline reading Sep 11, comparing a
+    Monday window against Friday's number.
     """
     if not db.use_snowflake() and not MARS_DB_PATH.exists():
         return None, None, None, None, None
     conn = db.get_conn()
     try:
         _byyear, _norm, _span = volume_history(conn, years=(2026, 2025))
-        return volume_compare(conn), _byyear, _norm, _span, volume_ytd(conn)
+        return (volume_compare(conn, index_date_iso), _byyear, _norm, _span,
+                volume_ytd(conn, index_date_iso))
     except Exception:
         return None, None, None, None, None
     finally:
@@ -843,6 +850,40 @@ if fci_df.empty:
 last_date = fci_df["date"].max()
 first_date = fci_df["date"].min()
 
+# ── Which index date the headline is FOR ────────────────────────────────────
+# NOT the newest row. The newest row is always the least complete one, and on a
+# Monday it is barely formed: a Monday index date normally carries about 3,300
+# head of its own Monday sales, and none of it has been reported yet when this
+# page is read on Monday morning, because Monday's auctions publish Tuesday. On
+# 2026-09-14 the newest row held 480 head -- one Saturday auction -- against a
+# 9/11 row built on four complete sale days, and the page headlined the 480.
+#
+# Over a weekend it is worse still: CME publishes NO index for a Saturday or
+# Sunday (their FTP has no such files), but fci_daily carries Friday's value
+# onto those dates so the series has no holes. Headlining the newest row means
+# headlining a date CME will never print.
+#
+# The honest headline is the index date CME will print NEXT: the first business
+# day after its last published file. That is the number a hedger is waiting on,
+# it is how CIH dates its own daily sheet, and because it is driven by CME's
+# publication clock rather than by the calendar, a holiday or a late file moves
+# it automatically instead of needing a rule of its own.
+#
+# The forward estimates past that date are not hidden -- they are the whole
+# point of the Pending CME Prints section below, which lists every date CME
+# still owes with our estimate for each.
+_published = fci_df[fci_df["source"].isin(("workbook", "cme_official"))]
+head_pos = len(fci_df) - 1
+if len(_published):
+    _next = _published.iloc[-1]["date"] + timedelta(days=1)
+    while _next.weekday() >= 5:          # no Saturday or Sunday index
+        _next += timedelta(days=1)
+    _hit = fci_df.index[fci_df["date"] == _next]
+    if len(_hit):
+        head_pos = fci_df.index.get_loc(_hit[0])
+head_row = fci_df.iloc[head_pos]
+head_date = head_row["date"]
+
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -938,7 +979,7 @@ with c2:
         f"<div style='text-align:right;color:{MUTED};font-size:0.75rem;padding-top:6px;'>"
         f"Most recent index date<br>"
         f"<span style='color:{JPSI_BLUE};font-size:1rem;font-weight:700;'>"
-        f"{last_date.strftime('%b %d, %Y')}</span></div>",
+        f"{head_date.strftime('%b %d, %Y')}</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -1018,11 +1059,11 @@ def _release_date(d):
 # eye), since -0.1003 and -0.11 round to different cents even though they're
 # both "correct" in isolation. Rounding first keeps every number on screen
 # self-consistent with the others.
-current = _round2(fci_df.iloc[-1]["fci_value"])
+current = _round2(fci_df.iloc[head_pos]["fci_value"])
 # Adjacent-row change, kept separate from the "Last CME Print" tile below so
 # the " DoD" caption stays a genuine day-over-day rather than spanning the
 # gap back to CME's last publication.
-_adjacent = _round2(fci_df.iloc[-2]["fci_value"]) if len(fci_df) > 1 else None
+_adjacent = _round2(fci_df.iloc[head_pos - 1]["fci_value"]) if head_pos > 0 else None
 day_chg = _round2(current - _adjacent) if _adjacent is not None else None
 
 # "Current Index" is only accurate when the latest date is a real published
@@ -1039,20 +1080,20 @@ day_chg = _round2(current - _adjacent) if _adjacent is not None else None
 # its sales run THROUGH and releases it the following afternoon, so the data
 # date is both the honest label and the one that lines up with CME's own
 # print and with CIH's daily sheet.
-_cur_row = fci_df.iloc[-1]
+_cur_row = head_row
 current_label = (
     f"Current Index ({_mdy(_cur_row['date'])})"
     if _cur_row["source"] in ("workbook", "cme_official")
     else f"FCI Estimate {_mdy(_cur_row['date'])}"
 )
 
-week_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=7)))
+week_ago = _round2(value_on_or_before(fci_df.iloc[:head_pos], head_date - timedelta(days=7)))
 week_chg = _round2(current - week_ago) if week_ago is not None else None
 
-month_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=30)))
+month_ago = _round2(value_on_or_before(fci_df.iloc[:head_pos], head_date - timedelta(days=30)))
 month_chg = _round2(current - month_ago) if month_ago is not None else None
 
-year_ago = _round2(value_on_or_before(fci_df.iloc[:-1], last_date - timedelta(days=365)))
+year_ago = _round2(value_on_or_before(fci_df.iloc[:head_pos], head_date - timedelta(days=365)))
 year_chg = _round2(current - year_ago) if year_ago is not None else None
 
 # Labeled as TODAY minus one calendar day, not the date of whichever row
@@ -1100,7 +1141,7 @@ with cols[3]:
 # Mirrors the "Daily: $X on Y head and Z lbs average" line under CME subscriber
 # reports — the single date's own weighted average, distinct from the 7-day
 # rolling Current Index above it.
-last_row = fci_df.iloc[-1]
+last_row = head_row
 sd_price = last_row.get("same_day_price")
 sd_head = last_row.get("same_day_head")
 sd_weight = last_row.get("same_day_avg_weight")
@@ -1123,7 +1164,8 @@ if pd.notna(sd_price) and pd.notna(sd_head):
 # The CUMULATIVE row is the year to date. On 2026-09-09 the window sat 57%
 # under the year-ago date while the year to date ran 1.4% AHEAD of 2025.
 
-_vol, _vol_years, _vol_norm, _vol_span, _vol_ytd = _load_volumes()
+_vol, _vol_years, _vol_norm, _vol_span, _vol_ytd = _load_volumes(
+    pd.Timestamp(head_date).strftime("%Y-%m-%d"))
 if _vol and _vol.get("head"):
     st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
     st.markdown('<div class="sec-header">Index Volume</div>', unsafe_allow_html=True)
@@ -1246,8 +1288,8 @@ if _vol and _vol.get("head"):
 st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 st.markdown('<div class="sec-header">7-Day Window (Rolling Index Composition)</div>', unsafe_allow_html=True)
 
-window_start = last_date - timedelta(days=6)
-window_fci = fci_df[(fci_df["date"] >= window_start) & (fci_df["date"] <= last_date)][
+window_start = head_date - timedelta(days=6)
+window_fci = fci_df[(fci_df["date"] >= window_start) & (fci_df["date"] <= head_date)][
     ["date", "same_day_price", "same_day_head", "same_day_avg_weight"]
 ].copy().sort_values("date").reset_index(drop=True)
 
@@ -1277,7 +1319,7 @@ window_fci["Day"] = window_fci.apply(
     axis=1,
 )
 
-window_loc = loc_df[(loc_df["date"] >= window_start) & (loc_df["date"] <= last_date)]
+window_loc = loc_df[(loc_df["date"] >= window_start) & (loc_df["date"] <= head_date)]
 window_w = window_loc["head"] * window_loc["avg_weight"]
 window_total_head = window_loc["head"].sum()
 window_total_weight = (window_w.sum() / window_total_head) if window_total_head else None
@@ -1320,13 +1362,13 @@ st.caption(
 # costs the index real money. Decomposes to the index exactly: the blended
 # price and head count below equal the figures in the tiles.
 
-_comp, _mix = _load_composition(pd.Timestamp(last_date).strftime("%Y-%m-%d"))
+_comp, _mix = _load_composition(pd.Timestamp(head_date).strftime("%Y-%m-%d"))
 if _comp:
     st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
     st.markdown('<div class="sec-header">Index Composition by Weight &amp; Grade</div>',
                 unsafe_allow_html=True)
     st.caption(
-        f"The 7-day window ending **{pd.Timestamp(last_date).strftime('%b %d, %Y')}**, "
+        f"The 7-day window ending **{pd.Timestamp(head_date).strftime('%b %d, %Y')}**, "
         f"split by CME's own weight brackets and muscle grades. Prices are "
         f"pound-weighted, the same basis as the index."
     )
@@ -1470,7 +1512,7 @@ hover_source = fci_df["source"].map({
     "usda_mars": "JSA reconstruction (USDA MARS)",
 })
 
-forecast_df = compute_forecast(fci_df["fci_value"], last_date)
+forecast_df = compute_forecast(fci_df["fci_value"].iloc[:head_pos + 1], head_date)
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(
@@ -1482,7 +1524,7 @@ fig.add_trace(go.Scatter(
 ))
 if forecast_df is not None:
     connector = pd.concat([
-        pd.DataFrame({"date": [last_date], "forecast": [current], "lower": [current], "upper": [current]}),
+        pd.DataFrame({"date": [head_date], "forecast": [current], "lower": [current], "upper": [current]}),
         forecast_df,
     ], ignore_index=True)
     fig.add_trace(go.Scatter(

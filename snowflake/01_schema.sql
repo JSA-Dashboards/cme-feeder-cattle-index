@@ -301,3 +301,50 @@ CREATE TABLE IF NOT EXISTS corn_bids (
     price_unit VARCHAR,
     PRIMARY KEY (report_date, state, trade_loc, delivery_point, grain_class)
 );
+
+-- Distillers grains, wet and dry, by state. One AMS report (3618) covers all
+-- 11 states weekly in $ per ton. PRICED AS-FED: wet is 65-70% water, so $52 a
+-- ton is $160 a ton of actual dry matter, near parity with dry at $166. Any
+-- ration arithmetic mixing wet and dry on an as-fed basis is wrong by 3x --
+-- feed_bids.dm_price() exists so that conversion cannot be forgotten.
+CREATE TABLE IF NOT EXISTS distillers_bids (
+    report_date DATE NOT NULL,
+    published_date DATE,
+    state VARCHAR NOT NULL,
+    variety VARCHAR NOT NULL,
+    price_ton FLOAT,
+    price_unit VARCHAR,
+    corn_equiv_bu FLOAT,
+    PRIMARY KEY (report_date, state, variety)
+);
+
+-- Hay, from 15 per-state Direct Hay reports. The wide key is deliberate: a
+-- state publishes many rows per report differing only by quality or package,
+-- and corn_bids already lost 76% of its rows once to a key missing a field
+-- that varied. AVG_PRICE IS NULL where AMS published a literal zero -- 39% of
+-- rows, concentrated in Ask and Offer lines with no trade behind them. Texas
+-- and Missouri are 100% zero and therefore have no usable hay price at all.
+CREATE TABLE IF NOT EXISTS hay_bids (
+    report_date DATE NOT NULL,
+    published_date DATE,
+    state VARCHAR NOT NULL,
+    slug_id INTEGER NOT NULL,
+    hay_class VARCHAR NOT NULL,
+    quality VARCHAR NOT NULL,
+    package VARCHAR NOT NULL,
+    region VARCHAR NOT NULL,
+    sale_type VARCHAR NOT NULL,
+    hay_use VARCHAR NOT NULL,
+    crop_age VARCHAR NOT NULL,
+    freight VARCHAR NOT NULL,
+    hay_desc VARCHAR NOT NULL,
+    price_min FLOAT,
+    price_max FLOAT,
+    avg_price FLOAT,
+    quantity FLOAT,
+    price_unit VARCHAR NOT NULL,
+    conventional VARCHAR NOT NULL,
+    PRIMARY KEY (report_date, state, hay_class, quality, package, region,
+                 sale_type, hay_use, crop_age, freight, hay_desc, price_unit,
+                 conventional)
+);

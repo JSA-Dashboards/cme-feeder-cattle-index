@@ -96,6 +96,23 @@ def main() -> int:
         traceback.print_exc(file=sys.stdout)
 
     try:
+        import feed_bids
+        feed_bids.init_tables(conn)
+        # 90 days, not 30: Direct Hay is a period report published roughly
+        # weekly or biweekly, and the co-products report is weekly. A 30-day
+        # window like the auction feeds use would catch only a handful of
+        # prints per state, and a missed run could leave a state with none.
+        since = date.today() - timedelta(days=90)
+        print(f"--- feed prices (distillers, hay) since {since} ---")
+        n = feed_bids.ingest_distillers(conn, since, date.today(), verbose=False)
+        n += feed_bids.ingest_hay(conn, since, date.today(), verbose=False)
+        print(f"    {n:,} rows")
+        ok.append("feed")
+    except Exception:
+        print("[!] feed prices FAILED:")
+        traceback.print_exc(file=sys.stdout)
+
+    try:
         import census_imports
         census_imports.init_tables(conn)
         start = _months_ago(CENSUS_LOOKBACK_MONTHS)

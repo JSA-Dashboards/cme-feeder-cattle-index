@@ -35,7 +35,7 @@ CRITICAL_TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily",
 OPTIONAL_TABLES = ["replacement_sales", "border_reports",
                    "census_cattle_imports", "border_receipts",
                    "border_volumes", "border_prices",
-                   "calf_sales", "corn_bids"]
+                   "calf_sales", "corn_bids", "distillers_bids", "hay_bids"]
 
 TABLES = CRITICAL_TABLES + OPTIONAL_TABLES
 

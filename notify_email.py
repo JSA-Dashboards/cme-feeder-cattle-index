@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import snowflake_db as db
+from index_dates import headline_index_date
 
 TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
 DASHBOARD = "https://jsa-livestock.streamlit.app/cme-feeder-cattle-index"
@@ -47,39 +48,15 @@ def _signed(v):
 
 def pending_print_date(cur):
     """
-    The index date CME will print NEXT -- the first business day after its last
-    published file. This is what the email leads with.
-
-    NOT MAX(report_date) from fci_daily, which is what this used to be. The
-    newest row is always the least complete one, and on a Monday it is barely
-    formed: a Monday index date normally carries about 3,300 head of its own
-    Monday sales, and on Monday morning none of it has been reported yet, since
-    Monday's auctions publish Tuesday. On 2026-09-14 that made the newest row a
-    480-head Saturday auction while the complete 9/11 estimate -- the one CME
-    was about to print that very day, and the one CIH's sheet was dated by --
-    sat behind it.
-
-    Weekends are the same failure in a plainer form: CME publishes no Saturday
-    or Sunday index at all, but fci_daily carries Friday's value onto those
-    dates so the series has no holes, so MAX(report_date) leads with a date that
-    will never be printed.
-
-    Driving this off CME's own publication clock rather than the calendar means
-    a holiday or a late file moves it without a rule of its own. Falls back to
-    the newest row if we somehow hold no published CME values.
+    The index date the email leads with -- see index_dates.py for the rule and
+    why it is not MAX(report_date). Tested there; this only supplies the dates.
     """
     row = cur.execute("SELECT MAX(report_date) FROM cme_ftp_daily").fetchone()
-    if row and row[0]:
-        d = date.fromisoformat(str(db.iso(row[0]))) + timedelta(days=1)
-        while d.weekday() >= 5:              # no Saturday or Sunday index
-            d += timedelta(days=1)
-        hit = cur.execute(
-            f"SELECT report_date FROM fci_daily WHERE report_date = {db.placeholders(1)}",
-            (d.isoformat(),)).fetchone()
-        if hit:
-            return d.isoformat()
-    row = cur.execute("SELECT MAX(report_date) FROM fci_daily").fetchone()
-    return str(db.iso(row[0]))
+    last_pub = date.fromisoformat(str(db.iso(row[0]))) if row and row[0] else None
+    avail = {date.fromisoformat(str(db.iso(r[0])))
+             for r in cur.execute("SELECT report_date FROM fci_daily")}
+    pick = headline_index_date(last_pub, avail)
+    return pick.isoformat() if pick else None
 
 
 def gather(index_date=None):

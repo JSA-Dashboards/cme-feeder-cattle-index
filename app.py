@@ -26,6 +26,7 @@ except Exception:
     pass  # st.secrets not available (no secrets.toml locally) -- fine, .env already loaded above
 
 import snowflake_db as db
+from index_dates import headline_index_date
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
 from composition import (BRACKETS as COMP_BRACKETS, grade_totals as comp_grade_totals,
@@ -872,15 +873,16 @@ first_date = fci_df["date"].min()
 # The forward estimates past that date are not hidden -- they are the whole
 # point of the Pending CME Prints section below, which lists every date CME
 # still owes with our estimate for each.
+# The rule itself lives in index_dates.py with tests against it. It is kept out
+# of this file because the forecast scorecard cannot catch a mistake in it --
+# the scorecard compares our estimate for a date against CME's print for that
+# same date, so every date scores identically well no matter which one is
+# headlined. It measures the number, never the choice of number.
 _published = fci_df[fci_df["source"].isin(("workbook", "cme_official"))]
-head_pos = len(fci_df) - 1
-if len(_published):
-    _next = _published.iloc[-1]["date"] + timedelta(days=1)
-    while _next.weekday() >= 5:          # no Saturday or Sunday index
-        _next += timedelta(days=1)
-    _hit = fci_df.index[fci_df["date"] == _next]
-    if len(_hit):
-        head_pos = fci_df.index.get_loc(_hit[0])
+_last_pub = _published.iloc[-1]["date"].date() if len(_published) else None
+_head = headline_index_date(_last_pub, {t.date() for t in fci_df["date"]})
+_hit = fci_df.index[fci_df["date"] == pd.Timestamp(_head)] if _head else []
+head_pos = fci_df.index.get_loc(_hit[0]) if len(_hit) else len(fci_df) - 1
 head_row = fci_df.iloc[head_pos]
 head_date = head_row["date"]
 
@@ -1869,10 +1871,12 @@ else:
 # ── Data Table ────────────────────────────────────────────────────────────────
 
 # ── Pending CME Prints / Forecast Scorecard ───────────────────────────────────
-# The headline tile only ever shows the LATEST date, which is not the number
-# you want when using this as a forecast. What matters is (a) which dates CME
-# still owes a print for, with our estimate for each, and (b) how close the
-# last several estimates actually landed. Without this, both required either
+# The headline tile shows the date CME will print NEXT (see index_dates.py).
+# It used to show the LATEST date, which on a Monday is barely formed -- that
+# is what this section was originally written to compensate for. It still
+# earns its place: the headline is deliberately ONE date, and what matters
+# besides it is (a) every date CME still owes a print for, with our estimate
+# for each, and (b) how close the last several estimates actually landed. Without this, both required either
 # hovering the trend chart or reading the raw table and knowing from memory
 # where CME's published history stops.
 

@@ -38,6 +38,7 @@ the question this page asks, so this module stores GEN_ and ignores CON_.
 """
 import argparse
 import os
+import time
 from datetime import date
 
 import requests
@@ -91,6 +92,18 @@ def get_key():
     return k
 
 
+# Census answers a busy moment with "503: Sorry, the system is currently
+# undergoing maintenance or is busy. Please try again later." -- which is what
+# took the 13:00 run's census leg down on 2026-09-11 while the same query had
+# succeeded at 07:51. The API is telling us to retry, so retry.
+#
+# ONLY what is actually transient: 5xx, 429, and connection/timeout errors. A
+# 4xx is a bad key or a malformed query and will fail identically three times,
+# so retrying one would turn a clear error into a slow one and bury the cause.
+RETRY_STATUS = {429, 500, 502, 503, 504}
+RETRY_WAITS = (2, 6)        # two retries; ~8s worst case per request
+
+
 def _get(url, params):
     """
     Census returns a header row followed by data rows, or 204 with an empty body
@@ -100,16 +113,28 @@ def _get(url, params):
     """
     p = dict(params)
     p["key"] = get_key()
-    r = requests.get(url, params=p, timeout=(5, 90))
-    if r.status_code in (204, 404):
-        return []
-    if r.status_code >= 400:
-        raise RuntimeError(f"Census {r.status_code}: {r.text[:300]}")
-    rows = r.json()
-    if not rows or len(rows) < 2:
-        return []
-    head, *data = rows
-    return [dict(zip(head, row)) for row in data]
+    for wait in (*RETRY_WAITS, None):
+        try:
+            r = requests.get(url, params=p, timeout=(5, 90))
+        except (requests.Timeout, requests.ConnectionError) as e:
+            if wait is None:
+                raise
+            print(f"    [retry] {type(e).__name__}; again in {wait}s")
+            time.sleep(wait)
+            continue
+        if r.status_code in (204, 404):
+            return []
+        if r.status_code in RETRY_STATUS and wait is not None:
+            print(f"    [retry] Census {r.status_code}; again in {wait}s")
+            time.sleep(wait)
+            continue
+        if r.status_code >= 400:
+            raise RuntimeError(f"Census {r.status_code}: {r.text[:300]}")
+        rows = r.json()
+        if not rows or len(rows) < 2:
+            return []
+        head, *data = rows
+        return [dict(zip(head, row)) for row in data]
 
 
 def _num(v):

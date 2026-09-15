@@ -43,7 +43,11 @@ import snowflake_db as db
 import update_index as ui
 
 # Below the index band, plus the index band itself -- see the module note.
-CALF_BRACKETS = {400, 450, 500, 550, 600, 650, 700, 750, 800, 850}
+# 900 added 2026-09-15 for the cash lookup page. The top of this range is
+# ABOVE the index's 700-899 band on purpose -- this table is a reference
+# for what cattle are bringing, not an index input, and nothing here is
+# read by recompute_fci_daily().
+CALF_BRACKETS = {400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900}
 
 COLUMNS = ["report_date", "raw_date", "published_date", "slug_id", "location",
            "state", "weight_low", "weight_high", "muscle_grade", "head_count",

@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(
     not PORTAL.is_dir(), reason="livestock-portal not checked out beside this repo")
 
 SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
-          "composition.py", "volumes.py", "snapshots.py"]
+          "composition.py", "volumes.py", "snapshots.py", "cash_calves.py"]
 
 
 @pytest.mark.parametrize("name", SHARED)

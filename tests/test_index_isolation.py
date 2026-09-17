@@ -9,7 +9,7 @@ calves at $475/cwt into the published index with no error and no warning, and
 the first sign would be a number that disagreed with CME by several dollars.
 
 The risk is not hypothetical. CALF_BRACKETS was widened to include 900 on
-2026-09-15 to serve the Cash Calf Prices lookup, which is exactly the shape of
+2026-09-15 to serve the Cash Feeder Prices lookup, which is exactly the shape of
 change that could creep: one bracket set grows, someone later "tidies" two
 similar-looking ingests into one, and the index quietly changes.
 

@@ -1003,7 +1003,7 @@ _render_freshness()
 # index is 700-899, recompute_fci_daily() reads mars_sales only, and
 # tests/test_index_isolation.py in the cme-feeder-cattle-index repo enforces
 # all of that structurally rather than by convention.
-tab_index, tab_cash = st.tabs(["Index", "Cash Calf Prices"])
+tab_index, tab_cash = st.tabs(["Index", "Cash Feeder Prices"])
 
 with tab_index:
     # ── KPI Tiles ─────────────────────────────────────────────────────────────────
@@ -2141,7 +2141,7 @@ with tab_index:
 
 
 with tab_cash:
-    st.markdown('<div class="sec-header">Cash Calf Prices</div>',
+    st.markdown('<div class="sec-header">Cash Feeder Prices</div>',
                 unsafe_allow_html=True)
     st.caption(
         "What the cattle behind the index actually brought, straight from the "

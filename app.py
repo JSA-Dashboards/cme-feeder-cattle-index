@@ -1903,6 +1903,10 @@ with tab_index:
     )
 
     _recon = _load_recon_index()
+    # Frozen 07:30 calls. Loaded here rather than down in the peer table because
+    # BOTH sections now score against the number we actually published, not the
+    # one fci_daily happens to hold today.
+    _openings = _load_opening_calls()
     _official = (
         fci_df[fci_df["source"] == "cme_official"][["date", "fci_value"]]
         .rename(columns={"fci_value": "actual"})
@@ -1962,9 +1966,28 @@ with tab_index:
             if _s.empty:
                 st.caption("No dates where both a reconstruction and a CME print exist.")
             else:
-                _s["err"] = _s["recon"] - _s["actual"]
+                # Score the call we PUBLISHED, not the one held now. fci_daily is
+                # recomputed from mars_sales every run, so a date's row goes on
+                # absorbing auction reports that arrive after CME's own cutoff:
+                # 2026-09-14 read 341.61 at 07:44 when it went out and 341.5794 by
+                # 13:06 that same day, once Tulsa's 51 head landed. Grading the
+                # revised figure made this panel structurally incapable of showing
+                # a bad forecast -- it reported $0.00 while the peer table below,
+                # which has always used the frozen call, showed that same date
+                # missing by three cents.
+                #
+                # The settled-vs-CME agreement is still worth having and moves to
+                # the caption. It answers a DIFFERENT question -- does the method
+                # reproduce CME given the same complete data -- and it is what
+                # would scream if someone reinstated the fancy/thin/fleshy
+                # exclusion or broke the Saturday/Sunday-as-Monday merge.
+                _s["opening"] = _s["date"].map(
+                    lambda d: _openings.get(d.strftime("%Y-%m-%d")))
+                _n_live = int(_s["opening"].isna().sum())
+                _s["opening"] = _s["opening"].fillna(_s["recon"])
+                _s["err"] = _s["opening"] - _s["actual"]
                 _s["Index date"] = _s["date"].dt.strftime("%m/%d")
-                _s["JSA FCI EST"] = _s["recon"].map(lambda v: f"${v:.2f}")
+                _s["JSA FCI EST"] = _s["opening"].map(lambda v: f"${v:.2f}")
                 _s["CME"] = _s["actual"].map(lambda v: f"${v:.2f}")
                 _s["Miss"] = _s["err"].map(lambda v: f"{v:+.2f}")
                 with st.container(key="wm-scored"):
@@ -1973,11 +1996,20 @@ with tab_index:
                 # Dollar signs escaped: st.caption renders markdown, and a $...$
                 # pair is LaTeX math there -- unescaped, "$0.38" and "$2" render as
                 # mangled math rather than money.
+                _recon_err = (_s["recon"] - _s["actual"]).abs().mean()
                 st.caption(
                     f"Mean absolute miss over these {len(_s)} dates: "
-                    f"**\\${_s['err'].abs().mean():.2f}**. Dates before the direct-trade "
-                    "component began (2026-08-28) ran about \\$2 high because that input "
-                    "was missing entirely -- they are not representative of current accuracy."
+                    f"**\\${_s['err'].abs().mean():.2f}** — the 07:30 call as published, "
+                    f"against CME's print"
+                    + (f" (no frozen call exists for {_n_live} of them, so the current "
+                       f"value stands in there)" if _n_live else "")
+                    + f". Our *settled* reconstruction, which goes on absorbing reports "
+                    f"that land after CME's cutoff, agrees to **\\${_recon_err:.2f}** — "
+                    f"that one measures whether the method reproduces CME, not whether "
+                    f"the morning call was right. Dates before the direct-trade "
+                    f"component began (2026-08-28) ran about \\$2 high because that "
+                    f"input was missing entirely -- they are not representative of "
+                    f"current accuracy."
                 )
 
 
@@ -2002,11 +2034,11 @@ with tab_index:
         _piv = _peers.pivot_table(index="date", columns="source", values="value",
                                   aggfunc="last")
         _srcs = [c for c in sorted(_piv.columns)]
-        # Our column is the FROZEN opening call wherever we have one, so this table
-        # compares same-morning against same-morning. Dates predating fci_snapshots
-        # fall back to the live value and are marked in the caption, because a
-        # silent mix of frozen and revised numbers would be worse than either.
-        _openings = _load_opening_calls()
+        # Our column is the FROZEN opening call wherever we have one (loaded above,
+        # shared with the scorecard), so this table compares same-morning against
+        # same-morning. Dates predating fci_snapshots fall back to the live value
+        # and are marked in the caption, because a silent mix of frozen and revised
+        # numbers would be worse than either.
         _live_s = (_recon.set_index("date")["recon"] if not _recon.empty
                    else pd.Series(dtype=float))
         _ours_s = _live_s.copy()
@@ -2043,6 +2075,15 @@ with tab_index:
         _short = lambda src: _labels(src)[2]      # caption, where a full header is noise
         _money = lambda v: f"${v:.2f}" if pd.notna(v) else "—"
         _delta = lambda v: f"{v:+.2f}" if pd.notna(v) else "—"
+        # Everyone in this table publishes to the cent, CME included. The unrounded
+        # values are ours and -- since the 2026-09-14 layout dropped the printed
+        # REPORTED INDEX label -- CME's derived seven-day average, which cme_ftp.py
+        # computes as 342.7373 where CME printed 342.74. Differencing unrounded
+        # values charged CIH and Compass up to half a cent of pure rounding on every
+        # post-09-14 date while scoring our own column full-precision against
+        # full-precision, which quietly flattered us. Compare what each desk
+        # actually published, at the precision it published it.
+        _cents = lambda s: s.round(2)
 
         _disp = pd.DataFrame(index=_t.index)
         _disp["Index date"] = _t.index.strftime("%a %m/%d")
@@ -2050,9 +2091,9 @@ with tab_index:
         for _s in _srcs:
             _disp[_lbl(_s)] = _t[_s].map(_money)
         _disp["CME"] = _t["__cme"].map(_money)
-        _disp["JSA FCI EST Miss"] = (_t["__ours"] - _t["__cme"]).map(_delta)
+        _disp["JSA FCI EST Miss"] = (_cents(_t["__ours"]) - _cents(_t["__cme"])).map(_delta)
         for _s in _srcs:
-            _disp[_miss_lbl(_s)] = (_t[_s] - _t["__cme"]).map(_delta)
+            _disp[_miss_lbl(_s)] = (_cents(_t[_s]) - _cents(_t["__cme"])).map(_delta)
 
         with st.container(key="wm-peers"):
             st.dataframe(_disp, use_container_width=True, hide_index=True,
@@ -2064,11 +2105,11 @@ with tab_index:
         _scored = _t[_t["__cme"].notna()]
         if len(_scored):
             _bits = []
-            _o = (_scored["__ours"] - _scored["__cme"]).abs().dropna()
+            _o = (_cents(_scored["__ours"]) - _cents(_scored["__cme"])).abs().dropna()
             if len(_o):
                 _bits.append(f"JSA {_o.mean():.3f} ({len(_o)})")
             for _s in _srcs:
-                _e = (_scored[_s] - _scored["__cme"]).abs().dropna()
+                _e = (_cents(_scored[_s]) - _cents(_scored["__cme"])).abs().dropna()
                 if len(_e):
                     _bits.append(f"{_short(_s)} {_e.mean():.3f} ({len(_e)})")
             _n_frozen = len([d for d in _scored.index if d in _frozen_dates])

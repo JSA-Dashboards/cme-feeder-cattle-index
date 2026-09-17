@@ -1493,20 +1493,55 @@ with tab_index:
         zeroline=False,
     )
 
+    # Published and reconstructed are drawn as SEPARATE traces. One solid line
+    # covering both, named "CME Feeder Cattle Index", asserted that CME had
+    # printed every value on it -- but the reconstruction fills the front of the
+    # series and the pending days at the head, which CME has not printed at all.
+    # Same error the forecast scorecard was making against fci_daily: our number
+    # and CME's number sharing one label.
+    #
+    # cme_official was missing from this map, so every point sourced from CME's
+    # own FTP file hovered blank.
     hover_source = fci_df["source"].map({
         "workbook": "Published",
+        "cme_official": "Published",
         "workbook_precursor": "JSA reconstruction (Ross data)",
         "usda_mars": "JSA reconstruction (USDA MARS)",
     })
 
     forecast_df = compute_forecast(fci_df["fci_value"].iloc[:head_pos + 1], head_date)
 
+    _is_pub = fci_df["source"].isin(("workbook", "cme_official"))
+    # Estimate means OUTSIDE CME's published span -- the reconstruction at the
+    # front of the series, and the pending days at the head. NOT simply "no print
+    # on this date": fci_daily carries a row for every CALENDAR day while CME
+    # prints only on business days, so keying off _is_pub row-by-row dashed every
+    # weekend and holiday inside the published range and left the history looking
+    # mostly estimated. Within the span the line is anchored to CME's prints and a
+    # weekend is a carry-forward, not a forecast of ours.
+    _pub_dates = fci_df.loc[_is_pub, "date"]
+    if len(_pub_dates):
+        _est = (fci_df["date"] < _pub_dates.min()) | (fci_df["date"] > _pub_dates.max())
+    else:
+        _est = pd.Series(True, index=fci_df.index)
+    _solid = ~_est
+    # The estimate trace also carries the boundary point on either side, so the
+    # dashes meet the solid line instead of floating clear of it at the join.
+    _est = _est | _est.shift(1, fill_value=False) | _est.shift(-1, fill_value=False)
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=fci_df["date"], y=fci_df["fci_value"],
+        x=fci_df["date"], y=fci_df["fci_value"].where(_solid),
         customdata=hover_source,
-        name="CME Feeder Cattle Index", mode="lines",
-        line=dict(color=JPSI_BLUE, width=2),
+        name="CME Feeder Cattle Index (published)", mode="lines",
+        line=dict(color=JPSI_BLUE, width=2), connectgaps=False,
+        hovertemplate="<b>%{customdata}</b>: $%{y:.2f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=fci_df["date"], y=fci_df["fci_value"].where(_est),
+        customdata=hover_source,
+        name="JSA estimate", mode="lines",
+        line=dict(color=JPSI_BLUE, width=2, dash="dash"), connectgaps=False,
         hovertemplate="<b>%{customdata}</b>: $%{y:.2f}<extra></extra>",
     ))
     if forecast_df is not None:
@@ -1531,7 +1566,7 @@ with tab_index:
         paper_bgcolor=BG, plot_bgcolor=BG,
         font=dict(color=TEXT, size=11),
         hovermode="x unified",
-        showlegend=forecast_df is not None,
+        showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
                     font=dict(color=MUTED, size=10), bgcolor="rgba(0,0,0,0)"),
         margin=dict(l=55, r=20, t=15, b=40),
@@ -1558,8 +1593,10 @@ with tab_index:
     add_watermark(fig, size=0.34, opacity=0.055)
     st.plotly_chart(fig, use_container_width=True)
     caption_bits = [
-        "Line covers JSA's compiled workbook (published CME values) plus JSA's own USDA MARS "
-        "reconstruction on both ends of that range — see the sidebar for methodology and accuracy notes."
+        "Solid line is the index as CME published it — CME's own file reaches back to "
+        "2015, so nearly all of this is their figure rather than our reconstruction of "
+        "it. Dashed blue is JSA's estimate, covering only the days CME has not printed "
+        "yet. See the sidebar for methodology and accuracy notes."
     ]
     if forecast_df is not None:
         caption_bits.append(

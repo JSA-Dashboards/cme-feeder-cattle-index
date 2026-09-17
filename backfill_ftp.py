@@ -148,6 +148,20 @@ def main():
             print(f"       {d}")
     print(f"cme_ftp_daily now has {n_rows} total rows, spanning {first_last[0]} to {first_last[1]}.")
 
+    # EXIT NON-ZERO WHEN WE HOLD FILES WE CANNOT READ. This printed a warning
+    # and exited 0 until 2026-09-17, which is how a CME layout change on 09-14
+    # went unnoticed for three days: the daily job logged cme_exit=0, the
+    # healthcheck stayed green, the dashboard kept serving a headline frozen at
+    # 09/14, and the only sign was a line in a log nobody greps.
+    #
+    # "Fetched but unparseable" is a genuine error -- distinct from "no file",
+    # which is a normal weekend or a print that has not landed yet. The daily
+    # job treats a non-zero CME exit as non-fatal and logs a WARN, which is the
+    # right severity: the index estimate does not depend on this, but somebody
+    # needs to know the published series has stopped moving.
+    return 1 if unreadable else 0
+
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

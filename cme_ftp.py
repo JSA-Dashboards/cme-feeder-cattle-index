@@ -226,6 +226,73 @@ def _parse_totals_only(text: str, file_date: date) -> dict:
     }
 
 
+# CME CHANGED THIS FILE'S LAYOUT ON 2026-09-14, and it broke the parser
+# silently -- the files downloaded fine and every row was skipped as
+# unparseable, so cme_ftp_daily simply stopped advancing while the pipeline
+# reported success. Two changes at once:
+#
+#   1. The location column was renamed "Sale Location" -> "Sale Name" and
+#      WIDENED by about 14 characters, which pushed the numeric fields left
+#      into less room. Values that used to have a space between them now
+#      touch: "715.24377.40" is a 715.24 lb average at $377.40. Splitting on
+#      whitespace therefore yields 26-28 tokens where 29 were expected, and
+#      every location row fell through to `continue`.
+#
+#   2. The row-level AVERAGE PRICE column was removed outright. The old tail
+#      was head / total-lb / avg-wt / total-$ / avg-price (5 fields); the new
+#      one is head / total-lb / avg-wt / total-$ (4). The average is still
+#      recoverable as total-$ over total-lb, and that division reproduces the
+#      old stated figure exactly where both exist.
+#
+# So the bracket block is sliced by COLUMN POSITION, taken from the file's own
+# header rather than hardcoded, and only the tail is tokenized -- the tail
+# never collides because its fields are wide. Deriving the columns from the
+# header means the next width change costs nothing.
+def header_layout(lines):
+    """
+    (24 bracket column spans, index where the row-level tail begins), read from
+    the file's own header. None if this file has no recognisable header.
+    """
+    hdr = next((l for l in lines if "Sale Dat" in l), None)
+    if hdr is None:
+        return None
+    pos = [m.start() for m in re.finditer(r"Head|Weight|Price", hdr)]
+    if len(pos) < 25:
+        return None
+    return [(pos[i], pos[i + 1]) for i in range(24)], pos[24]
+
+
+def _row_values(ln, layout):
+    """
+    (24 bracket numbers, tail numbers) for one location row, or None.
+
+    Bracket fields are sliced; the tail is tokenized. An empty slice is a
+    genuine zero -- CME leaves a bracket blank rather than writing 0 on some
+    rows -- so it is read as 0.0 rather than treated as a parse failure.
+    """
+    spans, tail_at = layout
+    try:
+        brackets = [float(ln[a:b].strip() or 0) for a, b in spans]
+        tail = [float(t) for t in ln[tail_at:].split()]
+    except ValueError:
+        return None
+    return brackets, tail
+
+
+def _tail_to_row(tail):
+    """
+    (head, total_lb, avg_weight, total_dollars, avg_price) from a 4- or
+    5-field tail. Pre-2026-09-14 files state the average price; later ones
+    dropped the column and it is derived.
+    """
+    if len(tail) == 5:
+        return tuple(tail)
+    if len(tail) == 4:
+        head, lb, avg_w, dollars = tail
+        return head, lb, avg_w, dollars, (dollars / lb if lb else 0.0)
+    return None
+
+
 def parse_daily_file(text: str, file_date: date) -> dict | None:
     """
     Returns {
@@ -257,6 +324,7 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
 
     locations = []
     daily = seven_day = None
+    layout = header_layout(lines)
     for ln in data_lines:
         prefix, blob = ln[:prefix_len], ln[prefix_len:]
         toks = _tokenize(blob)
@@ -284,10 +352,14 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
         is_totals = "TOTALS" in upper_prefix
         is_official_totals = "TOTALS" in prefix
         brackets = []
-        if len(toks) == 5:
-            head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks)
+        if len(toks) in (4, 5):
+            row = _tail_to_row([float(t) for t in toks])
+            if row is None:
+                continue
+            head, w_lbs, avg_w, dollars, avg_p = row
         elif len(toks) == 29:
             head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks[24:29])
+            _sliced = None
             # The first 24 tokens are the eight brackets this row is built
             # from. The row-level average weight hides the mix: 804 lb can be
             # everything sitting at 800-849, or a barbell of 700-749 and
@@ -295,6 +367,22 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             # question answerable rather than a matter of inference.
             for i, (grade, wlow) in enumerate(BRACKETS):
                 b_head, b_wt, b_price = (float(t) for t in toks[i * 3:i * 3 + 3])
+                if b_head > 0:
+                    brackets.append({"grade": grade, "weight_low": wlow,
+                                     "head": int(b_head), "avg_weight": b_wt,
+                                     "avg_price": b_price})
+        elif layout and not is_totals:
+            # The 2026-09-14 layout: whitespace tokens collide, so slice.
+            got = _row_values(ln, layout)
+            if got is None:
+                continue
+            bracket_nums, tail = got
+            row = _tail_to_row(tail)
+            if row is None:
+                continue
+            head, w_lbs, avg_w, dollars, avg_p = row
+            for i, (grade, wlow) in enumerate(BRACKETS):
+                b_head, b_wt, b_price = bracket_nums[i * 3:i * 3 + 3]
                 if b_head > 0:
                     brackets.append({"grade": grade, "weight_low": wlow,
                                      "head": int(b_head), "avg_weight": b_wt,
@@ -360,6 +448,29 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
         locations = kept
 
     reported_index, reported_change = _parse_reported(text)
+
+    # The 2026-09-14 layout ALSO dropped the "REPORTED INDEX" and "REPORTED
+    # CHANGE" labels. Those values now appear as bare numbers in a column at
+    # the foot of the file, with nothing naming them -- 342.74 and 1.16 on
+    # 09/15 -- which is not something worth parsing positionally.
+    #
+    # The seven-day average is the better source anyway: it is the same figure
+    # computed from the file's own total dollars over total pounds, and it is
+    # MORE precise than the printed one, which is rounded to a cent (342.7373
+    # against 342.74). Where both exist they agree exactly -- FC260911.txt
+    # states 341.71 and derives 341.71 -- so this changes nothing about how
+    # older files are read.
+    #
+    # reported_change is deliberately NOT salvaged the same way. The label
+    # regex finds a spurious match in the new layout (it returned -341.71 for
+    # 09/14, the previous index negated), and a wrong change is worse than an
+    # absent one: it renders as a real day-over-day move. Let the display
+    # difference two index values instead.
+    if reported_index is None:
+        derived = (seven_day or {}).get("avg_price")
+        if derived:
+            reported_index = derived
+            reported_change = None
 
     return {
         "date": file_date.isoformat(),

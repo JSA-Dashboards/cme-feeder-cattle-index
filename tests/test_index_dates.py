@@ -94,3 +94,33 @@ class TestHeadlineIndexDate:
 def test_a_full_week(last_published, expected):
     available = {d(f"2026-09-{n:02d}") for n in range(7, 21)}
     assert headline_index_date(d(last_published), available) == d(expected)
+
+
+class TestCmeSeriesStaleness:
+    """
+    The headline follows CME's publication clock, so a broken CME pull freezes
+    it silently. That happened: CME changed their file layout on 2026-09-14,
+    the parser skipped every row, cme_ftp_daily stopped at 09/11, and the page
+    headlined 09/14 for three days while our own estimates ran on to 09/16.
+    Nothing went red -- the daily job exited 0 and the freshness line was green,
+    because the PIPELINE was fine; only the CME feed had stopped.
+    """
+
+    def test_headline_follows_cme_not_our_newest(self):
+        """The property that caused the freeze, stated so it is not lost."""
+        available = {d(f"2026-09-{n:02d}") for n in range(8, 17)}
+        # CME stuck at 09/11 while we hold data through 09/16.
+        assert headline_index_date(d("2026-09-11"), available) == d("2026-09-14")
+
+    def test_a_recovered_cme_feed_advances_the_headline(self):
+        available = {d(f"2026-09-{n:02d}") for n in range(8, 17)}
+        assert headline_index_date(d("2026-09-15"), available) == d("2026-09-16")
+
+    def test_gap_between_cme_and_our_data_is_measurable(self):
+        """
+        A caller can always tell how far behind CME is, which is what makes the
+        staleness visible rather than a silently frozen date.
+        """
+        available = {d(f"2026-09-{n:02d}") for n in range(8, 17)}
+        head = headline_index_date(d("2026-09-11"), available)
+        assert (max(available) - head).days == 2   # 09/16 vs 09/14

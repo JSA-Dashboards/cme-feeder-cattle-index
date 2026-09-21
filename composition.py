@@ -144,6 +144,227 @@ def mix_effect(conn, index_date_iso):
     }
 
 
+# ---------------------------------------------------------------------------
+# WHAT THE MERGED INDEX DAY IS ACTUALLY MADE OF
+#
+# CME folds Saturday and Sunday into the following Monday (Rule 10203.A.1), and
+# recompute_fci_daily() folds them the same way on the way in: a Saturday sale
+# is stored with report_date set to that Monday while raw_date keeps the true
+# sale day. The 7-day window table therefore shows one "Sat 09/12-Mon 09/14"
+# row and no standalone weekend rows, which is right.
+#
+# What that table cannot show is a weekend that contributed NOTHING, because
+# nothing is exactly what a not-yet-fetched weekend also looks like. On Monday
+# 2026-09-21 the newest index date on the page was Friday 09-18; the 07:43 run
+# had exited 0 having ingested 475 rows across 84 locations and pushed clean,
+# and AMS simply had published nothing dated 09-19, 09-20 or 09-21 yet. An
+# absence and a pending fetch rendered identically, so there was no way to tell
+# from the page whether the index was complete or still filling. That is this
+# codebase's standing failure mode -- something failing to appear, silently --
+# moved into the display layer.
+#
+# So state every constituent day, ZERO ONES INCLUDED, and keep two things apart:
+#
+#   * A sale reaches AMS the FOLLOWING day at the earliest (85% of a sale day's
+#     head is fetchable by 07:30 the next morning, 95.8% by noon; El Reno runs a
+#     median +1d 11:13 behind). Today's own sales therefore have not had time to
+#     appear -- "not yet published", never "none".
+#   * A day already past that point can be reported as having nothing ON
+#     RECORD. Not as having had no sale: AMS still adds late reports, and CME's
+#     own first print routinely omits them (see the publication gate tried and
+#     reverted in update_index.py -- CME revised 9/3 upward by exactly the
+#     Superior video volume). The wording stays "none reported".
+#
+# And an empty Saturday is the NORMAL case: measured 2026-09-21, only 4 of the
+# 10 Saturdays before 09-19 produced any qualifying sale, every one of them from
+# exactly one barn. Without that base rate beside it a zero reads as an outage
+# every single week, and a weekly false alarm is a check nobody reads. The rate
+# is computed live rather than quoted from this comment, because it will drift.
+# ---------------------------------------------------------------------------
+
+# Saturdays sampled for the base rate. Ten spans about two and a half months --
+# long enough to be a rate, short enough that a barn dropping its Saturday sale
+# shows up rather than being averaged away.
+SATURDAY_BASE_RATE_N = 10
+
+
+def merged_span_dates(index_date_iso):
+    """
+    The calendar days CME merges into one index date, oldest first.
+
+    Monday absorbs the preceding Saturday and Sunday; every other index date
+    stands alone. Mirrors shift_weekend_to_monday() in update_index.py -- if
+    that ever changes, this must change with it.
+    """
+    d = date.fromisoformat(index_date_iso)
+    if d.weekday() == 0:                       # Monday
+        return [d - timedelta(days=2), d - timedelta(days=1), d]
+    return [d]
+
+
+def next_index_date(index_date_iso):
+    """
+    The next date that gets an index of its own. Saturday and Sunday do not --
+    they merge into Monday -- so Friday's successor is Monday, not Saturday.
+    """
+    d = date.fromisoformat(index_date_iso) + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d.isoformat()
+
+
+def saturday_base_rate(conn, before_iso, n=SATURDAY_BASE_RATE_N):
+    """
+    How often the Saturdays BEFORE `before_iso` produced any qualifying sale,
+    so a caller can say whether an empty one is unusual. A zero is only legible
+    next to how often zero happens.
+
+    Strictly before, never including the date asked about: the Saturday being
+    described must not vote on whether it is normal, and on a Monday morning its
+    own sales may still be arriving, which would bias the rate toward "empty".
+
+    Returns None when mars_sales does not reach back far enough to sample at
+    least half of n -- a base rate off three Saturdays is worse than none.
+    """
+    d = date.fromisoformat(before_iso)
+    d -= timedelta(days=(d.weekday() - 5) % 7 or 7)   # the Saturday before it
+
+    try:
+        earliest = db.iso(conn.cursor().execute(
+            "SELECT MIN(raw_date) FROM mars_sales").fetchone()[0])
+    except Exception:
+        return None
+    if not earliest:
+        return None
+    earliest = date.fromisoformat(str(earliest)[:10])
+
+    sats = []
+    while len(sats) < n and d >= earliest:
+        sats.append(d)
+        d -= timedelta(days=7)
+    if len(sats) < max(4, n // 2):
+        return None
+
+    rows = conn.cursor().execute(
+        f"SELECT raw_date, location, head_count FROM mars_sales "
+        f"WHERE raw_date BETWEEN {db.placeholders(1)} AND {db.placeholders(1)}",
+        (sats[-1].isoformat(), sats[0].isoformat()),
+    ).fetchall()
+    per = {}
+    for raw, loc, head in rows:
+        e = per.setdefault(str(db.iso(raw)), {"head": 0, "barns": set()})
+        e["head"] += int(head or 0)
+        e["barns"].add((loc or "").strip().lower())
+
+    sold = [per[s.isoformat()] for s in sats
+            if per.get(s.isoformat(), {}).get("head")]
+    return {
+        "sampled": len(sats),
+        "with_sales": len(sold),
+        "empty": len(sats) - len(sold),
+        "earliest": sats[-1].isoformat(),
+        "latest": sats[0].isoformat(),
+        "max_barns": max((len(s["barns"]) for s in sold), default=0),
+        "head": sum(s["head"] for s in sold),
+    }
+
+
+def span_contributions(conn, index_date_iso, as_of=None,
+                       saturdays=SATURDAY_BASE_RATE_N):
+    """
+    What each calendar day folded into `index_date_iso` contributed, INCLUDING
+    the days that contributed nothing. Omitting those is the whole bug: a
+    weekend with no sales and a weekend whose sales have not arrived both
+    render as nothing at all, and the reader cannot tell which they are looking
+    at.
+
+    Buckets the same way recompute_fci_daily() does (shifted_bucket_date over
+    report_date) and then splits that bucket by raw_date, the true sale day, so
+    the per-day head sums exactly to the index date's own same_day_head --
+    checked 2026-09-21: report_date 2026-09-14 is raw 09-12 (480 head, 1 barn)
+    plus raw 09-14 (5,321 head, 11 barns), and fci_daily.same_day_head for
+    09-14 is 5,801.
+
+    Each day carries a status, and the distinction between two of them is the
+    point of the function:
+
+        reported  settled, and sales are on record
+        none      settled, and none are on record -- NOT "no sale happened"
+        pending   too early for a report to exist yet
+        partial   too early to be complete, but something has already landed
+
+    Returns {index_date, as_of, merged, days[], outside_span[],
+    saturday_base_rate}.
+    """
+    index_date = date.fromisoformat(index_date_iso)
+    if as_of is None:
+        as_of = date.today()
+    elif isinstance(as_of, str):
+        as_of = date.fromisoformat(as_of[:10])
+
+    span = merged_span_dates(index_date_iso)
+
+    rows = conn.cursor().execute(
+        f"SELECT report_date, raw_date, location, head_count FROM mars_sales "
+        f"WHERE report_date BETWEEN {db.placeholders(1)} AND {db.placeholders(1)}",
+        # Reach back a full week: a weekday snap can carry a report up to six
+        # days forward (Thu -> the next Wed), and a row that snapped INTO this
+        # index date from outside a narrow fetch would silently go unstated,
+        # which is the failure this function exists to prevent.
+        ((index_date - timedelta(days=7)).isoformat(),
+         (index_date + timedelta(days=2)).isoformat()),
+    ).fetchall()
+
+    by_raw = {}
+    for rd, raw, loc, head in rows:
+        if shifted_bucket_date(loc, str(db.iso(rd))) != index_date_iso:
+            continue
+        c = by_raw.setdefault(str(db.iso(raw)),
+                              {"head": 0, "rows": 0, "barns": set()})
+        c["head"] += int(head or 0)
+        c["rows"] += 1
+        c["barns"].add((loc or "").strip().lower())
+
+    days = []
+    for d in span:
+        c = by_raw.pop(d.isoformat(), None)
+        head = c["head"] if c else 0
+        # A sale is reported to AMS the following day at the earliest, so a day
+        # not yet followed by a reporting day cannot be called empty -- only
+        # unreported so far.
+        settled = d < as_of
+        days.append({
+            "date": d.isoformat(),
+            "label": d.strftime("%a %m/%d"),
+            "weekday": d.strftime("%A"),
+            "is_weekend": d.weekday() >= 5,
+            "head": head,
+            "barns": len(c["barns"]) if c else 0,
+            "rows": c["rows"] if c else 0,
+            "status": ("reported" if head else "none") if settled
+                      else ("partial" if head else "pending"),
+        })
+
+    # Anything still bucketed here from OUTSIDE the calendar span -- a Clovis
+    # Wednesday shifted to Thursday, an El Reno Tuesday snapped to Wednesday.
+    # Surfaced rather than dropped: a function whose purpose is that nothing
+    # goes unstated must not quietly swallow the rows it did not expect.
+    outside = sorted(
+        ({"date": k, "head": v["head"], "barns": len(v["barns"]),
+          "rows": v["rows"]} for k, v in by_raw.items()),
+        key=lambda r: r["date"])
+
+    return {
+        "index_date": index_date_iso,
+        "as_of": as_of.isoformat(),
+        "merged": len(span) > 1,
+        "days": days,
+        "outside_span": outside,
+        "saturday_base_rate": saturday_base_rate(conn, span[0].isoformat(),
+                                                 saturdays),
+    }
+
+
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
@@ -174,4 +395,22 @@ if __name__ == "__main__":
         print(f"blended ${m['actual']:.4f} vs ${m['counterfactual']:.4f} "
               f"at the baseline mix")
         print(f"MIX EFFECT ${m['effect']:+.4f}/cwt")
+
+    # The merged day, stated day by day -- including the days that gave
+    # nothing, which is the whole point. Run for the next index date if one is
+    # due but not yet printed, otherwise for the newest printed one.
+    pending = next_index_date(latest)
+    target = pending if date.fromisoformat(pending) <= date.today() else latest
+    sc = span_contributions(conn, target)
+    print(f"\nmerged span for {target} (as of {sc['as_of']}):")
+    for day in sc["days"]:
+        print(f"  {day['label']}  {day['status']:<9}{day['head']:>7,} head  "
+              f"{day['barns']} barn(s)")
+    for extra in sc["outside_span"]:
+        print(f"  + bucketed in from {extra['date']}: {extra['head']:,} head")
+    br = sc["saturday_base_rate"]
+    if br:
+        print(f"  Saturday base rate: {br['with_sales']} of the last "
+              f"{br['sampled']} Saturdays sold ({br['earliest']}..{br['latest']}), "
+              f"at most {br['max_barns']} barn(s)")
     conn.close()

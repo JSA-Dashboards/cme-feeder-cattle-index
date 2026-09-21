@@ -32,7 +32,8 @@ from index_dates import headline_index_date
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
 from composition import (BRACKETS as COMP_BRACKETS, grade_totals as comp_grade_totals,
-                         mix_effect, window_composition)
+                         mix_effect, next_index_date, span_contributions,
+                         window_composition)
 from volumes import (compare as volume_compare, history as volume_history,
                      ytd as volume_ytd)
 
@@ -675,6 +676,28 @@ def _load_composition(index_date_iso):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def _load_span(index_date_iso, as_of_iso):
+    """
+    What each calendar day merged into this index date contributed, zeros
+    included. See composition.py -- an absent weekend and a weekend whose
+    reports have not landed look identical on this page otherwise.
+
+    as_of_iso is an argument rather than read inside so it lands in the cache
+    key: the "not yet published" wording depends on today's date, and a cached
+    copy carried across midnight would keep calling a settled day pending.
+    """
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return None
+    conn = db.get_conn()
+    try:
+        return span_contributions(conn, index_date_iso, as_of=as_of_iso)
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def _load_volumes(index_date_iso=None):
     """
     Index volume: the window comparison, the cumulative comparison, and the
@@ -1105,7 +1128,7 @@ with tab_index:
     current_label = (
         f"Current Index ({_mdy(_cur_row['date'])})"
         if _cur_row["source"] in ("workbook", "cme_official")
-        else f"FCI Estimate {_mdy(_cur_row['date'])}"
+        else f"JSA FCI Estimate {_mdy(_cur_row['date'])}"
     )
 
     week_ago = _round2(value_on_or_before(fci_df.iloc[:head_pos], head_date - timedelta(days=7)))
@@ -1345,6 +1368,92 @@ with tab_index:
         "Monday's row (CME's own convention, confirmed against their published files) rather than shown "
         "separately. A blank row means that location's next scheduled sale hasn't landed yet."
     )
+
+    # ── What the merged day is made of ────────────────────────────────────────
+    # The table above relabels Monday's row to the span it covers, which is
+    # right, but it still cannot show a weekend that contributed NOTHING --
+    # nothing is exactly what a not-yet-fetched weekend looks like too. On
+    # Monday 2026-09-21 the newest date here was Friday 09-18, the 07:43 run
+    # had exited 0 on 475 rows across 84 locations, and AMS had simply
+    # published nothing for the weekend yet. The page could not tell the reader
+    # which of those it was looking at. So say each day out loud, zeros
+    # included, and keep "none reported" apart from "not yet published".
+    #
+    # Describe the NEXT index date when one is due but unprinted -- that is the
+    # day the reader is missing on a Monday morning -- and otherwise the newest
+    # printed one.
+    _head_iso = pd.Timestamp(head_date).strftime("%Y-%m-%d")
+    _today_iso = datetime.now().strftime("%Y-%m-%d")
+    _next_iso = next_index_date(_head_iso)
+    _span_info = _load_span(_next_iso if _next_iso <= _today_iso else _head_iso,
+                            _today_iso)
+
+    if _span_info and (_span_info["merged"] or any(
+            d["status"] in ("pending", "partial") for d in _span_info["days"])):
+        _sdays = _span_info["days"]
+        _unsettled = [d for d in _sdays if d["status"] in ("pending", "partial")]
+
+        _bits = []
+        for _d in _sdays:
+            if _d["status"] == "pending":
+                _bits.append(f'<b>{_d["label"]}</b> not yet published')
+            elif _d["status"] == "partial":
+                _bits.append(f'<b>{_d["label"]}</b> {_d["head"]:,} head so far')
+            elif _d["status"] == "none":
+                _bits.append(f'<b>{_d["label"]}</b> none reported')
+            else:
+                _bits.append(f'<b>{_d["label"]}</b> {_d["head"]:,} head from '
+                             f'{_d["barns"]} barn{"" if _d["barns"] == 1 else "s"}')
+        for _o in _span_info["outside_span"]:
+            _bits.append(f'<b>{pd.Timestamp(_o["date"]).strftime("%a %m/%d")}</b> '
+                         f'{_o["head"]:,} head, bucketed into this date')
+
+        _lead = (f'<b>{_sdays[-1]["label"]} is still filling.</b> ' if _unsettled
+                 else f'<b>{_sdays[-1]["label"]} is complete as far as AMS has '
+                      f'reported.</b> ')
+        _lead += (f'Saturday and Sunday count as Monday (CME Rule 10203.A.1), so '
+                  f'it merges {len(_sdays)} calendar days: ' if _span_info["merged"]
+                  else 'It covers one calendar day: ')
+
+        # A zero only means something next to how often zero happens. Without
+        # this the normal empty Saturday reads as an outage every week, and a
+        # weekly false alarm is a warning nobody reads.
+        _tail = ""
+        _sat = next((d for d in _sdays if d["weekday"] == "Saturday"), None)
+        _br = _span_info["saturday_base_rate"]
+        if _sat and _sat["status"] == "none" and _br:
+            _rng = (f'{pd.Timestamp(_br["earliest"]).strftime("%m/%d")}–'
+                    f'{pd.Timestamp(_br["latest"]).strftime("%m/%d")}')
+            if _br["with_sales"] == 0:
+                _tail = (f' No Saturday in the previous {_br["sampled"]} ({_rng}) '
+                         f'reported a sale either, so an empty one is routine.')
+            elif _br["empty"] * 2 >= _br["sampled"]:
+                _tail = (f' An empty Saturday is the usual case rather than a gap: '
+                         f'{_br["empty"]} of the previous {_br["sampled"]} Saturdays '
+                         f'({_rng}) reported nothing either, and the '
+                         f'{_br["with_sales"]} that sold came from '
+                         + ('a single barn each.' if _br["max_barns"] <= 1 else
+                            f'at most {_br["max_barns"]} barns.'))
+            else:
+                _tail = (f' Saturdays have been busier than this lately — '
+                         f'{_br["with_sales"]} of the previous {_br["sampled"]} '
+                         f'({_rng}) reported a sale — so it is worth a second look '
+                         f'once the morning\'s reports land.')
+        if _unsettled:
+            _tail += (' A sale reaches AMS the following day at the earliest '
+                      '(85% of a day\'s head by 07:30 the next morning, 95.8% by '
+                      'noon), so the current day\'s own sales have not had time to '
+                      'appear.')
+        if any(d["status"] == "none" for d in _sdays):
+            _tail += (' “None reported” means nothing has reached AMS — not that no '
+                      'sale took place; late reports are added by revision.')
+
+        st.markdown(
+            f'<div style="border-left:3px solid {BORDER};padding:4px 0 4px 12px;'
+            f'margin:-6px 0 4px 2px;color:{MUTED};font-size:0.78rem;'
+            f'line-height:1.7;">{_lead}{" · ".join(_bits)}.{_tail}</div>',
+            unsafe_allow_html=True,
+        )
 
 
     # ── Index Composition ───────────────────────────────────────────────────────────────────────
@@ -1834,7 +1943,7 @@ with tab_index:
         # number, not JSA's reconstruction.
         detail_rows = fci_df[fci_df["date"] == detail_date]
         detail_is_published = not detail_rows.empty and detail_rows.iloc[0]["source"] in ("workbook", "cme_official")
-        fci_label = "Published Index" if detail_is_published else "FCI Estimate"
+        fci_label = "Published Index" if detail_is_published else "JSA FCI Estimate"
         sd_price_d = detail_rows.iloc[0]["same_day_price"] if not detail_rows.empty else None
         sd_head_d = detail_rows.iloc[0]["same_day_head"] if not detail_rows.empty else None
         sd_weight_d = detail_rows.iloc[0]["same_day_avg_weight"] if not detail_rows.empty else None

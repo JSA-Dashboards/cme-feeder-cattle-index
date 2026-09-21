@@ -52,8 +52,13 @@ def main():
 
     t0 = time.time()
     results = {}
+    failed = {}
     for i, d in enumerate(dates):
-        results[d] = cme_ftp.fetch_daily_file(d)
+        try:
+            results[d] = cme_ftp.fetch_daily_file(d)
+        except cme_ftp.FetchFailed as e:
+            results[d] = None
+            failed[d] = str(e)
         time.sleep(REQUEST_DELAY_S)
         if (i + 1) % 100 == 0:
             print(f"  ...fetched {i+1}/{len(dates)} ({time.time()-t0:.0f}s elapsed)")
@@ -65,18 +70,25 @@ def main():
     if retry_dates:
         print(f"  retry pass: {len(retry_dates)} dates came back empty, re-fetching once more...")
         for d in retry_dates:
-            results[d] = cme_ftp.fetch_daily_file(d)
+            try:
+                results[d] = cme_ftp.fetch_daily_file(d)
+                failed.pop(d, None)
+            except cme_ftp.FetchFailed as e:
+                results[d] = None
+                failed[d] = str(e)
             time.sleep(REQUEST_DELAY_S)
 
-    ingested = missing = 0
+    ingested = absent = 0
+    unreadable = []
     for d in dates:
         text = results.get(d)
         if text is None:
-            missing += 1
-            continue
+            if d not in failed:
+                absent += 1        # server says the path is not there
+            continue               # fetch failures counted separately
         parsed = cme_ftp.parse_daily_file(text, d)
         if parsed is None or parsed["reported_index"] is None:
-            missing += 1
+            unreadable.append(d)   # we HAVE the file and cannot read it
             continue
         daily = parsed["daily"] or {}
         seven = parsed["seven_day"] or {}
@@ -90,6 +102,16 @@ def main():
             ["report_date"],
         )
         for loc in parsed["locations"]:
+            for b in loc.get("brackets") or []:
+                db.merge_replace(
+                    conn, "cme_ftp_brackets",
+                    ["report_date", "raw_date", "location", "state", "grade",
+                     "weight_low", "head_count", "avg_weight", "avg_price"],
+                    (parsed["date"], loc["raw_date"], loc["location"], loc["state"],
+                     b["grade"], b["weight_low"], b["head"], b["avg_weight"],
+                     b["avg_price"]),
+                    ["report_date", "location", "grade", "weight_low"],
+                )
             db.merge_replace(
                 conn, "cme_ftp_locations",
                 ["report_date", "location", "state", "head_count", "avg_weight", "avg_price"],
@@ -109,9 +131,37 @@ def main():
     conn.close()
 
     elapsed = time.time() - t0
-    print(f"\nDone in {elapsed:.0f}s. Ingested {ingested} days, {missing} had no file (weekend/holiday/unpublished).")
+    print(f"\nDone in {elapsed:.0f}s. Ingested {ingested} days; "
+          f"{absent} had no file (weekend/holiday/not yet published).")
+    # These two used to be folded into the "no file" count, which turned a
+    # transient block or a parser gap into an apparent statement about what
+    # CME had published. Both are OUR problem, and both are now loud.
+    if failed:
+        print(f"  !! {len(failed)} date(s) FAILED to fetch -- NOT the same "
+              f"as unpublished:")
+        for d in sorted(failed)[:10]:
+            print(f"       {d}: {failed[d]}")
+    if unreadable:
+        print(f"  !! {len(unreadable)} file(s) fetched but UNREADABLE -- we "
+              f"hold the data and cannot parse it:")
+        for d in sorted(unreadable)[:10]:
+            print(f"       {d}")
     print(f"cme_ftp_daily now has {n_rows} total rows, spanning {first_last[0]} to {first_last[1]}.")
+
+    # EXIT NON-ZERO WHEN WE HOLD FILES WE CANNOT READ. This printed a warning
+    # and exited 0 until 2026-09-17, which is how a CME layout change on 09-14
+    # went unnoticed for three days: the daily job logged cme_exit=0, the
+    # healthcheck stayed green, the dashboard kept serving a headline frozen at
+    # 09/14, and the only sign was a line in a log nobody greps.
+    #
+    # "Fetched but unparseable" is a genuine error -- distinct from "no file",
+    # which is a normal weekend or a print that has not landed yet. The daily
+    # job treats a non-zero CME exit as non-fatal and logs a WARN, which is the
+    # right severity: the index estimate does not depend on this, but somebody
+    # needs to know the published series has stopped moving.
+    return 1 if unreadable else 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

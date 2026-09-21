@@ -25,19 +25,91 @@ def use_snowflake() -> bool:
     return os.getenv("USE_SNOWFLAKE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+DEFAULT_KEY_FILE = "~/.snowflake/keys/snowflake_rsa_key.p8"
+
+
+def _key_pair_kwargs():
+    """
+    Connector kwargs for key-pair auth, or {} if no key material is configured.
+
+    This account has NO SAML IdP (an authenticator request returns 390190), so
+    authenticator="externalbrowser" cannot work and key-pair is the only
+    passwordless option. Two key sources are supported because the two runtime
+    environments differ:
+
+      1. A key FILE -- SNOWFLAKE_PRIVATE_KEY_FILE, else DEFAULT_KEY_FILE. Used
+         for local runs and the scheduled job. Passed as private_key_file +
+         private_key_file_pwd, both str: the connector does NOT read
+         SNOWFLAKE_PRIVATE_KEY_PASSPHRASE itself (that name is honoured only by
+         the `snow` CLI), so omitting it raises "Password was not given but
+         private key is encrypted".
+
+      2. PEM TEXT in SNOWFLAKE_PRIVATE_KEY -- for Streamlit Community Cloud,
+         whose secrets are TOML text with no filesystem to hold a .p8. The
+         connector's inline `private_key` wants DER, not PEM, so the PEM is
+         decrypted and re-serialised to unencrypted PKCS8 DER here rather than
+         handed over raw.
+
+    The file path wins when both are present: it is the better-tested path.
+    """
+    passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+
+    key_file = os.path.expanduser(
+        os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE", DEFAULT_KEY_FILE)
+    )
+    if os.path.exists(key_file):
+        kw = {"private_key_file": key_file, "authenticator": "SNOWFLAKE_JWT"}
+        if passphrase:
+            kw["private_key_file_pwd"] = passphrase
+        return kw
+
+    pem = os.environ.get("SNOWFLAKE_PRIVATE_KEY")
+    if pem:
+        from cryptography.hazmat.primitives import serialization
+
+        loaded = serialization.load_pem_private_key(
+            pem.encode(),
+            password=passphrase.encode() if passphrase else None,
+        )
+        der = loaded.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        return {"private_key": der, "authenticator": "SNOWFLAKE_JWT"}
+
+    return {}
+
+
 def get_conn():
     if use_snowflake():
         import snowflake.connector as sc
-        return sc.connect(
+
+        kwargs = dict(
             account=os.environ["SNOWFLAKE_ACCOUNT"],
             user=os.environ["SNOWFLAKE_USER"],
-            password=os.environ["SNOWFLAKE_PASSWORD"],
             role=os.environ.get("SNOWFLAKE_ROLE"),
             warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE"),
             database=os.environ.get("SNOWFLAKE_DATABASE", "JSA"),
             schema=os.environ.get("SNOWFLAKE_SCHEMA", "CME_FEEDER_CATTLE"),
             login_timeout=30,
         )
+        auth = _key_pair_kwargs()
+        if auth:
+            kwargs.update(auth)
+        elif os.environ.get("SNOWFLAKE_PASSWORD"):
+            # Retained so an existing password-configured deployment keeps
+            # working; key-pair is preferred whenever key material is present.
+            kwargs["password"] = os.environ["SNOWFLAKE_PASSWORD"]
+        else:
+            raise RuntimeError(
+                "No Snowflake credentials. Provide a key-pair via "
+                "SNOWFLAKE_PRIVATE_KEY_FILE (default " + DEFAULT_KEY_FILE + ") "
+                "or SNOWFLAKE_PRIVATE_KEY (PEM text), plus "
+                "SNOWFLAKE_PRIVATE_KEY_PASSPHRASE if the key is encrypted. "
+                "SNOWFLAKE_PASSWORD is accepted as a fallback."
+            )
+        return sc.connect(**kwargs)
     return sqlite3.connect(DB_PATH)
 
 

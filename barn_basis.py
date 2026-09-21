@@ -90,6 +90,15 @@ MODE_FCI = "vs FCI"
 # price minus the bracket's average price -- the two differ by exactly the
 # Timing column, and the old label promised the second while the code did the
 # first. The maths is right and stays; the words now match it. See the caption.
+#
+# The rename half-landed the first time: this constant changed and five strings
+# in render() did not, so the toggle read "vs bracket basis" while the caption
+# defining it, and the chart axis, still read "vs bracket average" -- the page
+# told the reader it was doing the thing this comment says it is not. Every
+# caption that NAMES the toggle now interpolates these constants rather than
+# repeating them, so the control and the prose describing it cannot drift again.
+# The chart axis and the table columns are shorter on purpose and do not use
+# them; they must merely never say "average".
 MODE_BRACKET = "vs bracket basis"
 
 # The standalone page's colours. The portal hands in its own; see the docstring.
@@ -344,7 +353,7 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
     # in the chart and table. Both orderings are deliberate.
     focus = next((r for r in qual if _label(r) == barn), None)
     metric = "basis" if mode == MODE_FCI else "rel"
-    metric_label = "basis vs FCI" if mode == MODE_FCI else "basis vs bracket average"
+    metric_label = "basis vs FCI" if mode == MODE_FCI else "basis vs bracket"
     metric_title = "Basis vs FCI" if mode == MODE_FCI else "Basis vs bracket"
     subject = focus or bracket
 
@@ -392,36 +401,36 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
     in_band = 700 <= wt <= 850
     if mode == MODE_FCI and in_band:
         st.caption(
-            f"**vs FCI** is each barn's price minus the CME Feeder Cattle Index "
+            f"**{MODE_FCI}** is each barn's price minus the CME Feeder Cattle Index "
             f"on the days that barn actually sold. {wt}-{wt + 49} lb sits inside "
             f"the index's own 700-899 lb band, so this is close to a straight "
             f"barn premium: the whole bracket averages only "
             f"**{_md(_signed(bracket['basis']))}/cwt** against the index. Take "
             f"the weight class lighter and that figure climbs fast — past "
             f"\\$100/cwt under 500 lb — because it is then measuring the "
-            f"**weight ramp** rather than the barn, and **vs bracket average** "
+            f"**weight ramp** rather than the barn, and **{MODE_BRACKET}** "
             f"is what takes the ramp back out."
         )
     elif mode == MODE_FCI:
         st.caption(
-            f"**vs FCI** is each barn's price minus the CME Feeder Cattle Index "
+            f"**{MODE_FCI}** is each barn's price minus the CME Feeder Cattle Index "
             f"on the days that barn actually sold. The index is 700-899 lb "
             f"steers and this bracket is not, so the number is mostly the "
             f"**weight ramp**, not the barn: the whole bracket averages "
             f"**{_md(_signed(bracket['basis']))}/cwt** against the index and "
             f"every barn in it inherits that. Barn-to-barn spread is worth only "
             f"\\$20-40, so here it is invisible against the ramp — switch to "
-            f"**vs bracket average** to see the barn on its own."
+            f"**{MODE_BRACKET}** to see the barn on its own."
         )
     else:
         st.caption(
-            f"**vs bracket average** is each barn's basis minus the whole "
+            f"**{MODE_BRACKET}** is each barn's basis minus the whole "
             f"{wt}-{wt + 49} lb bracket's basis, so the weight ramp "
             f"(**{_md(_signed(bracket['basis']))}/cwt** against the index) "
             f"cancels and what is left is the barn. Head-weighted across every "
             f"barn in the window it sums to zero by construction, so the number "
             f"reads straight: positive is better than the rest of this bracket, "
-            f"and it is comparable across brackets in a way **vs FCI** is not."
+            f"and it is comparable across brackets in a way **{MODE_FCI}** is not."
         )
 
     # AXIS rebuilt from the passed palette because app.py's is a local inside
@@ -485,7 +494,7 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
         f"need at least **{MIN_HEAD} head** in the {WINDOW_LABEL[days]} to be "
         f"listed — a pen runs 30 to 80, so that is two pens and usually several "
         f"sale days rather than one draft of cattle. The bracket basis behind "
-        f"**vs bracket basis** is taken over all {bracket['barns']} barns "
+        f"**{MODE_BRACKET}** is taken over all {bracket['barns']} barns "
         f"including the thin ones, so the listed rows do not sum to exactly "
         f"zero. **Prints** is how many separate lots make up each row: 900 head "
         f"in two lots and 900 in twenty are different kinds of evidence, which "

@@ -293,7 +293,7 @@ def span_contributions(conn, index_date_iso, as_of=None,
         pending   too early for a report to exist yet
         partial   too early to be complete, but something has already landed
 
-    Returns {index_date, as_of, merged, days[], outside_span[],
+    Returns {index_date, as_of, merged, days[], outside_span[], total_head,
     saturday_base_rate}.
     """
     index_date = date.fromisoformat(index_date_iso)
@@ -360,6 +360,15 @@ def span_contributions(conn, index_date_iso, as_of=None,
         "merged": len(span) > 1,
         "days": days,
         "outside_span": outside,
+        # Everything on record for this bucket, span days and bucketed-in rows
+        # together. Computed here rather than in each dashboard because it is
+        # the value that decides whether the page reports a normal day or an
+        # outage, and the two app.py copies must not be able to disagree about
+        # it. Zero means nothing has been reported for ANY constituent day --
+        # which is the state the first version of the weekend line described as
+        # "complete as far as AMS has reported".
+        "total_head": (sum(d["head"] for d in days)
+                       + sum(o["head"] for o in outside)),
         "saturday_base_rate": saturday_base_rate(conn, span[0].isoformat(),
                                                  saturdays),
     }
@@ -408,8 +417,12 @@ if __name__ == "__main__":
               f"{day['barns']} barn(s)")
     for extra in sc["outside_span"]:
         print(f"  + bucketed in from {extra['date']}: {extra['head']:,} head")
+    # Say the absence out loud here too. A CLI that prints three "none" lines
+    # and then a cheerful base rate has the same failure mode as the page did.
+    if not sc["total_head"]:
+        print(f"  *** NOTHING ON RECORD for any day of {target} ***")
     br = sc["saturday_base_rate"]
-    if br:
+    if br and sc["total_head"]:
         print(f"  Saturday base rate: {br['with_sales']} of the last "
               f"{br['sampled']} Saturdays sold ({br['earliest']}..{br['latest']}), "
               f"at most {br['max_barns']} barn(s)")

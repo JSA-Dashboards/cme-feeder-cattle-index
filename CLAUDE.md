@@ -18,7 +18,7 @@ Agreement is to a fraction of a cent from 2026-08-28 on (when the direct-trade
 component was added). If a change moves any of those, it is wrong — check before
 committing, not after.
 
-    .venv/Scripts/python.exe -m pytest tests/ -q      # 41 tests, all must pass
+    .venv/Scripts/python.exe -m pytest tests/ -q      # all must pass
 
 ## The index, per CME Rule 10203 (verified against the rulebook, not inferred)
 

@@ -1032,7 +1032,7 @@ _render_freshness()
 # tests/test_index_isolation.py in the cme-feeder-cattle-index repo enforces
 # all of that structurally rather than by convention.
 tab_index, tab_cash, tab_basis = st.tabs(
-    ["Index", "Cash Feeder Prices", "Barn Basis"])
+    ["Index", "Cash Feeder Prices", "Sale Barn Basis"])
 
 with tab_index:
     # ── KPI Tiles ─────────────────────────────────────────────────────────────────
@@ -1378,80 +1378,209 @@ with tab_index:
     # published nothing for the weekend yet. The page could not tell the reader
     # which of those it was looking at. So say each day out loud, zeros
     # included, and keep "none reported" apart from "not yet published".
-    #
-    # Describe the NEXT index date when one is due but unprinted -- that is the
-    # day the reader is missing on a Monday morning -- and otherwise the newest
-    # printed one.
-    _head_iso = pd.Timestamp(head_date).strftime("%Y-%m-%d")
     _today_iso = datetime.now().strftime("%Y-%m-%d")
-    _next_iso = next_index_date(_head_iso)
-    _span_info = _load_span(_next_iso if _next_iso <= _today_iso else _head_iso,
-                            _today_iso)
 
-    if _span_info and (_span_info["merged"] or any(
-            d["status"] in ("pending", "partial") for d in _span_info["days"])):
-        _sdays = _span_info["days"]
-        _unsettled = [d for d in _sdays if d["status"] in ("pending", "partial")]
+    # Anchor on the newest index date we hold SALES for, not on head_date.
+    # head_date is the headline date and runs on CME's publication clock
+    # (headline_index_date), so our own estimates routinely sit past it -- that
+    # is exactly what the Pending CME Prints section below lists. Measuring
+    # "due but unprinted" from head_date would report every one of those
+    # forward estimates as missing, most days of the week. same_day_head rather
+    # than the row's existence, because fci_daily carries Friday's value across
+    # the weekend so the series has no holes. to_numeric because the column is
+    # assigned pd.NA in two of the three loaders and so arrives as object
+    # dtype, where a bare comparison is not dependable.
+    _have = fci_df.loc[
+        pd.to_numeric(fci_df["same_day_head"], errors="coerce").fillna(0) > 0,
+        "date"]
+    _have_iso = (_have.max().strftime("%Y-%m-%d") if len(_have)
+                 else pd.Timestamp(head_date).strftime("%Y-%m-%d"))
 
-        _bits = []
-        for _d in _sdays:
-            if _d["status"] == "pending":
-                _bits.append(f'<b>{_d["label"]}</b> not yet published')
-            elif _d["status"] == "partial":
-                _bits.append(f'<b>{_d["label"]}</b> {_d["head"]:,} head so far')
-            elif _d["status"] == "none":
-                _bits.append(f'<b>{_d["label"]}</b> none reported')
+    # EVERY index date that is due but has nothing, oldest first. The first cut
+    # of this described only next_index_date(head_date), so a three-day stall
+    # said nothing whatever about the second and third missing days.
+    _due, _cur_iso = [], next_index_date(_have_iso)
+    while _cur_iso <= _today_iso and len(_due) < 15:
+        _due.append(_cur_iso)
+        _cur_iso = next_index_date(_cur_iso)
+
+    # Describe the OLDEST unprinted date, not the newest. The newest may
+    # legitimately still be filling, so describing it reports "not yet
+    # published" -- reassuring, and wrong, when the index has been stuck for
+    # days. The oldest is already settled, so its emptiness is a fact rather
+    # than a timing artefact, and that is the part worth putting on the page.
+    _desc_iso = _due[0] if _due else _have_iso
+    _span_info = _load_span(_desc_iso, _today_iso)
+
+    _sdays = _span_info["days"] if _span_info else []
+    _outside = _span_info["outside_span"] if _span_info else []
+    _unsettled = [d for d in _sdays if d["status"] in ("pending", "partial")]
+    # Head on record for the whole bucket -- the span days AND anything
+    # bucketed in from outside them. The lead is chosen off THIS, not off
+    # settled-ness: a date holding nothing at all used to read "complete as far
+    # as AMS has reported", which is the reassuring answer during an outage.
+    _span_head = _span_info["total_head"] if _span_info else 0
+    # Business days elapsed since the date being described. An empty span on
+    # the day itself is merely early; an empty span two business days on is a
+    # gap in the data.
+    _age = len(pd.bdate_range(pd.Timestamp(_desc_iso) + pd.Timedelta(days=1),
+                              pd.Timestamp(_today_iso)))
+    _words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+              7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+    # Render whenever the described date is UNPRINTED or holds nothing, not
+    # only when it merges a weekend or has a day still filling. The first guard
+    # was merged-or-unsettled, so the moment a stalled date slipped into the
+    # past and was not a Monday the whole note vanished -- the original defect,
+    # an absence and a pending fetch looking identical, recreated inside its
+    # own fix.
+    if _span_info and (_due or _span_info["merged"] or _unsettled
+                       or _span_head == 0):
+        _lbl = _sdays[-1]["label"]
+        _bits, _tail = [], ""
+
+        if _span_head == 0:
+            # Nothing on record anywhere in the bucket. A day list here would
+            # print "none reported" three times over; name the days in the lead
+            # instead and spend the room on how old the hole is.
+            _named = (_lbl if len(_sdays) == 1 else
+                      " or ".join([", ".join(d["label"] for d in _sdays[:-1]),
+                                   _lbl]))
+            _lead = (f'<b>{_lbl} has no sales on record at all.</b> AMS has '
+                     f'published nothing dated {_named}.')
+            if _age >= 2:
+                _lead += (f' Nothing has reached the index for '
+                          f'{_words.get(_age, _age)} business days — treat that '
+                          f'as a gap in the data rather than a quiet week, and '
+                          f'check that the 07:30 and 13:00 runs are landing.')
+            elif _age == 1:
+                _lead += (' A full reporting day has passed with nothing, which '
+                          'is worth a look: 85% of a sale day\'s head is normally '
+                          'fetchable by 07:30 the next morning.')
             else:
-                _bits.append(f'<b>{_d["label"]}</b> {_d["head"]:,} head from '
-                             f'{_d["barns"]} barn{"" if _d["barns"] == 1 else "s"}')
-        for _o in _span_info["outside_span"]:
-            _bits.append(f'<b>{pd.Timestamp(_o["date"]).strftime("%a %m/%d")}</b> '
-                         f'{_o["head"]:,} head, bucketed into this date')
+                _lead += (' Today\'s own sales have not had time to reach AMS '
+                          'yet, so this is expected to fill during the day.')
+            # No base-rate reassurance in this state. "An empty Saturday is the
+            # usual case" is true, and irrelevant, when the Sunday and Monday
+            # are empty too -- it would soften the one state that needs
+            # escalating.
+        else:
+            for _d in _sdays:
+                if _d["status"] == "pending":
+                    _bits.append(f'<b>{_d["label"]}</b> not yet published')
+                elif _d["status"] == "partial":
+                    _bits.append(f'<b>{_d["label"]}</b> {_d["head"]:,} head so far')
+                elif _d["status"] == "none":
+                    _bits.append(f'<b>{_d["label"]}</b> none reported')
+                else:
+                    _bits.append(f'<b>{_d["label"]}</b> {_d["head"]:,} head from '
+                                 f'{_d["barns"]} barn{"" if _d["barns"] == 1 else "s"}')
 
-        _lead = (f'<b>{_sdays[-1]["label"]} is still filling.</b> ' if _unsettled
-                 else f'<b>{_sdays[-1]["label"]} is complete as far as AMS has '
-                      f'reported.</b> ')
-        _lead += (f'Saturday and Sunday count as Monday (CME Rule 10203.A.1), so '
-                  f'it merges {len(_sdays)} calendar days: ' if _span_info["merged"]
-                  else 'It covers one calendar day: ')
-
-        # A zero only means something next to how often zero happens. Without
-        # this the normal empty Saturday reads as an outage every week, and a
-        # weekly false alarm is a warning nobody reads.
-        _tail = ""
-        _sat = next((d for d in _sdays if d["weekday"] == "Saturday"), None)
-        _br = _span_info["saturday_base_rate"]
-        if _sat and _sat["status"] == "none" and _br:
-            _rng = (f'{pd.Timestamp(_br["earliest"]).strftime("%m/%d")}–'
-                    f'{pd.Timestamp(_br["latest"]).strftime("%m/%d")}')
-            if _br["with_sales"] == 0:
-                _tail = (f' No Saturday in the previous {_br["sampled"]} ({_rng}) '
-                         f'reported a sale either, so an empty one is routine.')
-            elif _br["empty"] * 2 >= _br["sampled"]:
-                _tail = (f' An empty Saturday is the usual case rather than a gap: '
-                         f'{_br["empty"]} of the previous {_br["sampled"]} Saturdays '
-                         f'({_rng}) reported nothing either, and the '
-                         f'{_br["with_sales"]} that sold came from '
-                         + ('a single barn each.' if _br["max_barns"] <= 1 else
-                            f'at most {_br["max_barns"]} barns.'))
+            if _due and _age >= 1:
+                _lead = (f'<b>{_lbl} has not printed an index yet</b>, '
+                         f'{_words.get(_age, _age)} business day'
+                         f'{"" if _age == 1 else "s"} on. ')
+            elif _unsettled:
+                _lead = f'<b>{_lbl} is still filling.</b> '
             else:
-                _tail = (f' Saturdays have been busier than this lately — '
-                         f'{_br["with_sales"]} of the previous {_br["sampled"]} '
-                         f'({_rng}) reported a sale — so it is worth a second look '
-                         f'once the morning\'s reports land.')
-        if _unsettled:
-            _tail += (' A sale reaches AMS the following day at the earliest '
-                      '(85% of a day\'s head by 07:30 the next morning, 95.8% by '
-                      'noon), so the current day\'s own sales have not had time to '
-                      'appear.')
-        if any(d["status"] == "none" for d in _sdays):
-            _tail += (' “None reported” means nothing has reached AMS — not that no '
-                      'sale took place; late reports are added by revision.')
+                # Defensive, not live. Every path that reaches here today is
+                # either unprinted (above) or still unsettled (the date being
+                # described is never older than _have_iso, and _have_iso is
+                # settled only across a weekend, where nothing renders). It is
+                # kept because it is the correct sentence for a settled date
+                # that does have head, and an unforeseen calendar -- a holiday,
+                # a clock, a hand-edited fci_daily -- must not land on an
+                # unbound name. It must never be the ABSENCE wording: that is
+                # chosen above, off head, which is the whole of defect 1.
+                _lead = f'<b>{_lbl} is complete as far as AMS has reported.</b> '
+            # The count states the length of the CALENDAR SPAN, so only span
+            # days may appear in the list beside it -- see _extra below.
+            _lead += (f'Saturday and Sunday count as Monday (CME Rule 10203.A.1), '
+                      f'so it merges {len(_sdays)} calendar days: '
+                      if _span_info["merged"] else 'It covers one calendar day: ')
 
+            # A zero only means something next to how often zero happens.
+            # Without this the normal empty Saturday reads as an outage every
+            # week, and a weekly false alarm is a warning nobody reads.
+            _sat = next((d for d in _sdays if d["weekday"] == "Saturday"), None)
+            _br = _span_info["saturday_base_rate"]
+            if _sat and _sat["status"] == "none" and _br:
+                _rng = (f'{pd.Timestamp(_br["earliest"]).strftime("%m/%d")}–'
+                        f'{pd.Timestamp(_br["latest"]).strftime("%m/%d")}')
+                _each = ('a single barn each' if _br["max_barns"] <= 1
+                         else f'at most {_br["max_barns"]} barns')
+                _ever = ('one barn' if _br["max_barns"] <= 1
+                         else f'{_br["max_barns"]} barns')
+                if _br["with_sales"] == 0:
+                    _tail = (f' No Saturday in the previous {_br["sampled"]} '
+                             f'({_rng}) reported a sale either, so an empty one '
+                             f'is routine.')
+                elif _br["empty"] * 2 >= _br["sampled"]:
+                    _tail = (f' An empty Saturday is the usual case rather than '
+                             f'a gap: {_br["empty"]} of the previous '
+                             f'{_br["sampled"]} Saturdays ({_rng}) reported '
+                             f'nothing either, and the {_br["with_sales"]} that '
+                             f'sold came from {_each}.')
+                else:
+                    # There was a third branch here that fired whenever
+                    # Saturdays had sold more often than half the time, and it
+                    # cried wolf. Replayed over all of mars_sales it fired on 20
+                    # of the 60 empty Saturdays, 7.7 a year; in 2026 on 6 of 18
+                    # -- 02/09, 03/23, 04/06, 04/20, 04/27, 05/11 -- every one an
+                    # ordinary week in which Ericson, the only barn that ever
+                    # holds a Saturday sale, simply did not hold one. Both
+                    # suggested replacements were measured too: "the last four+
+                    # Saturdays all sold and this one did not" still fires on
+                    # 02/09, off a five-Saturday streak, and "the empty run is
+                    # longer than anything in the window" fires 3.4 times a year
+                    # clustered in the May-August trough it exists to tolerate.
+                    # One barn's sale calendar carries no data-integrity signal,
+                    # so state the rate and stop. The outage case -- nothing on
+                    # record at all -- is caught above, where it belongs.
+                    _tail = (f' Saturdays are irregular, and never more than '
+                             f'{_ever} when they do sell: {_br["with_sales"]} of '
+                             f'the previous {_br["sampled"]} ({_rng}) reported a '
+                             f'sale.')
+
+            if _unsettled:
+                _tail += (' A sale reaches AMS the following day at the earliest '
+                          '(85% of a day\'s head by 07:30 the next morning, 95.8% '
+                          'by noon), so the current day\'s own sales have not had '
+                          'time to appear.')
+            if any(d["status"] == "none" for d in _sdays):
+                _tail += (' “None reported” means nothing has reached AMS — not '
+                          'that no sale took place; late reports are added by '
+                          'revision.')
+
+        # Rows bucketed into this date from OUTSIDE its calendar span get a
+        # clause of their own rather than a place in the day list. They are not
+        # part of the Rule 10203.A.1 weekend merge -- they are Clovis and El
+        # Reno, whose sales CME books a day later -- and putting them in the
+        # list left the count contradicting the items printed beside it ("It
+        # covers one calendar day:" followed by two dated contributions) on 29
+        # of the weekday index dates between 2026-06-01 and 09-18.
+        _extra = ""
+        if _outside:
+            _ex = [f'<b>{pd.Timestamp(_o["date"]).strftime("%a %m/%d")}</b>’s '
+                   f'{_o["head"]:,} head' for _o in _outside]
+            _extra = (' Plus ' + (_ex[0] if len(_ex) == 1 else
+                                  ' and '.join([', '.join(_ex[:-1]), _ex[-1]]))
+                      + ', which CME buckets into this date.')
+
+        # A stall is more than one missing day, and naming only the oldest
+        # would understate it.
+        if len(_due) > 1:
+            _rest = [pd.Timestamp(x).strftime("%a %m/%d") for x in _due[1:]]
+            _tail += (' Also due and unprinted: '
+                      + (', '.join(_rest) if len(_rest) <= 4 else
+                         ', '.join(_rest[:4]) + f' and {len(_rest) - 4} more')
+                      + '.')
+
+        _list = (' · '.join(_bits) + '.') if _bits else ''
         st.markdown(
             f'<div style="border-left:3px solid {BORDER};padding:4px 0 4px 12px;'
             f'margin:-6px 0 4px 2px;color:{MUTED};font-size:0.78rem;'
-            f'line-height:1.7;">{_lead}{" · ".join(_bits)}.{_tail}</div>',
+            f'line-height:1.7;">{_lead}{_list}{_extra}{_tail}</div>',
             unsafe_allow_html=True,
         )
 
@@ -2318,7 +2447,7 @@ with tab_cash:
 
 
 with tab_basis:
-    st.markdown('<div class="sec-header">Barn Basis by Weight Bracket</div>',
+    st.markdown('<div class="sec-header">Sale Barn Basis by Weight Bracket</div>',
                 unsafe_allow_html=True)
     st.caption(
         "Basis one barn at a time, at a weight you choose. Average Basis by "

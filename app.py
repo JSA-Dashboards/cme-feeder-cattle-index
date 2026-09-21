@@ -1202,7 +1202,7 @@ with st.expander("📋  Raw Data Table"):
 _year = datetime.now().year
 st.markdown("<hr style='border-color:#e6eaee;margin-top:32px;margin-bottom:16px'>", unsafe_allow_html=True)
 st.markdown(
-    f'<div style="color:#9aa2ab;font-size:0.68rem;line-height:1.6;text-align:center;padding:0 24px 24px;">'
+    f'<div style="font-family:inherit;color:#9aa2ab;font-size:0.68rem;line-height:1.6;text-align:center;padding:0 24px 24px;">'
     f'Historical index and basis figures are derived from JSA-compiled 12-state feeder steer sale data '
     f'(coverage: {first_date.strftime("%b %d, %Y")}–{last_date.strftime("%b %d, %Y")}) and are provided for informational purposes only. '
     f'Trading commodity futures, options on futures, cash commodities, and over-the-counter derivative products involves substantial risk of loss and may not be suitable for all investors. '

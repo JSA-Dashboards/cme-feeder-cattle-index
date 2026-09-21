@@ -121,11 +121,16 @@ def test_stored_index_rows_are_index_brackets_only():
 WRITE_VERBS = ["INSERT ", "UPDATE ", "DELETE ", "DROP ", "CREATE TABLE",
                "merge_replace", "merge_ignore"]
 
+# The shared lookups on the portal pages. Both read the cash series; barn_basis
+# also joins fci_daily to price the basis. Neither may write anything.
+READ_ONLY_MODULES = ["cash_calves.py", "barn_basis.py"]
+
 
 def test_cash_lookup_is_read_only():
     """
-    The page reading the cash series must not write. It is a lookup, and the
-    table it could damage is the one feeding the calf default on the crush page.
+    The pages reading the cash series must not write -- cash_calves.py and
+    barn_basis.py both. They are lookups, and the table they could damage is the
+    one feeding the calf default on the crush page.
 
     Deliberately a plain loop. The first version of this test had a compound
     assertion tangled enough to be a tautology, which is precisely the failure
@@ -133,9 +138,18 @@ def test_cash_lookup_is_read_only():
     fail is worse than no check, because it is mistaken for coverage.
     """
     portal = REPO.parent / "livestock-portal" / "apps"
-    hits = sorted(portal.glob("*/cash_calves.py")) if portal.is_dir() else []
+    hits = sorted(f for name in READ_ONLY_MODULES
+                  for f in portal.glob("*/" + name)) if portal.is_dir() else []
     if not hits:
         pytest.skip("livestock-portal not checked out beside this repo")
+    # Without this the glob above would be green while reading nothing: adding a
+    # name whose portal copy does not exist leaves `hits` non-empty because the
+    # OTHER name matched, so there is no skip and no failure -- the same shape
+    # as the three checks in this project that could not fail.
+    for name in READ_ONLY_MODULES:
+        assert any(f.name == name for f in hits), (
+            f"{name} is listed read-only but no portal copy was found; this "
+            f"check would pass without ever opening it.")
     for f in hits:
         src = f.read_text(encoding="utf-8")
         found = [v for v in WRITE_VERBS if v in src]

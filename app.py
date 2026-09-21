@@ -27,6 +27,7 @@ except Exception:
 
 import snowflake_db as db
 import cash_calves
+import barn_basis
 from index_dates import headline_index_date
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
@@ -994,16 +995,21 @@ st.markdown("<hr style='margin:10px 0 18px;'>", unsafe_allow_html=True)
 _render_freshness()
 
 
-# Two tabs. The index is the published number; the cash lookup is what the
-# cattle behind it actually brought, by weight and state. Same data source --
-# the AMS barn reports -- read for different questions, and the lookup is
-# shared with the Backgrounding Crush rather than copied (see cash_calves.py).
+# Three tabs. The index is the published number; the cash lookup is what the
+# cattle behind it actually brought, by weight and state; the basis lookup asks
+# what one barn's cattle bring against the index at a weight the index does not
+# itself cover. Same data source -- the AMS barn reports -- read for different
+# questions, and the cash lookup is shared with the Backgrounding Crush rather
+# than copied (see cash_calves.py).
 #
-# The cash series CANNOT reach the index. calf_sales spans 400-900 lb where the
-# index is 700-899, recompute_fci_daily() reads mars_sales only, and
+# Both lookups own every one of their own queries, in their own modules. This
+# file issues none, which is not tidiness: the cash series CANNOT reach the
+# index. calf_sales spans 400-900 lb where the index is 700-899,
+# recompute_fci_daily() reads mars_sales only, and
 # tests/test_index_isolation.py in the cme-feeder-cattle-index repo enforces
 # all of that structurally rather than by convention.
-tab_index, tab_cash = st.tabs(["Index", "Cash Feeder Prices"])
+tab_index, tab_cash, tab_basis = st.tabs(
+    ["Index", "Cash Feeder Prices", "Barn Basis"])
 
 with tab_index:
     # ── KPI Tiles ─────────────────────────────────────────────────────────────────
@@ -2200,6 +2206,25 @@ with tab_cash:
         "cattle are worth rather than what the published number is."
     )
     cash_calves.render(tile, MUTED, key_prefix="idx")
+
+
+with tab_basis:
+    st.markdown('<div class="sec-header">Barn Basis by Weight Bracket</div>',
+                unsafe_allow_html=True)
+    st.caption(
+        "Basis one barn at a time, at a weight you choose. Average Basis by "
+        "Location on the Index tab answers this for the index's own 700-899 lb "
+        "cattle and only those; this asks it of any bracket from 400 lb up, and "
+        "lets you take the weight ramp back out so the barns are comparable."
+    )
+    # key_prefix is distinct from the cash tab's "idx" -- both tabs carry a
+    # weight and a window box, and Streamlit keys them by string, so a shared
+    # prefix would make the two tabs move together with nothing raised.
+    barn_basis.render(
+        tile, MUTED,
+        colors={"bg": BG, "border": BORDER, "muted": MUTED,
+                "text": TEXT, "pos": POS, "neg": NEG},
+        watermark=add_watermark, key_prefix="idxbasis")
 
 
 _year = datetime.now().year

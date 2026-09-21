@@ -22,20 +22,43 @@ DB_PATH = HERE / "data" / "mars_history.db"
 TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily", "cme_ftp_locations"]
 
 
+def _load_private_key():
+    """RSA private key for Snowflake key-pair auth (the account enforces MFA on
+    password sign-ins), as DER bytes; None if not configured (falls back to password).
+    Source: SNOWFLAKE_PRIVATE_KEY_PATH (.p8 file) or SNOWFLAKE_PRIVATE_KEY (PEM text)."""
+    path = (os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH") or "").strip()
+    pem = os.environ.get("SNOWFLAKE_PRIVATE_KEY") or ""
+    if not path and not pem.strip():
+        return None
+    from cryptography.hazmat.primitives import serialization
+    data = open(path, "rb").read() if path else pem.replace("\\n", "\n").encode()
+    pwd = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PWD") or None
+    key = serialization.load_pem_private_key(data, password=pwd.encode() if pwd else None)
+    return key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption())
+
+
 def main():
     import snowflake.connector as sc
     from snowflake.connector.pandas_tools import write_pandas
 
-    sf_conn = sc.connect(
+    sf_kw = dict(
         account=os.environ["SNOWFLAKE_ACCOUNT"],
         user=os.environ["SNOWFLAKE_USER"],
-        password=os.environ["SNOWFLAKE_PASSWORD"],
         role=os.environ.get("SNOWFLAKE_ROLE"),
         warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE"),
         database=os.environ.get("SNOWFLAKE_DATABASE", "JSA"),
         schema=os.environ.get("SNOWFLAKE_SCHEMA", "CME_FEEDER_CATTLE"),
         login_timeout=30,
     )
+    _pkey = _load_private_key()
+    if _pkey is not None:
+        sf_kw["private_key"] = _pkey
+    else:
+        sf_kw["password"] = os.environ["SNOWFLAKE_PASSWORD"]
+    sf_conn = sc.connect(**sf_kw)
     sqlite_conn = sqlite3.connect(DB_PATH)
 
     for table in TABLES:

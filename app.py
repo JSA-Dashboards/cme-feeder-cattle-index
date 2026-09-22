@@ -864,8 +864,21 @@ with st.spinner("Loading feeder cattle sale data…"):
         fci_df, loc_df = pd.DataFrame(), pd.DataFrame()
 
 if not load_ok:
-    st.error("Could not load the source workbook.")
-    with st.expander("Technical details"):
+    # Clients read this page. The old version put str(e) straight on screen, so
+    # a Snowflake outage showed them the account host, the account id and a
+    # query id -- internals that mean nothing to a reader and invite questions
+    # nobody here wants to field. On 2026-09-22 that was literally
+    # "390144 (28000): Failed to connect to DB: GNC89034.us-east-1..." on the
+    # public page. Say what is wrong, say what it does NOT mean, and keep the
+    # exception one deliberate click away for whoever is on the hook for it.
+    st.error(
+        "**The index data backend is unavailable, so this page cannot show "
+        "current figures.**\n\nThis is an infrastructure problem, not a problem "
+        "with the index itself: the reconstruction runs on its own schedule and "
+        "nothing has been lost. Figures will reappear as published once the "
+        "connection is restored."
+    )
+    with st.expander("Technical details (JSA internal)"):
         st.code(err_msg)
     st.stop()
 

@@ -197,8 +197,8 @@ if ($code -eq 0) {
         }
     }
     if ($cmeCode -ne 0) {
-        Log ("WARN: CME pull failed (exit {0}). Continuing - the reconstruction and " +
-             "publish are unaffected, but 'Last CME Print' will stay stale." -f $cmeCode)
+        Log (("WARN: CME pull failed (exit {0}). Continuing - the reconstruction and " +
+              "publish are unaffected, but 'Last CME Print' will stay stale.") -f $cmeCode)
     }
 }
 
@@ -223,9 +223,9 @@ if ($code -eq 0) {
     if ($pushCode -eq 0) {
         Log 'index push OK - dashboard is serving current data'
     } else {
-        Log ("ERROR: index push failed (exit {0}). Local SQLite is current but " +
-             "the DASHBOARD IS STALE - each table rolls back individually, so " +
-             "Snowflake still holds its previous contents." -f $pushCode)
+        Log (("ERROR: index push failed (exit {0}). Local SQLite is current but " +
+              "the DASHBOARD IS STALE - each table rolls back individually, so " +
+              "Snowflake still holds its previous contents.") -f $pushCode)
     }
 } else {
     Log 'skipping Snowflake push: the USDA refresh failed, nothing good to publish'
@@ -244,8 +244,8 @@ if ($code -eq 0) {
     Log '--- refreshing the supply-side sources (border, census, calf, corn) ---'
     $impCode = Invoke-Py @('update_imports.py') 'imp'
     if ($impCode -ne 0) {
-        Log ("WARN: import refresh failed (exit {0}). Continuing - the FCI " +
-             "estimate is unaffected; the supply-side tabs will be stale." -f $impCode)
+        Log (("WARN: import refresh failed (exit {0}). Continuing - the FCI " +
+              "estimate is unaffected; the supply-side tabs will be stale.") -f $impCode)
     }
 }
 
@@ -255,8 +255,8 @@ if ($code -eq 0 -and $impCode -eq 0) {
     Log '--- pushing the dashboard tables to Snowflake ---'
     $optCode = Invoke-Py @('snowflake/02_migrate_data.py', '--optional-only') 'opt'
     if ($optCode -ne 0) {
-        Log ("WARN: dashboard push failed (exit {0}). The index published " +
-             "normally; the supply-side tabs will be stale." -f $optCode)
+        Log (("WARN: dashboard push failed (exit {0}). The index published " +
+              "normally; the supply-side tabs will be stale.") -f $optCode)
     }
 }
 

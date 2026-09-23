@@ -23,9 +23,13 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Everything that computes, stores or displays the index.
+# Everything that computes, stores or displays the index. barn_report.py is on
+# this list because update_index.py imports it and it reads mars_sales: it only
+# prints today, but it is inside the index process and one JOIN away from the
+# same mistake as everything else here.
 INDEX_MODULES = ["update_index.py", "app.py", "bucketing.py", "snapshots.py",
-                 "composition.py", "volumes.py", "reporting.py", "notify_email.py"]
+                 "composition.py", "volumes.py", "reporting.py", "notify_email.py",
+                 "barn_report.py"]
 
 # The index's own weight brackets, per CME Rule 10203.A.1 (700-899 lb).
 INDEX_BRACKETS = {700, 750, 800, 850}

@@ -25,6 +25,7 @@ Two structural traps this file has fallen into once each:
   does not appear here at all. Anchoring the comparison on `HERE / name` meant
   it was never compared against anything.
 """
+import ast
 import os
 from pathlib import Path
 
@@ -42,7 +43,8 @@ pytestmark = pytest.mark.skipif(
 
 SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
           "composition.py", "volumes.py", "snapshots.py", "cash_calves.py",
-          "barn_basis.py", "trimmings_qc.py", "test_trimmings_qc.py"]
+          "barn_basis.py", "barn_report.py", "trimmings_qc.py",
+          "test_trimmings_qc.py"]
 
 # Every directory a shared module is allowed to live in. Explicit rather than a
 # recursive glob, because .venv/Lib/site-packages holds files with some of these
@@ -185,6 +187,171 @@ def test_both_dashboards_use_the_tested_headline_rule():
             f"{app} no longer imports the tested headline rule"
         assert "head_pos" in src and "head_date" in src, \
             f"{app} no longer derives its headline from the rule"
+
+
+# ---------------------------------------------------------------------------
+# The barn report on the dashboards. barn_report.py itself is in SHARED above,
+# so the two copies of the MODULE cannot drift. These three properties are the
+# ones that live in app.py instead, and each is a way the line could quietly
+# stop doing its job with the module still perfect.
+# ---------------------------------------------------------------------------
+
+def _barn_call_depths(src):
+    """
+    The indent column of every module-level-or-nested `_render_barn_report()`
+    call. 0 means it runs on the page itself; anything deeper means it is
+    inside a `with tab_...:` (or a function), where it is a click away.
+    """
+    return [n.col_offset for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+            and ast.unparse(n.value).startswith("_render_barn_report(")]
+
+
+def _cached_ttl(src, func):
+    """
+    The `ttl=` on `func`'s st.cache_data decorator, or None if it has no such
+    decorator. Read off the AST rather than matched as a string, so a ttl
+    mentioned in a docstring or a comment cannot satisfy it.
+    """
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == func:
+            for dec in node.decorator_list:
+                if (isinstance(dec, ast.Call)
+                        and "cache_data" in ast.unparse(dec.func)):
+                    for kw in dec.keywords:
+                        if kw.arg == "ttl":
+                            return ast.literal_eval(kw.value)
+    return None
+
+
+def _drive_render(src, lines):
+    """
+    Run one copy's _render_barn_report() with a fake streamlit and `lines`,
+    returning [(widget, text), ...].
+
+    The renderer is lifted out by AST rather than imported, because importing
+    app.py runs a page.
+    """
+    calls = []
+
+    class FakeSt:
+        def caption(self, t):
+            calls.append(("caption", t))
+
+        def warning(self, t):
+            calls.append(("warning", t))
+
+    ns = {}
+    for node in ast.parse(src).body:
+        if (isinstance(node, ast.Assign)
+                and getattr(node.targets[0], "id", "") == "_BARN_MD_ESCAPE"):
+            exec(compile(ast.Module([node], []), "<drift>", "exec"), ns)
+        if (isinstance(node, ast.FunctionDef)
+                and node.name in ("_barn_header_is_healthy", "_render_barn_report")):
+            node.decorator_list = []          # drop @st.cache_data
+            exec(compile(ast.Module([node], []), "<drift>", "exec"), ns)
+    ns["st"] = FakeSt()
+    ns["_load_barn_report"] = lambda: lines
+    ns["_render_barn_report"]()
+    return calls
+
+
+def test_a_broken_barn_report_is_not_rendered_as_a_healthy_one():
+    """
+    report_lines() never raises; on an internal error it returns the single
+    line "Barn report skipped: ...". Branching on the line COUNT alone put that
+    in the same grey caption as "6 of 6 expected barns reported", so a check
+    that had failed looked exactly like a morning with nothing wrong -- the
+    silent failure this line exists to prevent. "0 of 0" is the same shape: no
+    roster could be built, which is a fault, not a whole day.
+
+    MUTATION: drop `and _barn_header_is_healthy(header)` from either copy, or
+    restore the bare `return` when the loader yields nothing. Both cases go
+    quiet again and this dies.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+
+        whole = _drive_render(src, ["Barn report -- index date 2026-09-22 "
+                                    "(Tue): 6 of 6 expected barns reported"])
+        assert [k for k, _ in whole] == ["caption"], \
+            f"{app}: a complete day should stay quiet, got {whole}"
+
+        for bad, why in (
+                (["Barn report skipped: OperationalError: no such column"],
+                 "a report that failed"),
+                (["Barn report -- index date 2026-09-22 (Tue): "
+                  "0 of 0 expected barns reported"], "an empty roster")):
+            got = _drive_render(src, bad)
+            assert [k for k, _ in got] == ["warning"], (
+                f"{app}: {why} rendered as {got or 'nothing'} -- it must be "
+                f"louder than a healthy day, not identical to one")
+
+        dead = _drive_render(src, [])
+        assert dead and dead[0][0] == "caption" and "unavailable" in dead[0][1], (
+            f"{app}: a loader that returns nothing must say the completeness "
+            f"is unknown, not render nothing at all")
+
+
+def test_both_dashboards_show_the_barn_report():
+    """
+    Both copies must render it, both must cache it, and neither may bury it in
+    a tab.
+
+    The tab check is not cosmetic. The line exists because the morning estimate
+    is snipped off the top of this page and sent to clients by hand, so a
+    reader who never opens the Index tab is exactly the reader it is for.
+
+    The cache check is not cosmetic either: barn_days() is a GROUP BY over all
+    of mars_sales with no WHERE clause, and undecorated it would run on every
+    page load and every widget interaction against Snowflake.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert "import barn_report" in src, \
+            f"{app} no longer imports the barn report"
+        depths = _barn_call_depths(src)
+        assert depths, f"{app} defines the barn report but never renders it"
+        assert all(d == 0 for d in depths), (
+            f"{app} renders the barn report at indent {depths} -- inside a tab "
+            f"or a callback, where the person it is for has to click to reach "
+            f"it. It belongs on the page itself.")
+        ttl = _cached_ttl(src, "_load_barn_report")
+        assert ttl is not None, (
+            f"{app}: _load_barn_report lost its st.cache_data decorator. It "
+            f"scans every row of mars_sales; uncached that is one full table "
+            f"GROUP BY per page load against Snowflake.")
+        assert 0 < ttl <= 3600, f"{app}: implausible barn-report ttl {ttl}"
+
+
+def test_the_barn_report_checks_can_actually_fail():
+    """
+    Guard the guards. Three checks written during this project could not fail,
+    and the tab/cache assertions above are exactly the shape that goes wrong --
+    a substring search for "_render_barn_report()" would be satisfied by the
+    definition alone, and one for "ttl=300" by a comment.
+    """
+    rendered = "def f():\n    pass\n_render_barn_report()\n"
+    in_a_tab = "with tab_index:\n    _render_barn_report()\n"
+    defined_only = "def _render_barn_report():\n    pass\n"
+    assert _barn_call_depths(rendered) == [0]
+    assert _barn_call_depths(in_a_tab) == [4], "a call inside a tab must be seen"
+    assert _barn_call_depths(defined_only) == [], \
+        "defining it is not rendering it"
+
+    cached = ("@st.cache_data(ttl=300, show_spinner=False)\n"
+              "def _load_barn_report():\n    return []\n")
+    uncached = "def _load_barn_report():\n    return []\n"
+    commented = ("# @st.cache_data(ttl=300)\n"
+                 "def _load_barn_report():\n"
+                 '    """ttl=300 in prose is not a decorator."""\n'
+                 "    return []\n")
+    no_ttl = ("@st.cache_data(show_spinner=False)\n"
+              "def _load_barn_report():\n    return []\n")
+    assert _cached_ttl(cached, "_load_barn_report") == 300
+    assert _cached_ttl(uncached, "_load_barn_report") is None
+    assert _cached_ttl(commented, "_load_barn_report") is None
+    assert _cached_ttl(no_ttl, "_load_barn_report") is None
 
 
 def test_both_trimmings_dashboards_use_the_tested_checks():

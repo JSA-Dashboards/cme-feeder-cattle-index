@@ -26,6 +26,7 @@ except Exception:
     pass  # st.secrets not available (no secrets.toml locally) -- fine, .env already loaded above
 
 import snowflake_db as db
+import barn_report
 import cash_calves
 import barn_basis
 from index_dates import headline_index_date
@@ -655,6 +656,106 @@ def _render_freshness():
         st.caption(f"Last refreshed {stamp} Central ({hours:.1f}h ago).")
 
 
+# ── Is the headline day COMPLETE? ─────────────────────────────────────────────
+# Freshness above says when the pipeline last ran. This says whether the day it
+# ran on is whole, which is a different failure and the one that costs money.
+# The estimate is computed on whatever has been fetched by then, so a barn that
+# has not published yet is simply not in it -- and the number looks exactly as
+# confident as a complete one. On 2026-09-22 the 07:42 estimate went out 40
+# cents light because Oklahoma City and Tulsa had not published, and nothing on
+# this page said so. This is that missing sentence.
+
+# The lines are MARKDOWN once st.caption/st.warning render them, and the
+# report's own "~640,487 lb  (~36% of a typical Monday)" carries tildes, which
+# GFM reads as strikethrough. Escaped rather than trusted: the barn names come
+# out of the database, so they are not ours to vouch for either.
+_BARN_MD_ESCAPE = str.maketrans({c: "\\" + c for c in "\\`*_[]~<>"})
+
+
+def _barn_header_is_healthy(header):
+    """
+    Does this header describe a real roster, or a failure wearing its clothes?
+
+    report_lines() never raises; on an internal error it returns the single line
+    "Barn report skipped: <Type>: <msg>". Branching on line count alone rendered
+    that in the same quiet caption as "6 of 6 expected barns reported", so a
+    broken check looked exactly like a clean morning -- which is the one thing
+    this line exists to prevent. A zero DENOMINATOR fails too: "0 of 0" means no
+    roster could be built, which is a fault, not a whole day. A holiday reads
+    "0 of 8" and takes the loud path because all eight are listed as missing.
+    """
+    tail = header.split()[-6:]
+    return (len(tail) == 6 and tail[1] == "of"
+            and tail[3:] == ["expected", "barns", "reported"]
+            and tail[2].isdigit() and int(tail[2]) > 0)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_barn_report():
+    """
+    barn_report.py's own lines, verbatim -- the same ones the pipeline log
+    prints. Deliberately NOT rebuilt here: the page and the log cannot then
+    disagree about which barns are out, and the roster logic stays in the one
+    module that has a mutation-tested suite on it.
+
+    ttl=300 rather than the hour every other loader on this page uses, matching
+    _load_last_refresh() for the same reason it does. barn_days() is a GROUP BY
+    over every row of mars_sales with NO WHERE CLAUSE -- 32,946 rows today --
+    so it must not run on every page load against Snowflake. But what this line
+    answers is "is the number I am about to send complete RIGHT NOW", and what
+    makes the answer change is a late barn landing in the 13:00 run. An hour of
+    cache would keep naming Oklahoma City missing for up to an hour after it
+    arrived, which is a worse lie than the silence this replaces. Five minutes
+    bounds it at five minutes and still collapses a refresh loop into one
+    query. The sidebar's Refresh Data button clears it outright.
+
+    Returns [] when the backend cannot be opened at all. The load_data() error
+    above and the freshness banner already own that story, and a diagnostic
+    must never be the thing that breaks the page it is diagnosing.
+    """
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return []
+    try:
+        conn = db.get_conn()
+    except Exception:
+        return []
+    try:
+        # list(), so what lands in the cache is concrete, and the whole
+        # consumption sits inside the guard rather than just the call --
+        # update_index.py learned that one the expensive way (see
+        # tests/test_barn_report.py::..consumes_the_report_inside_a_guard).
+        return list(barn_report.report_lines(conn))
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def _render_barn_report():
+    """
+    Quiet when the day is whole, loud when it is not.
+
+    A complete day still says so. "6 of 6 expected barns reported" on every
+    ordinary morning is what makes one morning's "4 of 6" mean anything, and a
+    line that appears only when something is wrong is a line nobody learns to
+    read. But it says so in a caption -- the register _render_freshness() uses
+    for a healthy pipeline -- so the eye stops only on the mornings that earn
+    it.
+    """
+    lines = _load_barn_report()
+    if not lines:
+        st.caption("Barn report unavailable -- whether this estimate is "
+                   "complete could not be determined.")
+        return
+    header = lines[0].translate(_BARN_MD_ESCAPE)
+    missing = [ln.strip().translate(_BARN_MD_ESCAPE) for ln in lines[1:]]
+    if not missing and _barn_header_is_healthy(header):
+        st.caption(header)
+        return
+    st.warning("**" + header + "**\n\n"
+               + "\n".join("- " + ln for ln in missing))
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_composition(index_date_iso):
     """
@@ -1029,6 +1130,14 @@ st.markdown("<hr style='margin:10px 0 18px;'>", unsafe_allow_html=True)
 # identically whether the pipeline ran twenty minutes ago or failed days ago,
 # and the numbers are traded on -- so say how old they are before showing them.
 _render_freshness()
+
+# Directly beneath it, and ABOVE the tabs on purpose. Ross reads this page each
+# morning and snips the top of it to clients by hand, so the one thing that has
+# to be in the snip is whether the number in it is complete. Inside a tab it
+# would be one click away from the person it is for; below the KPI tiles it
+# would split them from the "Daily:" caption that the block further down says
+# must stay directly under them.
+_render_barn_report()
 
 
 # Three tabs. The index is the published number; the cash lookup is what the

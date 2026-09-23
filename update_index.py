@@ -47,6 +47,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import barn_report
 import snowflake_db as db
 from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
 from bucketing import check_bucket_drift, shifted_bucket_date
@@ -556,6 +557,26 @@ def run_update(since: date, verbose=True):
         print("\nMost recent reconstructed index values:")
         for d, v, n in recent:
             print(f"  {db.iso(d)}  ${v:.2f}   ({n} locations)")
+
+        # Which barns the index date is still waiting on, and how big they are.
+        # Last, because it is the line worth acting on and a log is read from
+        # the bottom. PRINT ONLY -- the index is already computed and the
+        # snapshot already frozen, and nothing below this changes. See
+        # barn_report.py.
+        #
+        # THE ITERATION IS INSIDE THE GUARD, not just the call. report_lines()
+        # promises never to raise and to hand back a materialised list of
+        # strings, but this loop is where that promise is CONSUMED, and it used
+        # to sit outside any try of its own: stubbing the report to return None
+        # took the whole run to exit 1, after the index was computed and before
+        # it was pushed. A diagnostic must never be what strands a finished
+        # index, so the guard belongs on both sides.
+        print()
+        try:
+            for line in barn_report.report_lines(conn):
+                print(line)
+        except Exception as e:                  # noqa: BLE001 -- diagnostic only
+            print(f"  [!] barn report skipped: {type(e).__name__}: {e}")
     conn.close()
 
 

@@ -420,6 +420,24 @@
     "city": "Sterling"
   },
   {
+    "slug_id": 1906,
+    "title": "Livestock Exchange Feeder Cattle Auction (Friday) - Brush, CO",
+    "state": "CO",
+    "city": "Brush"
+  },
+  {
+    "slug_id": 3090,
+    "title": "Livestock Exchange Cattle Auction (Thursday) - Brush, CO",
+    "state": "CO",
+    "city": "Brush"
+  },
+  {
+    "slug_id": 1863,
+    "title": "Centennial Livestock Auction Stock Show Special - Fort Collins, CO",
+    "state": "CO",
+    "city": "Fort Collins"
+  },
+  {
     "slug_id": 2097,
     "title": "Kist Livestock Auction - Mandan, ND",
     "state": "ND",

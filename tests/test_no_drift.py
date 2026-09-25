@@ -44,7 +44,7 @@ pytestmark = pytest.mark.skipif(
 SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
           "composition.py", "volumes.py", "snapshots.py", "cash_calves.py",
           "barn_basis.py", "barn_report.py", "trimmings_qc.py",
-          "test_trimmings_qc.py"]
+          "test_trimmings_qc.py", "herd.py"]
 
 # Every directory a shared module is allowed to live in. Explicit rather than a
 # recursive glob, because .venv/Lib/site-packages holds files with some of these

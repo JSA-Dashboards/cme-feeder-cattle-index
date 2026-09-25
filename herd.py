@@ -253,6 +253,171 @@ def receipts_yoy(conn, weeks=CURRENT_WEEKS):
             "pct": 100.0 * (now - then) / then, "weeks": weeks}
 
 
+# ── Heifer share of feeder receipts ──────────────────────────────────────────
+#
+# The volume-side counterpart to the retention incentive above. That ratio
+# prices the DECISION a producer faces; this measures what they actually did --
+# when heifers are kept back to breed, they stop arriving at the feeder auction
+# and the heifer share of receipts falls. The two can disagree, which is the
+# reason for carrying both: an incentive that nobody acts on is not a rebuild.
+#
+# Fed by feeder_sex_mix.py, which stores weekly steer/heifer head per report.
+# Read its module docstring before changing anything here -- it records why the
+# two sources can be spliced and, more usefully, what could NOT be verified.
+
+YTD_CUT = 37                    # ISO week the annual comparison runs through
+ROLLING_WEEKS = 52
+MIN_YEAR_WEEKS = 30             # below this a year is partial and not comparable
+
+# USDA retired the legacy archive mid-2019 and stood up its replacement in the
+# same weeks. Legacy runs normally through week 17 and then falls off a cliff --
+# 41k, 27k, 17k, 6k head against a 115k norm -- while MARS only completes its
+# panel at week 19. So 2019 takes each half from whichever source was whole at
+# the time. Applied as a general preference rather than a special case for 2019,
+# it also resolves correctly for every other year, where only one source exists.
+LEGACY_LAST_GOOD_YEAR = 2019
+LEGACY_LAST_GOOD_WEEK = 17
+
+
+def _feeder_weeks(conn):
+    """{(iso_year, iso_week): {source: [steers, heifers]}}"""
+    rows = conn.cursor().execute(
+        "SELECT week_start, source, steers, heifers FROM feeder_receipts").fetchall()
+    out = {}
+    for ws, src, s, h in rows:
+        y, w, _ = date.fromisoformat(str(db.iso(ws))).isocalendar()
+        d = out.setdefault((y, w), {})
+        v = d.setdefault(str(src), [0, 0])
+        v[0] += int(s or 0)
+        v[1] += int(h or 0)
+    return out
+
+
+def _pick(by_source, year, week):
+    """The source to trust for this week, and its [steers, heifers].
+
+    The cutoff is absolute, not a per-week preference. The legacy archive does
+    not stop cleanly: it keeps emitting a thinning remnant of stragglers for
+    months afterwards, down to a single week of 2020 carrying 420 head against
+    MARS's 176,326 for the same week. A rule that merely preferred legacy in
+    early weeks would take the 420 and discard the real reading -- which it
+    did, tagging 2020 as spliced and quietly dropping a week of the year.
+
+    So legacy is authoritative up to the week it was last whole and is never
+    consulted after it, even as a fallback: past that point its absence is
+    information, and its presence is noise.
+    """
+    if (year, week) <= (LEGACY_LAST_GOOD_YEAR, LEGACY_LAST_GOOD_WEEK):
+        for src in ("legacy", "mars"):
+            if by_source.get(src):
+                return src, by_source[src]
+    elif by_source.get("mars"):
+        return "mars", by_source["mars"]
+    return None, None
+
+
+def heifer_share_annual(conn):
+    """
+    [{year, share, steers, heifers, src, weeks}] year-to-date through week 37.
+
+    Annual rather than rolling because this is the only basis comparable across
+    the 2019 handover: a 52-week window spanning the seam would mix the two
+    archives mid-window. Every point covers the same calendar span.
+    """
+    weeks = _feeder_weeks(conn)
+    per_year = {}
+    for (y, w), by_source in weeks.items():
+        if w > YTD_CUT:
+            continue
+        src, v = _pick(by_source, y, w)
+        if not src:
+            continue
+        d = per_year.setdefault(y, {"steers": 0, "heifers": 0, "srcs": set(), "weeks": 0})
+        d["steers"] += v[0]
+        d["heifers"] += v[1]
+        d["srcs"].add(src)
+        d["weeks"] += 1
+
+    out = []
+    for y in sorted(per_year):
+        d = per_year[y]
+        total = d["steers"] + d["heifers"]
+        # A year missing a third of its weeks is not comparable to a whole one.
+        # This is what excludes 2010: the legacy archive begins in June of that
+        # year, leaving 12 of the 37 weeks.
+        if not total or d["weeks"] < MIN_YEAR_WEEKS:
+            continue
+        out.append({"year": y, "steers": d["steers"], "heifers": d["heifers"],
+                    "share": 100.0 * d["heifers"] / total, "weeks": d["weeks"],
+                    "src": "spliced" if len(d["srcs"]) > 1 else d["srcs"].pop()})
+    return out
+
+
+def heifer_share_rolling(conn, source="mars"):
+    """
+    [{week, share, steers, heifers}] on a trailing 52-week window.
+
+    Seasonally neutral, so it puts the turn on its actual date instead of in
+    whichever annual bucket the calendar assigns it. Confined to one source for
+    the reason given above.
+
+    Head counts are NOT exposed here as a series: a rolling sum steps down
+    whenever a report simply misses a week, so it would read reporting gaps as
+    market change. That artefact cancels in the share, because the missing week
+    leaves the numerator and denominator together.
+    """
+    weeks = _feeder_weeks(conn)
+    have = sorted(k for k, v in weeks.items() if v.get(source))
+    if len(have) <= ROLLING_WEEKS:
+        return []
+
+    vals = [weeks[k][source] for k in have]
+    # Reports publish with a lag, so the newest week is routinely a partial
+    # count that looks like a collapse in volume rather than a missing one.
+    # Drop from the end while a week carries under 60% of the preceding eight.
+    while len(have) > ROLLING_WEEKS + 1:
+        tail = sum(vals[-1])
+        ref = median(sum(v) for v in vals[-9:-1])
+        if not ref or tail >= 0.60 * ref:
+            break
+        have.pop()
+        vals.pop()
+
+    out = []
+    for i in range(ROLLING_WEEKS - 1, len(have)):
+        window = vals[i - ROLLING_WEEKS + 1:i + 1]
+        s = sum(v[0] for v in window)
+        h = sum(v[1] for v in window)
+        if not (s + h):
+            continue
+        y, w = have[i]
+        out.append({"week": date.fromisocalendar(y, w, 1).isoformat(),
+                    "share": 100.0 * h / (s + h), "steers": s, "heifers": h})
+    return out
+
+
+def heifer_share_summary(conn):
+    """Headline figures for the page: where this cycle sits against the last."""
+    ann = heifer_share_annual(conn)
+    if len(ann) < 3:
+        return None
+    cur = ann[-1]
+    lo = min(ann, key=lambda r: r["share"])
+    hi = max(ann, key=lambda r: r["share"])
+    earlier = [r for r in ann if r["year"] < cur["year"] and r["share"] <= cur["share"]]
+    prior = {r["year"]: r for r in ann}
+    y24 = prior.get(cur["year"] - 2)
+    return {
+        "current": cur, "low": lo, "high": hi, "annual": ann,
+        "since": max(earlier, key=lambda r: r["year"])["year"] if earlier else None,
+        "gap_to_low": cur["share"] - lo["share"],
+        "fall_from_high": cur["share"] - hi["share"],
+        "heifer_chg": cur["heifers"] - y24["heifers"] if y24 else None,
+        "steer_chg": cur["steers"] - y24["steers"] if y24 else None,
+        "chg_base_year": y24["year"] if y24 else None,
+    }
+
+
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()

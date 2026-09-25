@@ -32,7 +32,7 @@ CRITICAL_TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily",
 # daily_update.ps1 read as push_exit != 0 -- logging "DASHBOARD IS STALE" and
 # emailing a failure about an index that was already safely committed, since
 # the critical tables are pushed first and each table commits on its own.
-OPTIONAL_TABLES = ["replacement_sales", "border_reports",
+OPTIONAL_TABLES = ["replacement_sales", "feeder_receipts", "border_reports",
                    "census_cattle_imports", "border_receipts",
                    "border_volumes", "border_prices",
                    "calf_sales", "corn_bids", "distillers_bids", "hay_bids"]

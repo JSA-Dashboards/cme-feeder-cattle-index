@@ -261,6 +261,33 @@ if ($code -eq 0) {
     }
 }
 
+# The two US Cow Herd feeds. Only that one dashboard reads them, so a failure
+# here is one stale page and nothing else -- the push below is deliberately NOT
+# gated on them, the same way it is not gated on the index push.
+#
+# replacement_reports.py HAD NO CALLER AT ALL until 2026-09-25. It was run by
+# hand the day the page was built and never again, so replacement_sales sat
+# frozen at 2026-09-10 while 02_migrate_data.py faithfully re-uploaded the same
+# 73,156 rows to Snowflake every night. That is the failure mode worth
+# remembering: the table was written daily, so any check asking "was this
+# refreshed today" passed the whole time. Only the CONTENT was stale.
+$herdCode = 0
+if ($code -eq 0) {
+    Log '--- refreshing the herd sources (replacement sales, feeder sex mix) ---'
+    $repCode = Invoke-Py @('replacement_reports.py') 'rep'
+    if ($repCode -ne 0) {
+        Log (("WARN: replacement-report refresh failed (exit {0}). The retention " +
+              "incentive on the US Cow Herd page will be stale.") -f $repCode)
+        $herdCode = $repCode
+    }
+    $fsmCode = Invoke-Py @('feeder_sex_mix.py') 'fsm'
+    if ($fsmCode -ne 0) {
+        Log (("WARN: feeder sex-mix refresh failed (exit {0}). The heifer-share " +
+              "section will be stale.") -f $fsmCode)
+        $herdCode = $fsmCode
+    }
+}
+
 $optCode = 0
 if ($code -eq 0 -and $impCode -eq 0) {
     Checkpoint-Wal
@@ -272,7 +299,7 @@ if ($code -eq 0 -and $impCode -eq 0) {
     }
 }
 
-Log ("run finished  update_exit={0}  cme_exit={1}  push_exit={2}  imp_exit={3}  opt_push_exit={4}  {5}" -f $code, $cmeCode, $pushCode, $impCode, $optCode, (Get-Date -Format 'HH:mm:ss'))
+Log ("run finished  update_exit={0}  cme_exit={1}  push_exit={2}  imp_exit={3}  herd_exit={4}  opt_push_exit={5}  {6}" -f $code, $cmeCode, $pushCode, $impCode, $herdCode, $optCode, (Get-Date -Format 'HH:mm:ss'))
 
 # Prune logs older than 30 days so this doesn't grow without bound.
 Get-ChildItem $logDir -Filter 'update_*.log' -ErrorAction SilentlyContinue |

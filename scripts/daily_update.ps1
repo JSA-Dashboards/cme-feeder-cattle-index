@@ -202,6 +202,18 @@ if ($code -eq 0) {
     }
 }
 
+# The missing-barn report, and it belongs HERE rather than inside update_index.py.
+# barn_report names the index date derived from MAX(cme_ftp_daily), so run from
+# the ingest -- which finishes before the pull above -- it read a value one print
+# stale and named YESTERDAY'S index date every morning. On 2026-09-25 it printed
+# "index date 2026-09-23" while the number being published was 2026-09-24.
+# Print-only and guarded on both sides, so it cannot fail the run: its exit code
+# is logged and deliberately not tested.
+$barnCode = Invoke-Py @('update_index.py', '--barn-report-only') 'barn'
+if ($barnCode -ne 0) {
+    Log ("WARN: barn report failed (exit {0}). The index and the push are unaffected." -f $barnCode)
+}
+
 # ORDER MATTERS HERE, and it was wrong until 2026-09-11: the optional ingests
 # now run AFTER the index is published, not before.
 #

@@ -47,7 +47,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import barn_report
 import snowflake_db as db
 from direct_reports import DIRECT_REPORT_SLUGS, fetch_all_direct_rows
 from bucketing import check_bucket_drift, shifted_bucket_date
@@ -558,26 +557,52 @@ def run_update(since: date, verbose=True):
         for d, v, n in recent:
             print(f"  {db.iso(d)}  ${v:.2f}   ({n} locations)")
 
-        # Which barns the index date is still waiting on, and how big they are.
-        # Last, because it is the line worth acting on and a log is read from
-        # the bottom. PRINT ONLY -- the index is already computed and the
-        # snapshot already frozen, and nothing below this changes. See
-        # barn_report.py.
-        #
-        # THE ITERATION IS INSIDE THE GUARD, not just the call. report_lines()
-        # promises never to raise and to hand back a materialised list of
-        # strings, but this loop is where that promise is CONSUMED, and it used
-        # to sit outside any try of its own: stubbing the report to return None
-        # took the whole run to exit 1, after the index was computed and before
-        # it was pushed. A diagnostic must never be what strands a finished
-        # index, so the guard belongs on both sides.
-        print()
-        try:
-            for line in barn_report.report_lines(conn):
-                print(line)
-        except Exception as e:                  # noqa: BLE001 -- diagnostic only
-            print(f"  [!] barn report skipped: {type(e).__name__}: {e}")
+        # The barn report does NOT run here -- see print_barn_report() below for
+        # why it cannot, and scripts/daily_update.ps1 for where it does.
     conn.close()
+
+
+def print_barn_report(conn):
+    """
+    Which barns the index date is still waiting on, and how big they are.
+
+    THIS MUST RUN AFTER THE CME PULL, WHICH IS WHY IT IS NOT IN run_update().
+    barn_report picks the index date it describes from MAX(cme_ftp_daily) -- the
+    day after CME's last print is the day we are estimating -- and
+    daily_update.ps1 pulls CME's file AFTER the ingest. Called from inside
+    run_update() it therefore read a cme_ftp_daily one print stale and named
+    YESTERDAY'S index date every single morning. On 2026-09-25 it printed
+    "index date 2026-09-23 (Wed)" while the number being published, and the one
+    the dashboard and the client estimate both led with, was 2026-09-24. The
+    rule was right; only the ordering was wrong, and nothing noticed for two
+    days because the report is correct-looking either way.
+
+    Verified at the time: with cme_ftp_daily through 09-22 the rule gives 09-23,
+    and through 09-23 it gives 09-24. The pull is what moves it.
+
+    PRINT ONLY. The index is already computed, pushed and snapshotted by the
+    time this runs; nothing here can change a number.
+
+    THE ITERATION IS INSIDE THE GUARD, not just the call. report_lines()
+    promises never to raise and to hand back a materialised list of strings,
+    but this loop is where that promise is CONSUMED, and it used to sit outside
+    any try of its own: stubbing the report to return None took the whole run
+    to exit 1, after the index was computed and before it was pushed. A
+    diagnostic must never be what strands a finished index, so the guard
+    belongs on both sides.
+    """
+    print()
+    try:
+        # Imported HERE, not at module scope. While run_update() printed the
+        # report, update_index.py imported barn_report at the top -- so a syntax
+        # error or a bad import in a PRINT-ONLY diagnostic took down the whole
+        # ingest before a single row was fetched. Nothing else in this file
+        # needs it, so the blast radius of a broken report is now this function.
+        import barn_report
+        for line in barn_report.report_lines(conn):
+            print(line)
+    except Exception as e:                      # noqa: BLE001 -- diagnostic only
+        print(f"  [!] barn report skipped: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
@@ -585,7 +610,21 @@ if __name__ == "__main__":
     parser.add_argument("--since", type=str, default=None,
                          help="ISO date to pull from (default: continue from last stored date, "
                               "or 2026-01-24 on first run)")
+    parser.add_argument("--barn-report-only", action="store_true",
+                         help="print the missing-barn report and exit, fetching and "
+                              "computing nothing. The daily job runs this AFTER the CME "
+                              "pull, because the report names the index date derived from "
+                              "MAX(cme_ftp_daily) and inside the ingest that value is one "
+                              "print stale.")
     args = parser.parse_args()
+
+    if args.barn_report_only:
+        conn = db.get_conn()
+        try:
+            print_barn_report(conn)
+        finally:
+            conn.close()
+        raise SystemExit(0)
 
     if args.since:
         since = date.fromisoformat(args.since)

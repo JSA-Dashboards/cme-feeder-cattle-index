@@ -2152,6 +2152,17 @@ with tab_index:
                 "location": "Location", "state": "State", "head": "Head", "avg_weight": "Weight",
                 "price": "Price", "basis": "Basis vs FCI",
             })
+            # SIZED FROM THE DATA, not fixed. st.dataframe is a fixed-height
+            # pane that scrolls internally, so the old height=380 showed ten
+            # rows and hid the rest on exactly the days worth looking at:
+            # 2026-09-24 had 19 locations and you had to scroll for nine of
+            # them. 35px is Streamlit's own row height, +1 row for the header.
+            # Deliberately uncapped -- a cap would quietly bring the scrollbar
+            # back on the busiest day, which is the complaint. The median day is
+            # 9 locations and the busiest since June is 19, so this ranges from
+            # roughly 390px to 740px.
+            LOC_ROW_PX, LOC_HEADER_PX = 35, 38
+            loc_table_h = LOC_HEADER_PX + LOC_ROW_PX * len(day_rows_with_total)
             with st.container(key="wm-locations"):
                 st.dataframe(
                     disp.style.format({
@@ -2165,7 +2176,7 @@ with tab_index:
                         if row["Location"] == "TOTAL" else [""] * len(row),
                         axis=1,
                     ),
-                    use_container_width=True, hide_index=True, height=380,
+                    use_container_width=True, hide_index=True, height=loc_table_h,
                 )
         with right:
             fig_b = go.Figure()
@@ -2181,7 +2192,8 @@ with tab_index:
                 margin=dict(l=10, r=10, t=10, b=30),
                 xaxis=dict(**AXIS, title="Basis vs FCI ($/cwt)"),
                 yaxis=dict(**AXIS, autorange="reversed"),
-                height=380, showlegend=False,
+                # Matches the table beside it so the two columns end level.
+                height=loc_table_h, showlegend=False,
             )
             add_watermark(fig_b, size=0.4, opacity=0.06)
             st.plotly_chart(fig_b, use_container_width=True)

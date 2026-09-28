@@ -37,6 +37,10 @@ PORTAL_ROOT = REPOS / "livestock-portal"
 PORTAL_APPS = PORTAL_ROOT / "apps"
 PORTAL = PORTAL_APPS / "cme_feeder_cattle"
 TRIMMINGS = REPOS / "beef-trimmings-dashboard"
+# nass_cache_client.py is vendored here too -- and this is the repo that would
+# naturally be edited if that client ever needed a change, which makes it the
+# copy most likely to drift first.
+NASS_ETL = REPOS / "usda-nass-etl"
 
 pytestmark = pytest.mark.skipif(
     not PORTAL.is_dir(), reason="livestock-portal not checked out beside this repo")
@@ -55,6 +59,7 @@ CODE_DIRS = [
     PORTAL_ROOT / "tests",
     TRIMMINGS,
     TRIMMINGS / "tests",
+    NASS_ETL,
 ] + sorted(d for d in PORTAL_APPS.glob("*") if d.is_dir())
 
 # Directories that never hold a first-party copy.
@@ -118,7 +123,12 @@ def test_no_copy_escapes_the_search_path():
     """
     for name in SHARED:
         found = set()
-        for repo in (HERE, PORTAL_ROOT, TRIMMINGS):
+        # Every repo that shares code. This tuple has the same failure mode the
+        # docstring describes -- a repo missing from it hides its copies rather
+        # than reporting them -- which is exactly how the usda-nass-etl copy of
+        # nass_cache_client went unwatched. Add a repo here when it starts
+        # sharing, not when something has already drifted.
+        for repo in (HERE, PORTAL_ROOT, TRIMMINGS, NASS_ETL):
             if repo.is_dir():
                 found |= _walk_for(name, repo)
         declared = {f.resolve() for f in _copies(name)}

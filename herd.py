@@ -377,13 +377,11 @@ def _pick(by_source, year, week):
     return None, None
 
 
-def heifer_share_annual(conn):
-    """
-    [{year, share, steers, heifers, src, weeks}] year-to-date through week 37.
+def _annual_rows(conn):
+    """Every year's aggregate, UNFILTERED. Both public builders read this.
 
-    Annual rather than rolling because this is the only basis comparable across
-    the 2019 handover: a 52-week window spanning the seam would mix the two
-    archives mid-window. Every point covers the same calendar span.
+    Shared so the clean series and the thin one cannot drift apart: they must
+    differ only in which years they admit, never in how a year is computed.
     """
     weeks = _feeder_weeks(conn)
     states = _feeder_states(conn)
@@ -410,16 +408,48 @@ def heifer_share_annual(conn):
         # This excluded 2010 until the wtd_1 half of the auction archive was
         # loaded (2026-09-28); 2010 had begun in June, leaving 12 of 37 weeks.
         # It now runs whole, and the guard is kept for the partial CURRENT year
-        # and for anything else that arrives half-formed.
+        # and for anything else that arrives half-formed. A year failing THIS
+        # test is not reported by either builder -- it is incomplete, not merely
+        # thinly covered, and there is nothing to caveat.
         if not total or d["weeks"] < MIN_YEAR_WEEKS:
-            continue
-        if len(d["states"]) < MIN_PANEL_STATES:
             continue
         out.append({"year": y, "steers": d["steers"], "heifers": d["heifers"],
                     "share": 100.0 * d["heifers"] / total, "weeks": d["weeks"],
                     "states": len(d["states"]),
                     "src": "spliced" if len(d["srcs"]) > 1 else d["srcs"].pop()})
     return out
+
+
+def heifer_share_annual(conn):
+    """
+    [{year, share, steers, heifers, src, weeks, states}] YTD through week 37.
+
+    Annual rather than rolling because this is the only basis comparable across
+    the 2019 handover: a 52-week window spanning the seam would mix the two
+    archives mid-window. Every point covers the same calendar span.
+
+    Years below MIN_PANEL_STATES are ABSENT, and every caller gets that for
+    free. heifer_share_summary reads this, so the benchmark, the peak and the
+    distance between them cannot be set by a year drawn from twelve states.
+    """
+    return [r for r in _annual_rows(conn) if r["states"] >= MIN_PANEL_STATES]
+
+
+def heifer_share_thin(conn):
+    """The years heifer_share_annual excludes for coverage, same shape.
+
+    Separate function rather than a flag on the main series, and that is the
+    point rather than an inconvenience. A `thin: True` field is something a
+    caller has to notice; today's channel bug was exactly a caller not noticing
+    a field it had never been told to check. Asking for these by name cannot be
+    done by accident, and every existing caller stays correct without edits.
+
+    Draw them detached from the clean series -- no line joining 2004 to 2005 --
+    because the gap is the message. They are the same measurement on a smaller
+    and shifting set of states, so their LEVEL is not comparable with the rest
+    even though each year is internally sound.
+    """
+    return [r for r in _annual_rows(conn) if r["states"] < MIN_PANEL_STATES]
 
 
 def heifer_share_rolling(conn, source="mars"):

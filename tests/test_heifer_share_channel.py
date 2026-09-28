@@ -120,3 +120,54 @@ def test_the_guard_is_states_not_head_count():
     """
     lean = [(w.isoformat(), "auction", 100, 100) for w in WEEKS]   # 10x less head
     assert share(build(lean)) == pytest.approx(50.0)
+
+
+# --- the thin years are reachable, but only on purpose ---------------------
+
+
+def _mixed():
+    """A clean year (2023, full panel) and a thin one (2022, too few states)."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
+                 "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
+    rows = []
+    for w in WEEKS:                                   # 2023, full coverage
+        rows += [(w.isoformat(), "mars", "auction", 1, st, 1000, 1000)
+                 for st in STATES]
+    for w in WEEKS:                                   # 2022, one state short
+        rows += [(w.replace(year=2022).isoformat(), "mars", "auction", 1, st, 900, 100)
+                 for st in STATES[:herd.MIN_PANEL_STATES - 1]]
+    conn.executemany("INSERT INTO feeder_receipts VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    return conn
+
+
+def test_thin_years_are_absent_from_the_main_series():
+    assert [r["year"] for r in herd.heifer_share_annual(_mixed())] == [2023]
+
+
+def test_thin_years_are_returned_by_the_thin_builder():
+    thin = herd.heifer_share_thin(_mixed())
+    assert [r["year"] for r in thin] == [2022]
+    assert thin[0]["share"] == pytest.approx(10.0)
+
+
+def test_the_two_series_never_overlap():
+    """Whatever the cut, a year belongs to exactly one of them."""
+    conn = _mixed()
+    clean = {r["year"] for r in herd.heifer_share_annual(conn)}
+    thin = {r["year"] for r in herd.heifer_share_thin(conn)}
+    assert not (clean & thin)
+
+
+def test_a_year_short_of_WEEKS_is_in_neither():
+    """Incomplete is not the same as thinly covered, and gets no caveat panel."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
+                 "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
+    conn.executemany("INSERT INTO feeder_receipts VALUES (?,?,?,?,?,?,?)",
+                     [(w.isoformat(), "mars", "auction", 1, st, 1000, 1000)
+                      for w in WEEKS[:herd.MIN_YEAR_WEEKS - 1] for st in STATES])
+    conn.commit()
+    assert herd.heifer_share_annual(conn) == []
+    assert herd.heifer_share_thin(conn) == []

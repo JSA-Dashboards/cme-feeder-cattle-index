@@ -279,10 +279,35 @@ LEGACY_LAST_GOOD_YEAR = 2019
 LEGACY_LAST_GOOD_WEEK = 17
 
 
+# AUCTION ONLY, and the filter is load-bearing.
+#
+# feeder_receipts also carries `direct` and `video` channels, loaded from the
+# legacy archives to test whether sale-barn receipts fairly proxy the national
+# trade. They answered yes -- 9/9 years agreeing on direction, r=+0.92 -- but
+# they cover 2000-2020 and stop, because USDA's replacement serves only the
+# current week and nobody has backfilled 2021-2026 from ESMIS.
+#
+# So summing every channel does NOT widen the series, it BREAKS it: the early
+# years become a three-channel blend and the recent ones stay auction-only,
+# with the seam at 2019. Auction runs a mean 3.5 pts above the combined figure,
+# so that seam is a 3.5-point step of pure coverage artefact sitting right
+# underneath the 2015 benchmark this page compares today against. Nothing
+# raises; the low simply reads 38.3% instead of 42.9% and every year-selector
+# comparison before 2019 is quietly wrong. It shipped that way for a day.
+#
+# Drop this filter only together with a backfill that carries all three
+# channels to the present.
+CHANNEL = "auction"
+
+
 def _feeder_weeks(conn):
     """{(iso_year, iso_week): {source: [steers, heifers]}}"""
     rows = conn.cursor().execute(
-        "SELECT week_start, source, steers, heifers FROM feeder_receipts").fetchall()
+        # Inlined rather than bound: sqlite3 takes ? and the Snowflake
+        # connector takes %s, and this module runs against both. CHANNEL is a
+        # constant above, never user input.
+        "SELECT week_start, source, steers, heifers FROM feeder_receipts "
+        "WHERE channel = '" + CHANNEL + "'").fetchall()
     out = {}
     for ws, src, s, h in rows:
         y, w, _ = date.fromisoformat(str(db.iso(ws))).isocalendar()

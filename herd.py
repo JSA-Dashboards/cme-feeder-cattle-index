@@ -269,6 +269,24 @@ YTD_CUT = 37                    # ISO week the annual comparison runs through
 ROLLING_WEEKS = 52
 MIN_YEAR_WEEKS = 30             # below this a year is partial and not comparable
 
+# Below this many reporting states a year is not comparable either, however many
+# weeks it has. The auction archive reaches back to 2000, but coverage builds:
+# 12 states in 2000-01, 13, then 16, and 18 only from 2005. A year drawn from
+# twelve states is a different survey wearing the same name, and the share it
+# yields is not a smaller sample of the national one -- it is a different mix of
+# states, which is the whole quantity being measured.
+#
+# 17 is the floor the existing trusted series already sits on (2013-2017), so
+# this admits 2005-2010 and excludes 2000-2004 rather than being tuned to a
+# preferred answer.
+#
+# THE TEST IS STATES, NOT HEAD COUNT, and that distinction caught a real error.
+# Judging coverage by head against the 2011-2019 mean flags 2015 as thin at
+# 0.88 -- but 2015 has the same 17 states as the years either side of it and is
+# low because fewer cattle were sold that year, which is the signal, not a gap
+# in it. Head count conflates market volume with survey coverage. States do not.
+MIN_PANEL_STATES = 17
+
 # USDA retired the legacy archive mid-2019 and stood up its replacement in the
 # same weeks. Legacy runs normally through week 17 and then falls off a cliff --
 # 41k, 27k, 17k, 6k head against a 115k norm -- while MARS only completes its
@@ -318,6 +336,24 @@ def _feeder_weeks(conn):
     return out
 
 
+def _feeder_states(conn):
+    """{(iso_year, iso_week): {state, ...}} for the auction channel.
+
+    Kept separate from _feeder_weeks rather than folded into it because that
+    function sums head by source and this counts distinct states -- combining
+    them would mean carrying a set through the hot aggregation loop for the
+    benefit of one guard. Same CHANNEL filter, for the same reason.
+    """
+    rows = conn.cursor().execute(
+        "SELECT week_start, state FROM feeder_receipts "
+        "WHERE channel = '" + CHANNEL + "'").fetchall()
+    out = {}
+    for ws, state in rows:
+        y, w, _ = date.fromisoformat(str(db.iso(ws))).isocalendar()
+        out.setdefault((y, w), set()).add(state)
+    return out
+
+
 def _pick(by_source, year, week):
     """The source to trust for this week, and its [steers, heifers].
 
@@ -350,6 +386,7 @@ def heifer_share_annual(conn):
     archives mid-window. Every point covers the same calendar span.
     """
     weeks = _feeder_weeks(conn)
+    states = _feeder_states(conn)
     per_year = {}
     for (y, w), by_source in weeks.items():
         if w > YTD_CUT:
@@ -357,7 +394,9 @@ def heifer_share_annual(conn):
         src, v = _pick(by_source, y, w)
         if not src:
             continue
-        d = per_year.setdefault(y, {"steers": 0, "heifers": 0, "srcs": set(), "weeks": 0})
+        d = per_year.setdefault(y, {"steers": 0, "heifers": 0, "srcs": set(),
+                                    "weeks": 0, "states": set()})
+        d["states"] |= states.get((y, w), set())
         d["steers"] += v[0]
         d["heifers"] += v[1]
         d["srcs"].add(src)
@@ -368,12 +407,17 @@ def heifer_share_annual(conn):
         d = per_year[y]
         total = d["steers"] + d["heifers"]
         # A year missing a third of its weeks is not comparable to a whole one.
-        # This is what excludes 2010: the legacy archive begins in June of that
-        # year, leaving 12 of the 37 weeks.
+        # This excluded 2010 until the wtd_1 half of the auction archive was
+        # loaded (2026-09-28); 2010 had begun in June, leaving 12 of 37 weeks.
+        # It now runs whole, and the guard is kept for the partial CURRENT year
+        # and for anything else that arrives half-formed.
         if not total or d["weeks"] < MIN_YEAR_WEEKS:
+            continue
+        if len(d["states"]) < MIN_PANEL_STATES:
             continue
         out.append({"year": y, "steers": d["steers"], "heifers": d["heifers"],
                     "share": 100.0 * d["heifers"] / total, "weeks": d["weeks"],
+                    "states": len(d["states"]),
                     "src": "spliced" if len(d["srcs"]) > 1 else d["srcs"].pop()})
     return out
 

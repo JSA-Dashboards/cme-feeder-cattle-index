@@ -25,13 +25,22 @@ import pytest
 import herd
 
 
+# herd.MIN_PANEL_STATES drops a year reported by too few states, so every
+# fixture week is spread across that many. The head is duplicated per state
+# rather than divided: these tests assert a RATIO, which is unchanged by the
+# scaling, and an even split of 1000 across 17 states is not an integer.
+STATES = ["KS", "NE", "TX", "OK", "MO", "IA", "SD", "MT", "WY", "NM",
+          "AR", "TN", "KY", "VA", "NC", "GA", "AL", "MS"][:herd.MIN_PANEL_STATES]
+
+
 def build(rows):
     """An in-memory feeder_receipts holding (week_start, channel, steers, heifers)."""
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
                  "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
     conn.executemany(
-        "INSERT INTO feeder_receipts VALUES (?, 'mars', ?, 1, 'KS', ?, ?)", rows)
+        "INSERT INTO feeder_receipts VALUES (?, 'mars', ?, 1, ?, ?, ?)",
+        [(w, ch, st, s, h) for (w, ch, s, h) in rows for st in STATES])
     conn.commit()
     return conn
 
@@ -76,3 +85,38 @@ def test_the_blend_would_have_been_visibly_different():
         "FROM feeder_receipts").fetchone()[0]
     assert blended == pytest.approx(30.0)          # vs 50.0 auction-only
     assert share(conn) != pytest.approx(blended)
+
+
+# --- coverage guard -------------------------------------------------------
+#
+# The auction archive reaches back to 2000 but its state coverage builds: 12
+# states in 2000-01, rising to 18 by 2005. A year drawn from twelve states is a
+# different survey under the same name -- not a smaller sample of the national
+# share but a different mix of states, which is the quantity being measured.
+# These pin the cut so a future backfill cannot quietly re-admit those years.
+
+
+def test_a_thinly_covered_year_is_dropped():
+    thin = [(w.isoformat(), "auction", 1000, 1000) for w in WEEKS]
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
+                 "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
+    few = STATES[:herd.MIN_PANEL_STATES - 1]
+    conn.executemany(
+        "INSERT INTO feeder_receipts VALUES (?, 'mars', ?, 1, ?, ?, ?)",
+        [(w, ch, st, s, h) for (w, ch, s, h) in thin for st in few])
+    conn.commit()
+    assert share(conn) is None            # every week present, too few states
+
+
+def test_the_guard_is_states_not_head_count():
+    """A low-VOLUME year with full coverage must survive.
+
+    2015 is the live case: its head count runs ~12% under the 2011-2019 mean,
+    which a head-based threshold flags as thin -- but it reports from the same
+    17 states as the years either side, and the low volume IS the signal this
+    page exists to report. Judging coverage by head would have deleted the
+    benchmark year.
+    """
+    lean = [(w.isoformat(), "auction", 100, 100) for w in WEEKS]   # 10x less head
+    assert share(build(lean)) == pytest.approx(50.0)

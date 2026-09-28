@@ -267,8 +267,21 @@ def ingest_mars(conn, since: date, until: date, verbose=True):
     return n_reports, n
 
 
-def load_legacy(conn, zip_path, channel="auction", verbose=True):
+def load_legacy(conn, zip_path, channel="auction", verbose=True, before=None):
     """Load a legacy archive from an already-downloaded zip.
+
+    `before` drops every row dated on or after that date. It exists because the
+    AUCTION archive ships in TWO halves that ABUT rather than overlap -- wtd_1
+    ends 2010-06-28 and wtd_2 begins the same day -- and _upsert replaces a
+    (week, source, slug, state) group outright. Without a cutoff, loading wtd_1
+    second would DELETE wtd_2's 48,682-head week of 2010-06-28 and leave wtd_1's
+    257-head remnant of it: a 99.5% loss, silent, in a week that still looks
+    like a week.
+
+    This is the 2019 handover again in a different costume, and it has the same
+    answer -- an absolute date that says which archive OWNS a week, rather than
+    a preference that lets whichever ran last win. Pass before=2010-06-28 when
+    loading wtd_1 into a database that already holds wtd_2.
 
     For the AUCTION archive, only the states the MARS panel covers are kept, so
     the two eras describe the same footprint and the series does not gain
@@ -308,6 +321,8 @@ def load_legacy(conn, zip_path, channel="auction", verbose=True):
                     continue
                 if hc <= 0:
                     continue
+                if before is not None and d >= before:
+                    continue
                 agg[(_week_start(d), LEGACY_SLUG, st)][0 if idx == "steers" else 1] += hc
                 kept += 1
         if verbose:
@@ -322,6 +337,9 @@ def main():
     ap.add_argument("--until", default=None, help="ISO date (default: today)")
     ap.add_argument("--legacy", default=None,
                     help="path to a downloaded usda_legacy_ls_auction_*.zip")
+    ap.add_argument("--legacy-before", default=None, metavar="YYYY-MM-DD",
+                    help="drop legacy rows dated on or after this; use "
+                         "2010-06-28 when loading the wtd_1 half beside wtd_2")
     ap.add_argument("--legacy-direct", default=None,
                     help="path to a downloaded usda_legacy_ls_direct_*.zip")
     ap.add_argument("--legacy-video", default=None,
@@ -356,7 +374,8 @@ def main():
             if not path:
                 continue
             print(f"loading {ch} archive {path}")
-            n = load_legacy(conn, path, ch)
+            before = date.fromisoformat(a.legacy_before) if a.legacy_before else None
+            n = load_legacy(conn, path, ch, before=before)
             print(f"  stored {n:,} week/state rows as channel='{ch}'")
     else:
         until = date.fromisoformat(a.until) if a.until else date.today()

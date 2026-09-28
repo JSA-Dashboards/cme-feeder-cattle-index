@@ -119,7 +119,13 @@ LEGACY_CLASSES = {"Feeder Steers": "steers", "Feeder Heifers": "heifers"}
 # rather than NULL so the natural key stays usable on both backends.
 LEGACY_SLUG = 0
 
-COLUMNS = ["week_start", "source", "slug_id", "state", "steers", "heifers"]
+COLUMNS = ["week_start", "source", "channel", "slug_id", "state", "steers", "heifers"]
+
+# Sales channels. Auction is roughly 45% of the three channels' head, so a
+# measure built on it alone is a sale-barn proxy, not a national one -- and the
+# channels differ in LEVEL even where they agree on direction: over 2011-2019
+# auction ran about 3 points above the all-channel figure every year.
+CHANNELS = ("auction", "direct", "video")
 
 
 def init_tables(conn):
@@ -127,13 +133,52 @@ def init_tables(conn):
         CREATE TABLE IF NOT EXISTS feeder_receipts (
             week_start TEXT NOT NULL,
             source TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT 'auction',
             slug_id INTEGER NOT NULL,
             state TEXT,
             steers INTEGER NOT NULL,
             heifers INTEGER NOT NULL,
-            PRIMARY KEY (week_start, source, slug_id, state)
+            PRIMARY KEY (week_start, source, channel, slug_id, state)
         )
     """)
+    # Migration for databases created before channels existed. Everything stored
+    # then was auction, so that is the right backfill.
+    #
+    # It has to be a REBUILD, not an ALTER: the old primary key was
+    # (week_start, source, slug_id, state), and SQLite cannot change a primary
+    # key in place. Adding the column alone leaves direct and video rows
+    # colliding with auction on the legacy sentinel slug_id, which surfaces as
+    # an IntegrityError on the first non-auction load rather than as bad data.
+    try:
+        info = conn.execute("PRAGMA table_info(feeder_receipts)").fetchall()
+        cols = {r[1] for r in info}
+        pk = {r[1] for r in info if r[5]}
+        if cols and ("channel" not in cols or "channel" not in pk):
+            conn.execute("ALTER TABLE feeder_receipts RENAME TO feeder_receipts_old")
+            conn.execute("""
+                CREATE TABLE feeder_receipts (
+                    week_start TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    channel TEXT NOT NULL DEFAULT 'auction',
+                    slug_id INTEGER NOT NULL,
+                    state TEXT,
+                    steers INTEGER NOT NULL,
+                    heifers INTEGER NOT NULL,
+                    PRIMARY KEY (week_start, source, channel, slug_id, state)
+                )
+            """)
+            conn.execute(
+                "INSERT INTO feeder_receipts "
+                "(week_start, source, channel, slug_id, state, steers, heifers) "
+                "SELECT week_start, source, 'auction', slug_id, state, steers, heifers "
+                "FROM feeder_receipts_old")
+            moved = conn.execute("SELECT COUNT(*) FROM feeder_receipts").fetchone()[0]
+            conn.execute("DROP TABLE feeder_receipts_old")
+            print(f"  migrated feeder_receipts: rebuilt with channel in the key, "
+                  f"{moved:,} existing rows kept as 'auction'")
+    except Exception:
+        pass            # Snowflake path: PRAGMA is not a thing, and the column
+                        # is already there. Nothing to migrate.
     conn.commit()
 
 
@@ -153,7 +198,7 @@ def _mdy(s):
     return date(int(y), int(m), int(d))
 
 
-def _upsert(conn, rows, source):
+def _upsert(conn, rows, source, channel="auction"):
     """Replace whole (week, source, slug) groups rather than updating in place.
 
     A re-run or an AMS correction must not layer a second copy on top of the
@@ -165,11 +210,12 @@ def _upsert(conn, rows, source):
     for (week, slug_id, state), (s, h) in sorted(rows.items()):
         conn.cursor().execute(
             f"DELETE FROM feeder_receipts WHERE week_start = {db.placeholders(1)} "
-            f"AND source = {db.placeholders(1)} AND slug_id = {db.placeholders(1)} "
-            f"AND state = {db.placeholders(1)}", (week, source, slug_id, state))
+            f"AND source = {db.placeholders(1)} AND channel = {db.placeholders(1)} "
+            f"AND slug_id = {db.placeholders(1)} "
+            f"AND state = {db.placeholders(1)}", (week, source, channel, slug_id, state))
         conn.cursor().execute(
             f"INSERT INTO feeder_receipts ({','.join(COLUMNS)}) VALUES ({ph})",
-            (week, source, slug_id, state, s, h))
+            (week, source, channel, slug_id, state, s, h))
         n += 1
     conn.commit()
     return n
@@ -217,17 +263,26 @@ def ingest_mars(conn, since: date, until: date, verbose=True):
         if verbose:
             print(f"  {name[:44]:<44} {kept:>6} feeder rows")
 
-    n = _upsert(conn, agg, "mars")
+    n = _upsert(conn, agg, "mars", "auction")
     return n_reports, n
 
 
-def load_legacy(conn, zip_path, verbose=True):
-    """Load the pre-2019 archive from an already-downloaded zip.
+def load_legacy(conn, zip_path, channel="auction", verbose=True):
+    """Load a legacy archive from an already-downloaded zip.
 
-    Only the states the MARS panel covers are kept, so the two eras describe the
-    same footprint and the series does not gain territory at the seam.
+    For the AUCTION archive, only the states the MARS panel covers are kept, so
+    the two eras describe the same footprint and the series does not gain
+    territory at the seam.
+
+    For DIRECT and VIDEO there is no such panel to match: those channels have
+    their own geography (10 state direct reports, 7 video auctions) and the point
+    of loading them is to widen coverage toward the national total. Restricting
+    them to the auction panel's states would throw away most of what they add.
+    What has to stay constant for a trend is the footprint over TIME within a
+    channel, not across channels.
     """
-    panel_states = {st for st, _ in PANEL_SLUGS.values()}
+    panel_states = ({st for st, _ in PANEL_SLUGS.values()}
+                    if channel == "auction" else None)
     agg = defaultdict(lambda: [0, 0])
     zf = zipfile.ZipFile(zip_path)
     for name in sorted(zf.namelist()):
@@ -241,7 +296,7 @@ def load_legacy(conn, zip_path, verbose=True):
                 if not idx:
                     continue
                 st = (r.get("STATE_ABBREV") or "").strip()
-                if st not in panel_states:
+                if panel_states is not None and st not in panel_states:
                     continue
                 hc = r.get("HEAD_COUNT")
                 if not hc:
@@ -257,7 +312,7 @@ def load_legacy(conn, zip_path, verbose=True):
                 kept += 1
         if verbose:
             print(f"  {name[:50]:<50} {kept:>8,} feeder rows")
-    n = _upsert(conn, agg, "legacy")
+    n = _upsert(conn, agg, "legacy", channel)
     return n
 
 
@@ -267,6 +322,10 @@ def main():
     ap.add_argument("--until", default=None, help="ISO date (default: today)")
     ap.add_argument("--legacy", default=None,
                     help="path to a downloaded usda_legacy_ls_auction_*.zip")
+    ap.add_argument("--legacy-direct", default=None,
+                    help="path to a downloaded usda_legacy_ls_direct_*.zip")
+    ap.add_argument("--legacy-video", default=None,
+                    help="path to a downloaded usda_legacy_ls_video_*.zip")
     ap.add_argument("--show", action="store_true", help="print the series and exit")
     a = ap.parse_args()
 
@@ -291,10 +350,14 @@ def main():
         conn.close()
         return
 
-    if a.legacy:
-        print(f"loading legacy archive {a.legacy}")
-        n = load_legacy(conn, a.legacy)
-        print(f"stored {n:,} week/state rows")
+    if a.legacy or a.legacy_direct or a.legacy_video:
+        for path, ch in ((a.legacy, "auction"), (a.legacy_direct, "direct"),
+                         (a.legacy_video, "video")):
+            if not path:
+                continue
+            print(f"loading {ch} archive {path}")
+            n = load_legacy(conn, path, ch)
+            print(f"  stored {n:,} week/state rows as channel='{ch}'")
     else:
         until = date.fromisoformat(a.until) if a.until else date.today()
         since = date.fromisoformat(a.since) if a.since else until - timedelta(days=120)

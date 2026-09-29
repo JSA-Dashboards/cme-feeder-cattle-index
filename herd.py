@@ -568,21 +568,29 @@ def receipts_volume_annual(conn):
        absent report, and skipping it would discard the auction and direct head
        that really did sell that week.
 
-    3. No year is excluded for thin STATE coverage. The early years report from
-       fewer states, which biases a share; a head count from twelve states is
-       simply a smaller true number, and mislabelling it as unavailable would be
-       worse than showing it with its coverage stated.
+    3. No year is excluded for thin STATE coverage, but they ARE flagged, and
+       the distinction cost a shipped error. A head count from twelve states is
+       not a biased number the way a share is -- it is simply a smaller true
+       one -- so excluding those years would be wrong. But drawing them on one
+       continuous line is also wrong, because a line asserts comparability
+       along its length: the auction panel fills from 12 states in 2000 to 18
+       by 2005, and the 24% "rise" from 2001 to 2005 is mostly that. `thin`
+       marks them so a caller can draw them apart, the way the share chart
+       already does.
 
     2020 is still dropped. Legacy direct decays before MARS starts at week 39, so
     2020 direct lands at 74% of 2019 and 82% of 2021 -- a handover artefact that
     would read as a collapse in country trade.
     """
     weeks = _feeder_weeks(conn)
+    states = _feeder_states(conn)
     per = {}
     for (y, w), by_channel in weeks.items():
         if y in SKIP_YEARS:
             continue
-        d = per.setdefault(y, {"steers": 0, "heifers": 0, "weeks": set()})
+        d = per.setdefault(y, {"steers": 0, "heifers": 0, "weeks": set(),
+                               "states": set()})
+        d["states"] |= states.get((y, w), set())
         for ch, v in by_channel.items():
             d["steers"] += v[0]
             d["heifers"] += v[1]
@@ -596,6 +604,8 @@ def receipts_volume_annual(conn):
         n = len(d["weeks"])
         out.append({"year": y, "steers": d["steers"], "heifers": d["heifers"],
                     "weeks": n, "complete": n >= MIN_FULL_YEAR_WEEKS,
+                    "states": len(d["states"]),
+                    "thin": len(d["states"]) < MIN_PANEL_STATES,
                     # Head does NOT cross the archive handover cleanly even
                     # though share does -- the 2019->2021 head ratio is 1.16 for
                     # auction and 1.30 for video against 0.985 for direct,

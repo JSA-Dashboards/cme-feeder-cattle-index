@@ -3,12 +3,43 @@ Parses USDA AMS "Direct Feeder Cattle Report" PDFs (per-state, published
 weekly on Fridays) into the same qualifying-row shape update_index.py
 already uses for sale-barn auction data.
 
-These reports are NOT exposed as structured JSON via the MARS API (only
-narrative text) -- the real weight-bracket price tables only exist in the
-PDF, without visible ruling lines, so generic table-extraction (pdfplumber's
-line/text strategies) doesn't work. This parses by clustering pdfplumber's
-per-word x/y coordinates into rows and fixed column bands instead, which
-reflects the PDF's real (invisible) grid.
+THE CLAIM THAT USED TO SIT HERE WAS WRONG, and it cost something to find out.
+It read: "These reports are NOT exposed as structured JSON via the MARS API
+(only narrative text)". That is a true statement about ONE endpoint and a false
+one about the API, and it was believed for long enough to shape a whole
+analysis -- the heifer-share series was held to auction receipts alone partly on
+the strength of it.
+
+MARS serves these slugs in SECTIONS, unlike the auction slugs:
+
+    GET /reports/1955                     auction   -> sectionNames []
+    GET /reports/2710                     direct    -> ["Report Header",
+                                                       "Report Details",
+                                                       "Report Receipts"]
+
+Calling the bare /reports/{slug} on a sectioned slug returns HTTP 200 with
+narrative rows and NO head_count key -- exactly the impression recorded above,
+and exactly what feeder_sex_mix.fetch_slug() would produce if pointed here.
+The data is one path segment away:
+
+    GET /reports/2710/Report%20Details?q=report_begin_date=2023-06-01:2023-06-30
+
+which returns per-line-item rows carrying class, head_count, frame,
+muscle_grade, weights and freight, weekly and unbroken from 2020-09-21 for
+direct and 2020-05-06 for video. Date filtering is real: an out-of-range window
+returns 200 with zero rows rather than silently falling back to the current
+week.
+
+THIS PARSER IS STILL THE RIGHT TOOL FOR THE CURRENT WEEK, which is what the
+index needs, and the PDF remains the only place the weight-bracket price table
+appears in its published form. The paragraph above is kept because the failure
+mode generalises: an endpoint that answers 200 with plausible rows is not
+evidence that it is the endpoint holding your data.
+
+The tables have no visible ruling lines, so generic table-extraction
+(pdfplumber's line/text strategies) doesn't work. This parses by clustering
+pdfplumber's per-word x/y coordinates into rows and fixed column bands instead,
+which reflects the PDF's real (invisible) grid.
 
 CME's published methodology (cmegroup.com, confirmed against the workbook's
 own Sheet1 note) requires, for direct/video/internet trade to qualify:

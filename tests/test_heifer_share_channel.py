@@ -150,3 +150,35 @@ def test_the_guard_is_states_not_head_count():
     """
     lean = [(w, so, ch, s // 10, h // 10) for (w, so, ch, s, h) in BALANCED]
     assert share(build(lean)) == pytest.approx(30.0)
+
+
+def test_a_short_year_lands_in_the_caveated_segment_not_nowhere():
+    """Between MIN_THIN_WEEKS and MIN_YEAR_WEEKS a year is shown apart, not dropped.
+
+    2002-2004 are the live case: the all-channel rule (every channel or skip the
+    week) put them at 27-29 weeks because video covered no more, and they
+    vanished from a chart that had shown them. Their measured seasonal bias is
+    under a third of a point, so vanishing was the wrong answer.
+    """
+    short = [w for w in WEEKS[:herd.MIN_YEAR_WEEKS - 1]]      # enough for thin, not clean
+    rows = []
+    for w in short:
+        for c, s, h in (("auction", 1000, 1000), ("direct", 900, 100),
+                        ("video", 900, 100)):
+            rows.append((w.isoformat(), "mars", c, s, h))
+    conn = build(rows)
+    assert share(conn) is None                                # not in the clean series
+    assert 2023 in {r["year"] for r in herd.heifer_share_thin(conn)}
+
+
+def test_a_year_below_even_the_thin_bar_is_dropped():
+    """Below MIN_THIN_WEEKS nothing has been measured, so nothing is claimed."""
+    tiny = WEEKS[:herd.MIN_THIN_WEEKS - 1]
+    rows = []
+    for w in tiny:
+        for c, s, h in (("auction", 1000, 1000), ("direct", 900, 100),
+                        ("video", 900, 100)):
+            rows.append((w.isoformat(), "mars", c, s, h))
+    conn = build(rows)
+    assert herd.heifer_share_annual(conn) == []
+    assert herd.heifer_share_thin(conn) == []

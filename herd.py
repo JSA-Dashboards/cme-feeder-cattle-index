@@ -269,6 +269,23 @@ YTD_CUT = 37                    # ISO week the annual comparison runs through
 ROLLING_WEEKS = 52
 MIN_YEAR_WEEKS = 30             # below this a year is partial and not comparable
 
+# ...but a year between these two bars still earns a place in the CAVEATED
+# segment rather than vanishing. 2002-2004 sat there: video carried 27-29 of the
+# 37 weeks, so the all-channel rule (every channel or skip the week) put them
+# under 30 and they disappeared from a chart that had shown them.
+#
+# MEASURED, NOT ASSUMED. The worry with a short year is seasonal bias, and it is
+# a real worry -- weeks 11-20 average 44.2% against 39.3% for weeks 21-30, a
+# 4.9-point swing. But the gaps in those years are SCATTERED, not clustered:
+# reweighting each year's weeks to the seasonal norm moves 2002 by -0.28 points,
+# 2003 by -0.31 and 2004 by +0.02. Years already in the clean series carry as
+# much (2007, +0.20 on 35 weeks), and all of it is far under the +1.62-point
+# video seam the recent end already rests on.
+#
+# 27 is where the evidence runs out rather than a round number: it is 2003, the
+# thinnest year measured, and nothing below it has been checked.
+MIN_THIN_WEEKS = 27
+
 # Below this many reporting states a year is not comparable either, however many
 # weeks it has. The auction archive reaches back to 2000, but coverage builds:
 # 12 states in 2000-01, 13, then 16, and 18 only from 2005. A year drawn from
@@ -441,7 +458,7 @@ def _annual_rows(conn):
         # and for anything else that arrives half-formed. A year failing THIS
         # test is not reported by either builder -- it is incomplete, not merely
         # thinly covered, and there is nothing to caveat.
-        if not total or d["weeks"] < MIN_YEAR_WEEKS:
+        if not total or d["weeks"] < MIN_THIN_WEEKS:
             continue
         out.append({"year": y, "steers": d["steers"], "heifers": d["heifers"],
                     "share": 100.0 * d["heifers"] / total, "weeks": d["weeks"],
@@ -462,7 +479,8 @@ def heifer_share_annual(conn):
     free. heifer_share_summary reads this, so the benchmark, the peak and the
     distance between them cannot be set by a year drawn from twelve states.
     """
-    return [r for r in _annual_rows(conn) if r["states"] >= MIN_PANEL_STATES]
+    return [r for r in _annual_rows(conn)
+            if r["states"] >= MIN_PANEL_STATES and r["weeks"] >= MIN_YEAR_WEEKS]
 
 
 def heifer_share_thin(conn):
@@ -479,7 +497,8 @@ def heifer_share_thin(conn):
     and shifting set of states, so their LEVEL is not comparable with the rest
     even though each year is internally sound.
     """
-    return [r for r in _annual_rows(conn) if r["states"] < MIN_PANEL_STATES]
+    return [r for r in _annual_rows(conn)
+            if r["states"] < MIN_PANEL_STATES or r["weeks"] < MIN_YEAR_WEEKS]
 
 
 def heifer_share_rolling(conn):

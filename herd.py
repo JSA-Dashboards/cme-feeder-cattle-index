@@ -546,6 +546,64 @@ def heifer_share_thin(conn):
             if r["states"] < MIN_PANEL_STATES or r["weeks"] < MIN_YEAR_WEEKS]
 
 
+# A full year is 52 or 53 weeks; below this it is not one.
+MIN_FULL_YEAR_WEEKS = 48
+
+
+def receipts_volume_annual(conn):
+    """[{year, steers, heifers, weeks, complete, era}] -- whole years, all weeks.
+
+    THREE THINGS DIFFER FROM heifer_share_annual, all of them because this is a
+    LEVEL and that one is a RATIO.
+
+    1. The whole year, not year-to-date through week 37. The short window exists
+       so the current, partial year stays comparable; for a head count it just
+       amputates the autumn run, which is when a third of the year's cattle sell.
+       The current year is reported here as incomplete instead.
+
+    2. A week missing a channel is KEPT. The share series drops it, correctly:
+       the channels sit ~10 points apart, so two of three is a different mix.
+       Volume has no such problem and the rule actively harms it -- video
+       auctions are EPISODIC, a silent video week means no sale rather than an
+       absent report, and skipping it would discard the auction and direct head
+       that really did sell that week.
+
+    3. No year is excluded for thin STATE coverage. The early years report from
+       fewer states, which biases a share; a head count from twelve states is
+       simply a smaller true number, and mislabelling it as unavailable would be
+       worse than showing it with its coverage stated.
+
+    2020 is still dropped. Legacy direct decays before MARS starts at week 39, so
+    2020 direct lands at 74% of 2019 and 82% of 2021 -- a handover artefact that
+    would read as a collapse in country trade.
+    """
+    weeks = _feeder_weeks(conn)
+    per = {}
+    for (y, w), by_channel in weeks.items():
+        if y in SKIP_YEARS:
+            continue
+        d = per.setdefault(y, {"steers": 0, "heifers": 0, "weeks": set()})
+        for ch, v in by_channel.items():
+            d["steers"] += v[0]
+            d["heifers"] += v[1]
+        d["weeks"].add(w)
+
+    out = []
+    for y in sorted(per):
+        d = per[y]
+        if not (d["steers"] + d["heifers"]):
+            continue
+        n = len(d["weeks"])
+        out.append({"year": y, "steers": d["steers"], "heifers": d["heifers"],
+                    "weeks": n, "complete": n >= MIN_FULL_YEAR_WEEKS,
+                    # Head does NOT cross the archive handover cleanly even
+                    # though share does -- the 2019->2021 head ratio is 1.16 for
+                    # auction and 1.30 for video against 0.985 for direct,
+                    # because both rosters widened. Callers draw the eras apart.
+                    "era": "mars" if y >= 2021 else "legacy"})
+    return out
+
+
 def heifer_share_rolling(conn):
     """
     [{week, share, steers, heifers}] on a trailing 52-week window.

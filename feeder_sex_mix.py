@@ -267,6 +267,123 @@ def ingest_mars(conn, since: date, until: date, verbose=True):
     return n_reports, n
 
 
+# ---------------------------------------------------------------------------
+# MARS direct & video, 2020-09 onward -- the other side of the legacy seam.
+#
+# THE ROSTERS BELOW MATCH THE 2019 LEGACY FOOTPRINT, NOT THE REPO'S CME PANEL.
+# direct_reports.DIRECT_REPORT_SLUGS and video_reports.VIDEO_REPORT_SLUGS exist
+# to feed the CME feeder index and are scoped to its 12-state region. Legacy was
+# scoped differently, and a receipts TREND needs the footprint constant over
+# time far more than it needs to be wide.
+#
+# Concretely, using the CME panel here would add a dozen Nebraska and Oklahoma
+# video barns legacy never carried and step national video head +33% at the
+# seam -- a coverage artefact that reads exactly like a market move. The same
+# lesson the auction panel filter and MIN_PANEL_STATES already encode.
+#
+# Derived by listing every location in the legacy 2019 archives and matching it
+# to a MARS report by name. Legacy direct had 13 locations (Illinois Direct
+# folds into Eastern Cornbelt) and no Missouri or Southwest, so those two MARS
+# reports are deliberately absent.
+LEGACY_DIRECT_SLUGS = {
+    "TX": 2710, "CO": 2906, "KS": 3097, "OK": 3098, "NM": 2708,
+    "SE": 2709,      # Southeast (AL/AR/FL/GA/LA/MS/TN)
+    "ECB": 3096,     # Eastern Cornbelt (IL/IN/MI/MN/OH/KY) -- absorbs legacy "Illinois Direct"
+    "NW": 3059,      # Northwest (WA/OR/ID/UT)
+    "WY-NE": 3237, "MT": 2770, "IA": 3455, "SD": 3184,
+}
+
+# Legacy video 2019 had 17 locations. Three have no MARS successor -- Waynesville
+# NC (17,321 head), Daleville VA (2,266) and Superior Stampede (3,468), together
+# 23,055 head or 1.5% of that year. Named here rather than silently dropped:
+# a 1.5% documented shortfall is a far better trade than the +33% the wide
+# roster adds, but it is a shortfall and the seam comparison should expect it.
+LEGACY_VIDEO_SLUGS = {
+    "SUPERIOR": 2713, "WESTERN": 3242, "CATTLE_COUNTRY": 3241,
+    "JOPLIN": 2934, "NORTHERN": 2772, "NORWOOD": 3161,
+    "ALBANY": 2894, "LEXINGTON_KY": 2896, "TOPPENISH": 3087,
+    "SUPERIOR_WEB": 3103, "S_OKLAHOMA": 3104, "HUSS_LEX": 2938,
+    "GLASGOW": 2895, "APACHE": 3102,
+}
+
+# Legacy counted "Feeder Steers"/"Feeder Heifers" and carried bulls and Holsteins
+# as separate classes. MARS splits the same way: commodity separates Feeder from
+# Replacement Cattle, and class separates Steers/Heifers from Dairy Steers/Dairy
+# Heifers. Keeping only the first of each matches how the legacy half was built.
+MARS_CHANNEL_COMMODITY = "Feeder Cattle"
+MARS_CHANNEL_CLASSES = {"Steers": "steers", "Heifers": "heifers"}
+
+SECTION_URL = "https://marsapi.ams.usda.gov/services/v1.2/reports/{slug}/Report Details"
+
+
+def fetch_channel_year(slug_id, year, auth, attempts=4):
+    """Detail rows for one report/year, or None if it could not be fetched.
+
+    ONE YEAR AT A TIME, DELIBERATELY. A multi-year window makes several of the
+    video slugs answer HTTP 500 with an empty body, and a 500 that is not checked
+    is indistinguishable from "this report had no sales" -- which silently drops
+    a whole auction's head. Returning None rather than [] keeps those two cases
+    apart for the caller.
+    """
+    import time
+    for a in range(attempts):
+        try:
+            r = requests.get(
+                SECTION_URL.format(slug=slug_id), auth=auth,
+                params={"q": f"report_begin_date={year}-01-01:{year}-12-31"},
+                timeout=300)
+        except requests.RequestException:
+            time.sleep(2 + 3 * a)
+            continue
+        if r.status_code == 200:
+            # The section endpoint wraps rows in an envelope. The BARE endpoint
+            # answers 200 for these slugs too, with narrative rows and no
+            # head_count -- which is how the repo concluded for months that MARS
+            # had no structured direct/video data at all.
+            return (r.json() or {}).get("results") or []
+        time.sleep(2 + 3 * a)
+    return None
+
+
+def ingest_mars_channels(conn, channel, years, verbose=True):
+    """Load direct or video receipts from MARS for the given years."""
+    slugs = LEGACY_DIRECT_SLUGS if channel == "direct" else LEGACY_VIDEO_SLUGS
+    auth = get_auth()
+    agg = defaultdict(lambda: [0, 0])
+    failures = []
+    for name, slug in sorted(slugs.items()):
+        kept = 0
+        for year in years:
+            rows = fetch_channel_year(slug, year, auth)
+            if rows is None:
+                failures.append((name, slug, year))
+                continue
+            for r in rows:
+                if (r.get("commodity") or "").strip() != MARS_CHANNEL_COMMODITY:
+                    continue
+                idx = MARS_CHANNEL_CLASSES.get((r.get("class") or "").strip())
+                if not idx:
+                    continue
+                hc = str(r.get("head_count") or "").replace(",", "").strip()
+                if not hc.isdigit() or int(hc) <= 0:
+                    continue
+                try:
+                    d = _mdy(r["report_begin_date"])
+                except (ValueError, KeyError):
+                    continue
+                st = (r.get("state_code") or r.get("market_location_state")
+                      or name)[:12]
+                agg[(_week_start(d), slug, st)][0 if idx == "steers" else 1] += int(hc)
+                kept += 1
+        if verbose:
+            print(f"  {name:<16} slug {slug:<6} {kept:>7,} feeder rows")
+    if failures:
+        # Loud, because a silent gap here is the whole failure mode.
+        print(f"  !! {len(failures)} slug/year fetches FAILED and are MISSING: {failures}")
+    n = _upsert(conn, agg, "mars", channel)
+    return n, failures
+
+
 def load_legacy(conn, zip_path, channel="auction", verbose=True, before=None):
     """Load a legacy archive from an already-downloaded zip.
 

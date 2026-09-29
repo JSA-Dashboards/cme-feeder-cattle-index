@@ -182,3 +182,28 @@ def test_a_year_below_even_the_thin_bar_is_dropped():
     conn = build(rows)
     assert herd.heifer_share_annual(conn) == []
     assert herd.heifer_share_thin(conn) == []
+
+
+def test_video_hands_over_at_week_19_not_18():
+    """The boundary week belongs to legacy, and getting it wrong drops the week.
+
+    MARS video's first week is 2020-05-04 = ISO 2020W19, so giving that week to
+    MARS looked right. In it legacy carries 28,687 head and MARS 1,967, because
+    MARS is starting up rather than legacy finishing -- the old boundary threw
+    away 26,720 head. Nothing published moved (2020 is in SKIP_YEARS), which is
+    exactly why it needs a test rather than a reader noticing.
+    """
+    assert herd.CHANNEL_LEGACY_THROUGH["video"] == (2020, 19)
+
+
+def test_the_boundary_prefers_the_source_that_actually_covers_the_week():
+    """A ramping-up MARS week must not displace a full legacy one, and vice versa."""
+    w = date.fromisocalendar(2020, 19, 1)
+    rows = []
+    for c, s, h in (("auction", 1000, 1000), ("direct", 900, 100)):
+        rows.append((w.isoformat(), "legacy", c, s, h))
+    rows.append((w.isoformat(), "legacy", "video", 20000, 8687))   # full legacy week
+    rows.append((w.isoformat(), "mars", "video", 1400, 567))       # MARS ramping up
+    conn = build(rows)
+    picked = herd._feeder_weeks(conn)[(2020, 19)]["video"]
+    assert picked == [20000 * len(STATES), 8687 * len(STATES)]

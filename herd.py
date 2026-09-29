@@ -279,8 +279,12 @@ MIN_YEAR_WEEKS = 30             # below this a year is partial and not comparabl
 # 4.9-point swing. But the gaps in those years are SCATTERED, not clustered:
 # reweighting each year's weeks to the seasonal norm moves 2002 by -0.28 points,
 # 2003 by -0.31 and 2004 by +0.02. Years already in the clean series carry as
-# much (2007, +0.20 on 35 weeks), and all of it is far under the +1.62-point
-# video seam the recent end already rests on.
+# much (2007, +0.20 on 35 weeks).
+#
+# This used to end "and all of it is far under the +1.62-point video seam the
+# recent end already rests on". THERE IS NO VIDEO SEAM; see CHANNEL_LEGACY_THROUGH
+# below. The comparison is kept without it because the measured bias stands on
+# its own.
 #
 # 27 is where the evidence runs out rather than a round number: it is 2003, the
 # thinnest year measured, and nothing below it has been checked.
@@ -349,8 +353,49 @@ CHANNELS = ("auction", "direct", "video")
 CHANNEL_LEGACY_THROUGH = {
     "auction": (2019, 17),   # MARS auction completes its panel at W19
     "direct": (2020, 38),    # MARS direct detail begins 2020-09-21 = W39
-    "video": (2020, 18),     # MARS video detail begins 2020-05-04 = W19
+    "video": (2020, 19),     # see below -- NOT 18
 }
+
+# VIDEO'S BOUNDARY IS 19, NOT 18, AND THAT IS A CORRECTION.
+#
+# MARS video's first week is 2020-05-04 = ISO 2020W19, so handing that week to
+# MARS looked right. It is not: in that week legacy carries 28,687 head and MARS
+# only 1,967, because MARS is starting up rather than legacy finishing. The old
+# boundary dropped 26,720 head. Nothing published moved -- 2020 is in SKIP_YEARS
+# and the rolling series starts after direct's later handover -- but a rule that
+# silently discards 93% of a week is wrong whether or not anyone is reading it.
+#
+# Safe in the other direction too: after that week legacy video never exceeds
+# 6,408 head, so giving it W19 cannot let a remnant outvote a real MARS week.
+#
+# THERE IS NO VIDEO SEAM, and the "+1.62 points" this file used to cite as one
+# was a measurement error of mine. It compared legacy 2019 with MARS 2021 -- two
+# years apart, with 2020 skipped between them -- and called the difference a
+# join. The adjacent-year join is legacy 2019 36.40% against MARS 2020 36.27%:
+#
+#     -0.13 pt.
+#
+# What the +1.62 measures is two years of market movement, and it is real:
+#   * Within MARS alone, on a common week window, 2020 36.27% -> 2021 37.19% ->
+#     2022 37.91%. A steady climb of about +0.9/yr with no archive change in it.
+#   * It is WITHIN-location, not mix: decomposing legacy 2019 -> MARS 2021 gives
+#     +1.62 within-location and -0.10 from the roster. Nine of eleven comparable
+#     auctions rose, and the five carrying 92% of head all rose together --
+#     Superior +1.61, Western +1.84, Cattle Country +1.57, Joplin +2.78,
+#     Norwood +2.06. A coverage artefact moves a few locations; it does not move
+#     every large one by the same amount.
+#   * Norwood is the location where the two archives are PROVEN identical
+#     (+0.22 pt over 12 paired weeks, see feeder_sex_mix.py) and it rose +2.06 --
+#     more than the aggregate.
+#   * Every artefact that could be quantified runs the OTHER way, hiding about
+#     0.6 pt of real movement rather than manufacturing any: the unmatched
+#     locations -0.07, legacy 2019's Northern hole -0.31 to -0.41, week-mix -0.21.
+#
+# The control channels were never controls, which is why this looked anomalous.
+# Direct's tidy -0.12 across the same span is two large offsetting moves
+# (44.09 -> 38.75 -> 43.97), not stability. And auction is the one channel
+# holding both sources in the same year: 2019 legacy 46.28% vs 2019 MARS 45.84%,
+# a cross-source difference of -0.44 pt. Small, and negative.
 
 # 2020 has no honest annual point and is dropped rather than drawn.
 # The basis is year-to-date through week 37, which in 2020 ends 09-13 -- but

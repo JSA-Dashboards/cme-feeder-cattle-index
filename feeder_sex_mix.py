@@ -34,13 +34,41 @@ THE SPLICE WAS CHECKED, NOT ASSUMED:
     states; MARS 2020 carried 4,415,818. A ratio of 0.984.
   * no step at the join -- 2018 45.77%, 2020 45.14%.
 
-AND WHAT COULD NOT BE CHECKED. The two sources never overlap at full strength.
-Legacy runs normally through 2019 week 17 (87k-222k head/week) and then collapses
-as USDA retires it -- 41k, 27k, 17k, 6k -- while MARS does not complete its panel
-until week 19. Comparing them week-by-week across that window reports a 3.96 pt
-disagreement that is entirely an artefact of legacy's dying remnant, which skews
-heifer-heavy at 51-60%. So 2019 is stored from BOTH sources and the analytics
-splice it at week 17, flagged rather than presented as measured.
+WHAT COULD NOT BE CHECKED ON AUCTION. The two sources never overlap at full
+strength here. Legacy runs normally through 2019 week 17 (87k-222k head/week) and
+then collapses as USDA retires it -- 41k, 27k, 17k, 6k -- while MARS does not
+complete its panel until week 19. Comparing them week-by-week across that window
+reports a 3.96 pt disagreement that is entirely an artefact of legacy's dying
+remnant, which skews heifer-heavy at 51-60%. So 2019 is stored from BOTH sources
+and the analytics splice it at week 17, flagged rather than presented as measured.
+
+AND WHAT COULD, ON VIDEO -- the calibration this splice was missing.
+
+Legacy video decays through 2020 the same way (1,580,754 head in 2019, 217,516 in
+2020, 2,023 in 2021), so the overlap looked like another dying remnant. One
+location is not: NORWOOD, NC kept reporting normally right through it, 22,683
+head over 14 legacy weeks inside 2020-05-04..2021-01-18 -- more than its entire
+2019. On the 12 weeks BOTH archives carry it:
+
+    legacy  17,953 head   39.26% heifers
+    MARS    17,857 head   39.48% heifers
+    delta +0.22 pt, head ratio 0.9947, and EIGHT of the twelve weeks identical
+    to the head (2020-07-06 both 1,444 steers / 681 heifers, and so on)
+
+The largest single-week disagreement moved 35 head across the sex line. The two
+archives are transcriptions of the same AMS report, and the splice is measuring
+the same quantity on both sides. No other legacy location has even one strictly
+paired week -- Western, Joplin, Albany and Glasgow each report only in weeks the
+other source is silent, so their apparent deltas (+12.08, -29.12, +4.27, +44.30)
+are disjoint-week artefacts carrying no information at all.
+
+LEGACY 2019 VIDEO IS NOT A CLEAN BENCHMARK YEAR, which is a separate finding and
+worth more than it looks. Northern Livestock appears for ONE week that year,
+60,688 head, against 144,670-236,818 over 5-8 sales in 2013-2018. The year is
+short roughly 145k head, about 9% of it, and Northern runs near 32% -- below the
+video mean -- so the hole INFLATES the 2019 heifer share by 0.3-0.4 pt. Anything
+benchmarked against legacy 2019 video is benchmarked against a year missing a
+tenth of itself.
 
 THE LEGACY ARCHIVE CANNOT BE FETCHED BY A SCRIPT. That file host refuses every
 programmatic client -- python requests gets RemoteDisconnected, curl gets a

@@ -474,6 +474,8 @@ def main():
     ap.add_argument("--until", default=None, help="ISO date (default: today)")
     ap.add_argument("--legacy", default=None,
                     help="path to a downloaded usda_legacy_ls_auction_*.zip")
+    ap.add_argument("--channel-years", default=None, metavar="YYYY[,YYYY...]",
+                    help="years to refresh for direct/video (default: this year)")
     ap.add_argument("--legacy-before", default=None, metavar="YYYY-MM-DD",
                     help="drop legacy rows dated on or after this; use "
                          "2010-06-28 when loading the wtd_1 half beside wtd_2")
@@ -505,6 +507,9 @@ def main():
         conn.close()
         return
 
+    a.channel_years = ([int(x) for x in a.channel_years.split(",")]
+                       if a.channel_years else [date.today().year])
+
     if a.legacy or a.legacy_direct or a.legacy_video:
         for path, ch in ((a.legacy, "auction"), (a.legacy_direct, "direct"),
                          (a.legacy_video, "video")):
@@ -519,6 +524,20 @@ def main():
         since = date.fromisoformat(a.since) if a.since else until - timedelta(days=120)
         print(f"fetching {len(PANEL_SLUGS)} reports, {since} .. {until}")
         n_reports, n = ingest_mars(conn, since, until)
+        # AND the other two channels, in the same run, because a plain
+        # `python feeder_sex_mix.py` is what the nightly job invokes and an
+        # ingest with no caller is this repo's most-repeated bug: see
+        # replacement_reports.py, which wrote nothing for two weeks while every
+        # "did it refresh?" check passed because the TABLE was being re-uploaded
+        # faithfully. The heifer-share series now reads all three channels, so
+        # direct and video going stale would freeze it without emptying it.
+        #
+        # Current year only by default -- 26 requests. The years before it do
+        # not change, and a full backfill is --channel-years.
+        for ch in ("direct", "video"):
+            cn, fails = ingest_mars_channels(conn, ch, a.channel_years, verbose=False)
+            print(f"  {ch}: stored {cn:,} week/report rows"
+                  + (f"  ({len(fails)} FETCH FAILURES)" if fails else ""))
         print(f"{n_reports} report(s), stored {n:,} week/report rows")
     conn.close()
 

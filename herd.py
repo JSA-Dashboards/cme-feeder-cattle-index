@@ -297,84 +297,109 @@ LEGACY_LAST_GOOD_YEAR = 2019
 LEGACY_LAST_GOOD_WEEK = 17
 
 
-# AUCTION ONLY, and the filter is load-bearing.
+# ALL THREE CHANNELS. The sale barn is roughly 60% of the feeder trade; direct
+# (feedlot-to-feedlot, country trade) and video/internet auctions are the rest,
+# and a national heifer share has to carry them.
 #
-# feeder_receipts also carries `direct` and `video` channels, loaded from the
-# legacy archives to test whether sale-barn receipts fairly proxy the national
-# trade. They answered yes -- 9/9 years agreeing on direction, r=+0.92 -- but
-# they cover 2000-2020 and stop, because USDA's replacement serves only the
-# current week and nobody has backfilled 2021-2026 from ESMIS.
+# IT WAS AUCTION-ONLY UNTIL 2026-09-29, and not by oversight: USDA retired the
+# legacy archives that carried direct and video, so those channels stopped in
+# 2020/21 while auction ran on. Summing what existed produced three channels
+# through 2020 and auction alone after -- a 2-to-4 point step at the seam that
+# read exactly like a market move. That shipped for a day and was reverted.
 #
-# So summing every channel does NOT widen the series, it BREAKS it: the early
-# years become a three-channel blend and the recent ones stay auction-only,
-# with the seam at 2019. Auction runs a mean 3.5 pts above the combined figure,
-# so that seam is a 3.5-point step of pure coverage artefact sitting right
-# underneath the 2015 benchmark this page compares today against. Nothing
-# raises; the low simply reads 38.3% instead of 42.9% and every year-selector
-# comparison before 2019 is quietly wrong. It shipped that way for a day.
+# What changed is that the gap got closed at source. MARS serves these reports
+# after all, through a per-section endpoint the repo had not used; see
+# feeder_sex_mix.ingest_mars_channels and direct_reports.py's docstring. Every
+# channel now runs to the present.
 #
-# Drop this filter only together with a backfill that carries all three
-# channels to the present.
-CHANNEL = "auction"
+# IT IS NOT A COSMETIC WIDENING. The auction-vs-all-channel gap is not a
+# constant offset -- it was 4.57 points in 2015 and is 2.25 now, because the
+# direct channel's heifer share climbed about twelve points over that span while
+# auction's moved half a point. Since this page's headline is the DISTANCE
+# between today and the 2015 rebuild, that drift lands squarely on it: auction
+# alone says +0.64 points, all three say +2.96. Same direction, materially
+# different message, and the wider measure is the more national one.
+CHANNELS = ("auction", "direct", "video")
+
+# Which archive OWNS a week, per channel. Legacy holds weeks up to and including
+# the entry; MARS holds everything after.
+#
+# One rule per channel because the handovers happened at different times AND
+# overlap differently: auction's two sources share 26 weeks, video's share 19,
+# and direct's abut exactly with none. Summing an overlapping week double-counts
+# it; preferring whichever source has more rows lets a dying remnant win at
+# precisely the moment the remnant is largest. An absolute boundary does neither.
+CHANNEL_LEGACY_THROUGH = {
+    "auction": (2019, 17),   # MARS auction completes its panel at W19
+    "direct": (2020, 38),    # MARS direct detail begins 2020-09-21 = W39
+    "video": (2020, 18),     # MARS video detail begins 2020-05-04 = W19
+}
+
+# 2020 has no honest annual point and is dropped rather than drawn.
+# The basis is year-to-date through week 37, which in 2020 ends 09-13 -- but
+# MARS direct does not start until week 39, so 2020 direct is legacy-only, and
+# legacy direct by then is a decaying remnant: 53,949 head in the week of 08-03
+# falling under 9,000 by 09-14. The point would print as a dip that is purely
+# the source handover.
+SKIP_YEARS = frozenset({2020})
 
 
 def _feeder_weeks(conn):
-    """{(iso_year, iso_week): {source: [steers, heifers]}}"""
+    """{(iso_year, iso_week): {channel: [steers, heifers]}}, one source per channel.
+
+    Source selection happens HERE rather than in the callers, because it is a
+    property of the data and every caller would otherwise have to remember to
+    apply it. The old shape returned {source: ...} and left the choice to
+    _pick(); with three channels handing over on three different dates, leaving
+    that to callers is how a double-count gets in.
+    """
     rows = conn.cursor().execute(
-        # Inlined rather than bound: sqlite3 takes ? and the Snowflake
-        # connector takes %s, and this module runs against both. CHANNEL is a
-        # constant above, never user input.
-        "SELECT week_start, source, steers, heifers FROM feeder_receipts "
-        "WHERE channel = '" + CHANNEL + "'").fetchall()
-    out = {}
-    for ws, src, s, h in rows:
+        "SELECT week_start, source, channel, steers, heifers FROM feeder_receipts "
+        "WHERE channel IN ('" + "','".join(CHANNELS) + "')").fetchall()
+    raw = {}
+    for ws, src, ch, s, h in rows:
         y, w, _ = date.fromisoformat(str(db.iso(ws))).isocalendar()
-        d = out.setdefault((y, w), {})
-        v = d.setdefault(str(src), [0, 0])
-        v[0] += int(s or 0)
-        v[1] += int(h or 0)
+        d = raw.setdefault((y, w, str(ch)), {}).setdefault(str(src), [0, 0])
+        d[0] += int(s or 0)
+        d[1] += int(h or 0)
+
+    out = {}
+    for (y, w, ch), by_source in raw.items():
+        want = "legacy" if (y, w) <= CHANNEL_LEGACY_THROUGH[ch] else "mars"
+        v = by_source.get(want)
+        if v is None:
+            # Only the other archive covers this week. Taking it is right at the
+            # edges -- legacy before MARS existed, MARS after legacy stopped --
+            # and is never a CHOICE between two, which is the case that matters.
+            if len(by_source) != 1:
+                continue
+            v = next(iter(by_source.values()))
+        out.setdefault((y, w), {})[ch] = v
     return out
 
 
 def _feeder_states(conn):
     """{(iso_year, iso_week): {state, ...}} for the auction channel.
 
-    Kept separate from _feeder_weeks rather than folded into it because that
-    function sums head by source and this counts distinct states -- combining
-    them would mean carrying a set through the hot aggregation loop for the
-    benefit of one guard. Same CHANNEL filter, for the same reason.
+    AUCTION ONLY, even though the series is now all-channel. The guard this
+    feeds exists because the auction ARCHIVE's panel builds over the early
+    years -- 12 states in 2000, 18 by 2005 -- and that is a property of that
+    archive, not of the trade. Counting states across all three channels would
+    let a year pass on direct and video coverage while the auction panel behind
+    60% of its head was still a third missing.
+
+    Kept separate from _feeder_weeks because that function sums head and this
+    counts distinct states; combining them means carrying a set through the hot
+    loop for the benefit of one guard.
     """
     rows = conn.cursor().execute(
         "SELECT week_start, state FROM feeder_receipts "
-        "WHERE channel = '" + CHANNEL + "'").fetchall()
+        "WHERE channel = 'auction'").fetchall()
     out = {}
     for ws, state in rows:
         y, w, _ = date.fromisoformat(str(db.iso(ws))).isocalendar()
         out.setdefault((y, w), set()).add(state)
     return out
-
-
-def _pick(by_source, year, week):
-    """The source to trust for this week, and its [steers, heifers].
-
-    The cutoff is absolute, not a per-week preference. The legacy archive does
-    not stop cleanly: it keeps emitting a thinning remnant of stragglers for
-    months afterwards, down to a single week of 2020 carrying 420 head against
-    MARS's 176,326 for the same week. A rule that merely preferred legacy in
-    early weeks would take the 420 and discard the real reading -- which it
-    did, tagging 2020 as spliced and quietly dropping a week of the year.
-
-    So legacy is authoritative up to the week it was last whole and is never
-    consulted after it, even as a fallback: past that point its absence is
-    information, and its presence is noise.
-    """
-    if (year, week) <= (LEGACY_LAST_GOOD_YEAR, LEGACY_LAST_GOOD_WEEK):
-        for src in ("legacy", "mars"):
-            if by_source.get(src):
-                return src, by_source[src]
-    elif by_source.get("mars"):
-        return "mars", by_source["mars"]
-    return None, None
 
 
 def _annual_rows(conn):
@@ -386,18 +411,23 @@ def _annual_rows(conn):
     weeks = _feeder_weeks(conn)
     states = _feeder_states(conn)
     per_year = {}
-    for (y, w), by_source in weeks.items():
-        if w > YTD_CUT:
+    for (y, w), by_channel in weeks.items():
+        if w > YTD_CUT or y in SKIP_YEARS:
             continue
-        src, v = _pick(by_source, y, w)
-        if not src:
+        # EVERY channel, or the week is skipped. A week carrying two of three
+        # is not a smaller sample of the national mix, it is a different mix --
+        # the channels sit 10 points apart, so dropping one moves the share far
+        # more than the missing head would suggest.
+        if len(by_channel) != len(CHANNELS):
             continue
         d = per_year.setdefault(y, {"steers": 0, "heifers": 0, "srcs": set(),
                                     "weeks": 0, "states": set()})
         d["states"] |= states.get((y, w), set())
-        d["steers"] += v[0]
-        d["heifers"] += v[1]
-        d["srcs"].add(src)
+        for ch in CHANNELS:
+            d["steers"] += by_channel[ch][0]
+            d["heifers"] += by_channel[ch][1]
+        d["srcs"].add("legacy" if (y, w) <= CHANNEL_LEGACY_THROUGH["auction"]
+                      else "mars")
         d["weeks"] += 1
 
     out = []
@@ -452,13 +482,18 @@ def heifer_share_thin(conn):
     return [r for r in _annual_rows(conn) if r["states"] < MIN_PANEL_STATES]
 
 
-def heifer_share_rolling(conn, source="mars"):
+def heifer_share_rolling(conn):
     """
     [{week, share, steers, heifers}] on a trailing 52-week window.
 
     Seasonally neutral, so it puts the turn on its actual date instead of in
-    whichever annual bucket the calendar assigns it. Confined to one source for
-    the reason given above.
+    whichever annual bucket the calendar assigns it.
+
+    Confined to weeks where all three channels are on MARS, which is why it
+    starts later than the annual series rather than at the same date: direct's
+    MARS coverage begins 2020-09-21, and a trailing 52-week window needs a full
+    year behind it. A window spanning a handover would mix two archives
+    mid-window, which is exactly what the annual basis exists to avoid.
 
     Head counts are NOT exposed here as a series: a rolling sum steps down
     whenever a report simply misses a week, so it would read reporting gaps as
@@ -466,11 +501,15 @@ def heifer_share_rolling(conn, source="mars"):
     leaves the numerator and denominator together.
     """
     weeks = _feeder_weeks(conn)
-    have = sorted(k for k, v in weeks.items() if v.get(source))
+    # All three channels present AND all three past their handover, so no
+    # window straddles a seam.
+    first = max(CHANNEL_LEGACY_THROUGH[c] for c in CHANNELS)
+    have = sorted(k for k, v in weeks.items()
+                  if len(v) == len(CHANNELS) and k > first)
     if len(have) <= ROLLING_WEEKS:
         return []
 
-    vals = [weeks[k][source] for k in have]
+    vals = [[sum(weeks[k][c][i] for c in CHANNELS) for i in (0, 1)] for k in have]
     # Reports publish with a lag, so the newest week is routinely a partial
     # count that looks like a collapse in volume rather than a missing one.
     # Drop from the end while a week carries under 60% of the preceding eight.

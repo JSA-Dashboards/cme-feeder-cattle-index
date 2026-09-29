@@ -310,6 +310,16 @@ LEGACY_VIDEO_SLUGS = {
 # as separate classes. MARS splits the same way: commodity separates Feeder from
 # Replacement Cattle, and class separates Steers/Heifers from Dairy Steers/Dairy
 # Heifers. Keeping only the first of each matches how the legacy half was built.
+# The home state each report is filed under, matching the legacy archive's own
+# STATE_ABBREV convention so the two halves agree. Direct roster keys already
+# are the state (or region) label; only video needs the lookup.
+CHANNEL_STATE = {
+    "SUPERIOR": "TX", "WESTERN": "CA", "CATTLE_COUNTRY": "WY", "JOPLIN": "MO",
+    "NORTHERN": "MT", "NORWOOD": "NC", "ALBANY": "KY", "LEXINGTON_KY": "KY",
+    "TOPPENISH": "WA", "SUPERIOR_WEB": "OK", "S_OKLAHOMA": "OK",
+    "HUSS_LEX": "NE", "GLASGOW": "KY", "APACHE": "OK",
+}
+
 MARS_CHANNEL_COMMODITY = "Feeder Cattle"
 MARS_CHANNEL_CLASSES = {"Steers": "steers", "Heifers": "heifers"}
 
@@ -371,8 +381,18 @@ def ingest_mars_channels(conn, channel, years, verbose=True):
                     d = _mdy(r["report_begin_date"])
                 except (ValueError, KeyError):
                     continue
-                st = (r.get("state_code") or r.get("market_location_state")
-                      or name)[:12]
+                # NOT market_location_state: it is the AMS office, and reads
+                # "OK" for every direct report including the Texas one. NOT
+                # state_code either: video returns a comma-separated region
+                # roster ("AL, AR, FL, ...") that a column width silently
+                # truncates. Both were shipped once and neither corrupted a head
+                # count -- slug_id keys the row -- but both made the state column
+                # useless, which is worse than it looks because a coverage guard
+                # counts distinct states.
+                #
+                # The roster key is the home state for direct and CHANNEL_STATE
+                # gives it for video, matching what the legacy archive stored.
+                st = CHANNEL_STATE.get(name, name)[:12]
                 agg[(_week_start(d), slug, st)][0 if idx == "steers" else 1] += int(hc)
                 kept += 1
         if verbose:

@@ -1,21 +1,23 @@
 """
-The heifer-share series reads auction receipts and no other channel.
+The heifer-share series reads auction, direct and video, one source per channel.
 
-WHY THIS IS A TEST. feeder_receipts gained a `channel` column so direct and
-video receipts could be loaded from the legacy archives and tested against the
-sale-barn trend. herd.py predated that column and selected every row, so the
-moment those channels landed the page's series silently became a blend --
-auction+direct+video through 2019, auction-only after, because the legacy
-archives stop in 2020/21 and nobody has backfilled the years since.
+WHY THIS FILE EXISTS. It was written when the series was auction-only, because
+feeder_receipts had gained a `channel` column and herd.py predated it: loading
+direct and video silently turned the series into a blend, three channels through
+2019 and auction alone after, with a 2-4 point step at the seam sitting under the
+2015 benchmark. Nothing raised; every value stayed a plausible heifer share.
 
-Auction runs a mean 3.5 points above the combined figure, so the seam is a
-3.5-point step sitting directly under the 2015 benchmark the page compares
-today against. Nothing raised. The 2015 low simply read 38.3% instead of
-42.9%, which understated how close today is to rebuild conditions by nearly
-five points -- the exact quantity the page exists to report.
+The series is now deliberately all-channel (2026-09-29), because MARS turned out
+to serve direct and video after all and the gap could be closed at source. So
+these no longer pin "auction only" -- they pin the two things that make an
+all-channel series correct rather than merely wider:
 
-A magnitude check would not have caught it: every value stayed a plausible
-heifer share. Only the channel filter distinguishes the two series.
+  * ONE SOURCE PER CHANNEL PER WEEK. The legacy and MARS archives overlap on 26
+    auction weeks and 19 video weeks. Summing them double-counts. That was
+    written wrong twice in one session and neither time did anything raise.
+  * ALL CHANNELS OR NONE, per week. The channels sit ~10 points apart, so a week
+    carrying two of three is not a smaller sample of the national mix but a
+    different one.
 """
 import sqlite3
 from datetime import date, timedelta
@@ -24,150 +26,127 @@ import pytest
 
 import herd
 
+COLS = "(week_start, source, channel, slug_id, state, steers, heifers)"
 
-# herd.MIN_PANEL_STATES drops a year reported by too few states, so every
-# fixture week is spread across that many. The head is duplicated per state
-# rather than divided: these tests assert a RATIO, which is unchanged by the
-# scaling, and an even split of 1000 across 17 states is not an integer.
+# herd.MIN_PANEL_STATES drops a year reported by too few states, so every fixture
+# week is spread across that many. Head is duplicated per state rather than
+# divided: these assert RATIOS, which the scaling leaves alone.
 STATES = ["KS", "NE", "TX", "OK", "MO", "IA", "SD", "MT", "WY", "NM",
           "AR", "TN", "KY", "VA", "NC", "GA", "AL", "MS"][:herd.MIN_PANEL_STATES]
 
+# 2023: past every channel's handover, so "mars" is the owning source.
+WEEKS = [date(2023, 1, 2) + timedelta(weeks=i) for i in range(herd.YTD_CUT)]
+
 
 def build(rows):
-    """An in-memory feeder_receipts holding (week_start, channel, steers, heifers)."""
+    """rows: (week, source, channel, steers, heifers) -> an in-memory table."""
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
                  "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
     conn.executemany(
-        "INSERT INTO feeder_receipts VALUES (?, 'mars', ?, 1, ?, ?, ?)",
-        [(w, ch, st, s, h) for (w, ch, s, h) in rows for st in STATES])
+        f"INSERT INTO feeder_receipts {COLS} VALUES (?,?,?,1,?,?,?)",
+        [(w, so, ch, st, s, h) for (w, so, ch, s, h) in rows for st in STATES])
     conn.commit()
     return conn
 
 
-# A full 2023 panel -- herd.MIN_YEAR_WEEKS drops any year with fewer weeks than
-# this, so a single week would be silently absent rather than wrong. Auction is
-# 50/50; the other channels are heifer-poor, so blending them drags the share
-# down, which is precisely the corruption being excluded.
-WEEKS = [date(2023, 1, 2) + timedelta(weeks=i) for i in range(herd.YTD_CUT)]
-
-
-def rows(channel, steers, heifers):
-    return [(w.isoformat(), channel, steers, heifers) for w in WEEKS]
-
-
-AUCTION = rows("auction", 1000, 1000)
-DIRECT = rows("direct", 900, 100)
-VIDEO = rows("video", 900, 100)
+def every_week(source, channel, steers, heifers):
+    return [(w.isoformat(), source, channel, steers, heifers) for w in WEEKS]
 
 
 def share(conn, year=2023):
-    rows = {r["year"]: r["share"] for r in herd.heifer_share_annual(conn)}
-    return rows.get(year)
+    return {r["year"]: r["share"] for r in herd.heifer_share_annual(conn)}.get(year)
 
 
-def test_auction_only_is_the_series():
-    assert share(build(AUCTION)) == pytest.approx(50.0)
+# A national mix with the channels far apart, the way they really are.
+BALANCED = (every_week("mars", "auction", 1000, 1000)      # 50%
+            + every_week("mars", "direct", 900, 100)       # 10%
+            + every_week("mars", "video", 900, 100))       # 10%
 
 
-@pytest.mark.parametrize("extra", [DIRECT, VIDEO, DIRECT + VIDEO],
-                         ids=["direct", "video", "both"])
-def test_other_channels_do_not_move_it(extra):
-    """The number a reader sees must not depend on which channels are loaded."""
-    assert share(build(AUCTION + extra)) == pytest.approx(50.0)
+def test_every_channel_contributes():
+    """2800 steers + 1200 heifers across the three channels = 30%."""
+    assert share(build(BALANCED)) == pytest.approx(30.0)
 
 
-def test_the_blend_would_have_been_visibly_different():
-    """Guards the guard: confirm the fixture actually exercises the failure."""
-    conn = build(AUCTION + DIRECT + VIDEO)
-    blended = conn.execute(
-        "SELECT 100.0 * SUM(heifers) / (SUM(steers) + SUM(heifers)) "
-        "FROM feeder_receipts").fetchone()[0]
-    assert blended == pytest.approx(30.0)          # vs 50.0 auction-only
-    assert share(conn) != pytest.approx(blended)
+@pytest.mark.parametrize("missing", ["direct", "video", "auction"])
+def test_a_week_missing_one_channel_is_skipped(missing):
+    """Not a smaller sample of the mix -- a different mix. Dropping the year is
+    the honest outcome, not quietly reporting the other two as if national."""
+    rows = [r for r in BALANCED if r[2] != missing]
+    assert share(build(rows)) is None
 
 
-# --- coverage guard -------------------------------------------------------
-#
-# The auction archive reaches back to 2000 but its state coverage builds: 12
-# states in 2000-01, rising to 18 by 2005. A year drawn from twelve states is a
-# different survey under the same name -- not a smaller sample of the national
-# share but a different mix of states, which is the quantity being measured.
-# These pin the cut so a future backfill cannot quietly re-admit those years.
+def test_sources_are_picked_not_summed():
+    """THE DOUBLE-COUNT TEST.
 
-
-def test_a_thinly_covered_year_is_dropped():
-    thin = [(w.isoformat(), "auction", 1000, 1000) for w in WEEKS]
-    conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
-                 "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
-    few = STATES[:herd.MIN_PANEL_STATES - 1]
-    conn.executemany(
-        "INSERT INTO feeder_receipts VALUES (?, 'mars', ?, 1, ?, ?, ?)",
-        [(w, ch, st, s, h) for (w, ch, s, h) in thin for st in few])
-    conn.commit()
-    assert share(conn) is None            # every week present, too few states
-
-
-def test_the_guard_is_states_not_head_count():
-    """A low-VOLUME year with full coverage must survive.
-
-    2015 is the live case: its head count runs ~12% under the 2011-2019 mean,
-    which a head-based threshold flags as thin -- but it reports from the same
-    17 states as the years either side, and the low volume IS the signal this
-    page exists to report. Judging coverage by head would have deleted the
-    benchmark year.
+    Legacy and MARS overlap on real weeks. Summed, the head doubles and the
+    share drifts toward whichever archive is heifer-richer. 2023 is past the
+    handover, so only the MARS rows may count.
     """
-    lean = [(w.isoformat(), "auction", 100, 100) for w in WEEKS]   # 10x less head
-    assert share(build(lean)) == pytest.approx(50.0)
+    decoy = every_week("legacy", "auction", 100, 1900)     # heifer-rich, must be ignored
+    assert share(build(BALANCED + decoy)) == pytest.approx(30.0)
 
 
-# --- the thin years are reachable, but only on purpose ---------------------
+def test_legacy_owns_weeks_before_the_handover():
+    """The mirror image: before the boundary the legacy rows are the ones counted."""
+    old = [date(2015, 1, 5) + timedelta(weeks=i) for i in range(herd.YTD_CUT)]
+    rows = []
+    for w in old:
+        for c, s, h in (("auction", 1000, 1000), ("direct", 900, 100),
+                        ("video", 900, 100)):
+            rows.append((w.isoformat(), "legacy", c, s, h))
+        rows.append((w.isoformat(), "mars", "auction", 100, 1900))   # decoy
+    assert share(build(rows), 2015) == pytest.approx(30.0)
 
 
-def _mixed():
-    """A clean year (2023, full panel) and a thin one (2022, too few states)."""
+def test_2020_is_excluded_entirely():
+    """MARS direct starts at week 39, past the week-37 basis, so 2020 direct
+    would be legacy-only and legacy is a decaying remnant by then."""
+    w2020 = [date(2020, 1, 6) + timedelta(weeks=i) for i in range(herd.YTD_CUT)]
+    rows = []
+    for w in w2020:
+        for c, s, h in (("auction", 1000, 1000), ("direct", 900, 100),
+                        ("video", 900, 100)):
+            rows.append((w.isoformat(), "legacy", c, s, h))
+    conn = build(rows)
+    assert 2020 not in {r["year"] for r in herd.heifer_share_annual(conn)}
+    assert 2020 not in {r["year"] for r in herd.heifer_share_thin(conn)}
+
+
+def test_the_coverage_guard_counts_auction_states_only():
+    """The guard exists because the AUCTION archive's panel builds over the early
+    years. Direct and video have their own, much narrower geography -- counting
+    all three would let a year pass on their coverage while the auction panel
+    behind most of its head was still a third missing.
+    """
+    few = STATES[:herd.MIN_PANEL_STATES - 1]
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
                  "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
     rows = []
-    for w in WEEKS:                                   # 2023, full coverage
-        rows += [(w.isoformat(), "mars", "auction", 1, st, 1000, 1000)
-                 for st in STATES]
-    for w in WEEKS:                                   # 2022, one state short
-        rows += [(w.replace(year=2022).isoformat(), "mars", "auction", 1, st, 900, 100)
-                 for st in STATES[:herd.MIN_PANEL_STATES - 1]]
-    conn.executemany("INSERT INTO feeder_receipts VALUES (?,?,?,?,?,?,?)", rows)
+    for (w, so, ch, s, h) in BALANCED:
+        for st in (few if ch == "auction" else STATES):
+            rows.append((w, so, ch, st, s, h))
+    conn.executemany(f"INSERT INTO feeder_receipts {COLS} VALUES (?,?,?,1,?,?,?)", rows)
     conn.commit()
-    return conn
+    assert share(conn) is None            # thin auction disqualifies the year
 
 
-def test_thin_years_are_absent_from_the_main_series():
-    assert [r["year"] for r in herd.heifer_share_annual(_mixed())] == [2023]
-
-
-def test_thin_years_are_returned_by_the_thin_builder():
-    thin = herd.heifer_share_thin(_mixed())
-    assert [r["year"] for r in thin] == [2022]
-    assert thin[0]["share"] == pytest.approx(10.0)
-
-
-def test_the_two_series_never_overlap():
-    """Whatever the cut, a year belongs to exactly one of them."""
-    conn = _mixed()
+def test_thin_and_clean_series_never_overlap():
+    conn = build(BALANCED)
     clean = {r["year"] for r in herd.heifer_share_annual(conn)}
     thin = {r["year"] for r in herd.heifer_share_thin(conn)}
     assert not (clean & thin)
 
 
-def test_a_year_short_of_WEEKS_is_in_neither():
-    """Incomplete is not the same as thinly covered, and gets no caveat panel."""
-    conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE feeder_receipts (week_start TEXT, source TEXT, "
-                 "channel TEXT, slug_id INT, state TEXT, steers INT, heifers INT)")
-    conn.executemany("INSERT INTO feeder_receipts VALUES (?,?,?,?,?,?,?)",
-                     [(w.isoformat(), "mars", "auction", 1, st, 1000, 1000)
-                      for w in WEEKS[:herd.MIN_YEAR_WEEKS - 1] for st in STATES])
-    conn.commit()
-    assert herd.heifer_share_annual(conn) == []
-    assert herd.heifer_share_thin(conn) == []
+def test_the_guard_is_states_not_head_count():
+    """A low-VOLUME year with full coverage must survive.
+
+    2015 is the live case: its head runs well under the surrounding mean, which
+    a head-based threshold flags as thin -- but it reports from the same states
+    as its neighbours and the low volume IS the signal. Judging coverage by head
+    would have deleted the benchmark year.
+    """
+    lean = [(w, so, ch, s // 10, h // 10) for (w, so, ch, s, h) in BALANCED]
+    assert share(build(lean)) == pytest.approx(30.0)

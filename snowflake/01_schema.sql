@@ -67,6 +67,46 @@ CREATE TABLE IF NOT EXISTS mars_sales (
 -- Migration for deployments created before published_date existed.
 ALTER TABLE mars_sales ADD COLUMN IF NOT EXISTS published_date DATE;
 
+-- The AMS census (mars_census.py): which stored mars_sales rows USDA no longer
+-- serves. Full-rebuild, both of them -- the pipeline replaces them every run,
+-- so neither keeps history. Written by the pipeline, read by the dashboard;
+-- nothing here feeds the index.
+--
+-- TWO TABLES RATHER THAN ONE, deliberately. A findings table alone cannot tell
+-- "0 phantoms" from "the census did not run" -- both are zero rows. The runs
+-- row is the separate POSITIVE fact that the check ran, over which window, and
+-- it is what lets the dashboard render "no discrepancies" instead of silence.
+CREATE TABLE IF NOT EXISTS mars_census_runs (
+    run_at VARCHAR NOT NULL,
+    window_start VARCHAR NOT NULL,
+    window_end VARCHAR NOT NULL,
+    n_compared INTEGER NOT NULL,
+    n_phantom INTEGER NOT NULL,
+    n_missing INTEGER NOT NULL,
+    n_withheld INTEGER NOT NULL
+);
+
+-- kind is 'phantom' (we hold it, AMS does not serve it), 'missing' (AMS serves
+-- it, we do not hold it), 'withheld' (the payload could not be believed, so
+-- the slug was not judged) or 'note' (still served, no longer qualifying).
+-- The four are never summed and never shown under one word: "we hold a row AMS
+-- does not serve" and "AMS serves a row we do not hold" are opposite facts
+-- with opposite fixes.
+CREATE TABLE IF NOT EXISTS mars_census (
+    kind VARCHAR NOT NULL,
+    slug_id INTEGER NOT NULL,
+    location VARCHAR,
+    raw_date VARCHAR,
+    report_date VARCHAR,
+    index_date VARCHAR,
+    weight_low INTEGER,
+    muscle_grade VARCHAR,
+    head_count INTEGER,
+    avg_weight FLOAT,
+    avg_price FLOAT,
+    detail VARCHAR
+);
+
 -- Upsert (mirrors "INSERT OR REPLACE") -- CME's own exact daily settlement
 -- files (cme_ftp.py/backfill_ftp.py), wins over the estimate above for any
 -- date CME has actually published.

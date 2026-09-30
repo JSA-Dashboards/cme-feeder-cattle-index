@@ -37,10 +37,6 @@ PORTAL_ROOT = REPOS / "livestock-portal"
 PORTAL_APPS = PORTAL_ROOT / "apps"
 PORTAL = PORTAL_APPS / "cme_feeder_cattle"
 TRIMMINGS = REPOS / "beef-trimmings-dashboard"
-# nass_cache_client.py is vendored here too -- and this is the repo that would
-# naturally be edited if that client ever needed a change, which makes it the
-# copy most likely to drift first.
-NASS_ETL = REPOS / "usda-nass-etl"
 
 pytestmark = pytest.mark.skipif(
     not PORTAL.is_dir(), reason="livestock-portal not checked out beside this repo")
@@ -48,7 +44,7 @@ pytestmark = pytest.mark.skipif(
 SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
           "composition.py", "volumes.py", "snapshots.py", "cash_calves.py",
           "barn_basis.py", "barn_report.py", "trimmings_qc.py",
-          "test_trimmings_qc.py", "herd.py", "nass_cache_client.py"]
+          "test_trimmings_qc.py", "herd.py", "mars_census_view.py"]
 
 # Every directory a shared module is allowed to live in. Explicit rather than a
 # recursive glob, because .venv/Lib/site-packages holds files with some of these
@@ -59,7 +55,6 @@ CODE_DIRS = [
     PORTAL_ROOT / "tests",
     TRIMMINGS,
     TRIMMINGS / "tests",
-    NASS_ETL,
 ] + sorted(d for d in PORTAL_APPS.glob("*") if d.is_dir())
 
 # Directories that never hold a first-party copy.
@@ -123,12 +118,7 @@ def test_no_copy_escapes_the_search_path():
     """
     for name in SHARED:
         found = set()
-        # Every repo that shares code. This tuple has the same failure mode the
-        # docstring describes -- a repo missing from it hides its copies rather
-        # than reporting them -- which is exactly how the usda-nass-etl copy of
-        # nass_cache_client went unwatched. Add a repo here when it starts
-        # sharing, not when something has already drifted.
-        for repo in (HERE, PORTAL_ROOT, TRIMMINGS, NASS_ETL):
+        for repo in (HERE, PORTAL_ROOT, TRIMMINGS):
             if repo.is_dir():
                 found |= _walk_for(name, repo)
         declared = {f.resolve() for f in _copies(name)}
@@ -301,6 +291,41 @@ def test_a_broken_barn_report_is_not_rendered_as_a_healthy_one():
         assert dead and dead[0][0] == "caption" and "unavailable" in dead[0][1], (
             f"{app}: a loader that returns nothing must say the completeness "
             f"is unknown, not render nothing at all")
+
+
+def test_both_dashboards_show_the_ams_census():
+    """
+    Both copies must render the reconciliation line, both must cache it, and
+    neither may bury it in a tab.
+
+    THE LINE IS THE PRODUCT, not the table behind it. The census's whole value
+    is that "no discrepancies" is the normal answer, so the reassurance has to
+    be readable without clicking -- a reassurance behind an expander is not a
+    reassurance, and a line that appears only when something is wrong is a
+    line nobody learns to read.
+
+    Neither app may import mars_census itself: that would drag requests,
+    pdfplumber and update_index into the Streamlit process, which is the
+    precise reason bucketing.py exists as its own file.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert "import mars_census_view" in src, \
+            f"{app} no longer imports the census reader"
+        assert "import mars_census\n" not in src, (
+            f"{app} imports mars_census directly; that pulls requests and "
+            f"pdfplumber into the Streamlit process.")
+        depths = [n.col_offset for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                  and ast.unparse(n.value).startswith("_render_census(")]
+        assert depths, f"{app} defines the census panel but never renders it"
+        assert all(d == 0 for d in depths), (
+            f"{app} renders the census at indent {depths} -- inside a tab or a "
+            f"callback, where the person it is for has to click to reach it.")
+        ttl = _cached_ttl(src, "_load_census")
+        assert ttl is not None, (
+            f"{app}: _load_census lost its st.cache_data decorator.")
+        assert 0 < ttl <= 3600, f"{app}: implausible census ttl {ttl}"
 
 
 def test_both_dashboards_show_the_barn_report():

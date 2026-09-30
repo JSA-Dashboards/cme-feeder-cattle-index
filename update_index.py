@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import re
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -214,7 +215,18 @@ def init_db(conn):
     conn.commit()
 
 
-def fetch_slug(slug_id, since_str, until_str, auth):
+def fetch_slug_payload(slug_id, since_str, until_str, auth):
+    """
+    The WHOLE response for one slug -- `results` AND the `stats` block beside
+    it.
+
+    stats carries returnedRows / totalRows (observed on slug 1827 today:
+    {"returnedRows": 178, "userAllowedRows": 100000, "totalRows": 178}), and
+    that equality is the only signal AMS gives that a payload is complete.
+    mars_census needs it: HTTP 200 with well-formed JSON and fewer rows than
+    the report holds is indistinguishable from a withdrawal, and would present
+    as an entire sale day going phantom. Nothing else in the ingest reads it.
+    """
     resp = requests.get(
         f"{MARS_BASE}/reports/{slug_id}",
         auth=auth,
@@ -222,7 +234,16 @@ def fetch_slug(slug_id, since_str, until_str, auth):
         timeout=(5, 60),
     )
     resp.raise_for_status()
-    return resp.json().get("results", [])
+    return resp.json()
+
+
+def fetch_slug(slug_id, since_str, until_str, auth):
+    """
+    Just the rows. KEEPS ITS SIGNATURE AND RETURN SHAPE: calf_sales.py calls
+    this as ui.fetch_slug(), and the census is not a reason to make the cash
+    ingest learn about a stats block it has no use for.
+    """
+    return fetch_slug_payload(slug_id, since_str, until_str, auth).get("results", [])
 
 
 def qualifying_rows(rows):
@@ -288,6 +309,40 @@ def shift_weekend_to_monday(d: date) -> date:
     if d.weekday() == 6:  # Sunday
         return d + timedelta(days=1)
     return d
+
+
+def derived_dates(row) -> tuple[str, str]:
+    """
+    The (report_date, raw_date) one served AMS row is STORED under, as ISO
+    strings. Lifted verbatim out of run_update()'s roster loop below, which now
+    calls it, so there is exactly ONE derivation of these two dates in the
+    repository.
+
+    That single copy is the whole point. mars_census.py has to key a served row
+    the way the insert path keys it, and a second composition of
+    detect_final_sale_day() + shift_weekend_to_monday() would agree on the day
+    it was written and drift the first time either rule moved. The symptom of
+    that drift is not a wrong date somewhere quiet -- it is the census
+    reporting a whole sale day as withdrawn, which is exactly the false
+    positive that would teach everyone to stop reading it.
+
+    USDA's own report_date can understate a multi-day sale's true final day.
+    Confirmed on a real report (El Reno OK, 9/1/26) where report_begin_date and
+    report_end_date both said "09/01" (Tuesday) despite the narrative
+    describing sales on Tuesday AND Wednesday -- so the correction to the real
+    final day happens here, before any weekend shift, because raw_date's whole
+    purpose is the TRUE calendar date rather than USDA's own label.
+
+    report_date then carries CME's weekend shift on top of that: an Ericson NE
+    (slug 1853) Saturday sale is filed under the following Monday. Both are
+    returned because the two are used for different things -- the stored
+    primary key is keyed on report_date, while a sale day is grouped by
+    raw_date.
+    """
+    m, d, y = row["report_date"].split("/")          # MM/DD/YYYY
+    sale_date = detect_final_sale_day(date(int(y), int(m), int(d)),
+                                      row.get("report_narrative"))
+    return shift_weekend_to_monday(sale_date).isoformat(), sale_date.isoformat()
 
 
 def recompute_fci_daily(conn):
@@ -414,30 +469,50 @@ def run_update(since: date, verbose=True):
     init_db(conn)
 
     total_inserted = 0
+    # Kept for the census at the end of the run, and the reason it costs ZERO
+    # extra HTTP: this loop already holds every roster slug's raw payload, and
+    # the census's whole question is about those same rows. Two dict
+    # assignments on objects resp.json() has already materialised -- no
+    # derivation, no keying and no database inside this loop -- so the entire
+    # blast radius of the census stays inside the one guarded call at the end.
+    #
+    # The retention is real and named in case it ever matters: ~75-300 raw rows
+    # per slug across 89 slugs, tens of MB, alive for the 15-20 minutes this
+    # function runs. If it ever does matter, keep the keyed sets per slug
+    # instead of the rows, at the cost of moving derivation back in here.
+    #
+    # census_roster IS THE ROSTER, whatever the fetches do. It is what the run
+    # SET OUT to fetch, and the census needs it to tell "checked and clean"
+    # from "never checked": a slug missing from census_payloads is a slug
+    # nobody looked at, and without the roster to compare against there is
+    # nothing left in the run that remembers it should have been.
+    census_payloads, census_locations = {}, {}
+    census_roster = [int(loc["slug_id"]) for loc in roster]
     for loc in roster:
         slug_id = loc["slug_id"]
+        census_locations[int(slug_id)] = loc["city"] or loc["title"]
         try:
-            rows = fetch_slug(slug_id, since_str, until_str, auth)
+            payload = fetch_slug_payload(slug_id, since_str, until_str, auth)
         except Exception as e:
             if verbose:
                 print(f"  [skip] slug {slug_id} ({loc['title']}): {e}")
+            # NOT a key in census_payloads, so no group of this slug is ever
+            # JUDGED -- a slug we failed to fetch must never be judged absent,
+            # and that is structure rather than a guard. It stays on
+            # census_roster, though, so the census reports it as WITHHELD
+            # rather than passing over it in silence.
             continue
+        rows = payload.get("results", [])
+        census_payloads[slug_id] = payload
         qrows = qualifying_rows(rows)
         for r in qrows:
-            rd = r["report_date"]  # MM/DD/YYYY
-            m, d, y = rd.split("/")
-            sale_date = date(int(y), int(m), int(d))
-            # USDA's own report_date can understate a multi-day sale's true
-            # final day (confirmed: report_begin_date/report_end_date both
-            # said "Tuesday" for a report whose own narrative described
-            # sales on both Tuesday AND Wednesday) -- correct to the real
-            # final day before any weekend-shift, since raw_date's whole
-            # purpose is the TRUE calendar date, not USDA's own label.
-            sale_date = detect_final_sale_day(sale_date, r.get("report_narrative"))
-            iso_date = shift_weekend_to_monday(sale_date).isoformat()
+            # One derivation for the insert path and the census both -- see
+            # derived_dates() for why a second copy would be a false-positive
+            # generator rather than a tidy-up.
+            iso_date, raw_iso = derived_dates(r)
             cols = ["report_date", "raw_date", "slug_id", "location", "state",
                     "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
-            values = (iso_date, sale_date.isoformat(), slug_id, loc["city"] or loc["title"], loc["state"],
+            values = (iso_date, raw_iso, slug_id, loc["city"] or loc["title"], loc["state"],
                       r["weight_break_low"], r["muscle_grade"],
                       r["head_count"], r["avg_weight"], r["avg_price"])
             db.merge_ignore(conn, "mars_sales", cols, values,
@@ -559,7 +634,148 @@ def run_update(since: date, verbose=True):
 
         # The barn report does NOT run here -- see print_barn_report() below for
         # why it cannot, and scripts/daily_update.ps1 for where it does.
+
+    # The census DOES run here, and unconditionally rather than under
+    # `verbose`: the log is the standalone's only output and costs nothing,
+    # and the write below is what the dashboard reads. See write_census().
+    write_census(census_payloads, since, until, census_locations, census_roster)
     conn.close()
+
+
+# A bound on WAITING, not on reporting. It cannot change a single finding --
+# only how long a finished index waits for a diagnostic before going to the
+# push without it -- which is why it is here, at the call site, and not a
+# threshold inside a module whose whole argument is that it has none.
+#
+# Measured on the real payloads: the census takes about one second. 120 is two
+# orders of magnitude of headroom, so it can only ever fire on something that
+# is genuinely stuck.
+CENSUS_DEADLINE_SECONDS = 120
+
+
+def _census_worker(payloads, since, until, locations, roster, out):
+    """
+    The census, off the main thread, on its OWN connection.
+
+    ITS OWN CONNECTION BECAUSE IT HAS TO BE. sqlite3 connections are
+    check_same_thread=True, so run_update()'s connection cannot be touched
+    from here; db.get_conn() is the shim's own constructor and works on both
+    backends. run_update() has committed the index, the snapshots and every
+    merge by the time this starts, so the two connections never contend for
+    the write lock -- and if they somehow did, SQLite's busy timeout bounds it
+    at five seconds and raises into the guard below.
+
+    Nothing is printed from this thread. The lines go back to the caller and
+    are printed there, so a census that overruns its deadline cannot scribble
+    into the middle of whatever the run is doing by then.
+    """
+    try:
+        import mars_census
+        conn = db.get_conn()
+        try:
+            findings = mars_census.run_census(conn, payloads, since, until,
+                                              locations, roster)
+            out["lines"] = list(mars_census.report_lines(findings))
+        finally:
+            conn.close()
+    except Exception as e:                      # noqa: BLE001 -- diagnostic only
+        out["lines"] = [f"  [!] AMS census skipped: {type(e).__name__}: {e}"]
+
+
+def write_census(payloads, since, until, locations, roster):
+    """
+    Which stored rows AMS no longer serves. REPORT ONLY -- see mars_census.py,
+    which holds no delete path and writes only its own two tables.
+
+    SAFE TO RUN HERE BECAUSE IT RUNS LAST. The index is computed, committed and
+    snapshotted by the time this is called, so nothing below can move a number.
+    The ordering is load-bearing in a second way too: because this runs AFTER
+    the merge_ignore loop, "AMS serves it and we do not hold it" cannot mean
+    "not yet inserted" -- every qualifying served row was already offered to
+    merge_ignore, so it can only mean merge_ignore DECLINED it. Run before the
+    loop, every new row of the day would read as missing.
+
+    IT MUST NOT BE ABLE TO FAIL THE RUN, and this is barn_report's pattern
+    including both lessons that shaped it:
+
+      THE IMPORT IS INSIDE THE GUARD. `import mars_census` at module scope
+      would let a syntax error in a report-only diagnostic take down the whole
+      ingest before a single row was fetched -- which is precisely what
+      happened when update_index.py imported barn_report at the top.
+
+      THE CONSUMPTION IS INSIDE IT TOO. run_census() promises to return a
+      Findings and report_lines() promises a materialised list of strings, but
+      this is where those promises are CONSUMED. Iterating a result that came
+      back None is what once exited 1 after the index was computed and before
+      it was pushed. A diagnostic must never be what strands a finished index,
+      so the guard goes round both sides.
+
+      AND THE GUARD IS ROUND TIME AS WELL AS ROUND EXCEPTIONS, because a
+      try/except cannot catch a hang and a hang here is worse than a crash.
+      scripts/daily_update.ps1 pushes as a LATER STEP: it waits on this
+      process with Start-Process -Wait, so a census that never returns means
+      update_index.py never exits, the push never runs, and a perfectly good
+      index sits in SQLite unpublished. That is the exact failure the step
+      ordering in CLAUDE.md exists to prevent, and it was reproduced through
+      this call site -- run_census() made to sleep, EXIT=124, the index
+      recomputed for 950 dates and never pushed.
+
+      WHY A DEADLINE AND NOT A BUSY TIMEOUT. The obvious candidate for a hang
+      is the SQLite write blocking on a lock held by the dashboard or by an
+      overlapping run. Measured: it does not hang. Python's sqlite3 opens with
+      busy_timeout = 5000, and a held write lock raises OperationalError after
+      5.5 seconds straight into the guard above, after which the run continues
+      and the push happens. Bounding the write would therefore have been a fix
+      for a failure that does not occur, while the one that does -- the call
+      not returning at all, for any reason -- stayed wide open.
+
+      WHY NOT ITS OWN STEP AFTER THE PUSH. That is how the barn report escaped
+      an ordering problem, but the barn report reads only tables. The census's
+      input is THIS PROCESS'S MEMORY: run_update()'s roster loop already holds
+      every payload, which is why the census costs zero extra HTTP. A post-push
+      step would have to re-walk all 89 slugs, putting the network back into a
+      module built on not having any.
+
+      So the census runs on a daemon thread and the main thread waits
+      CENSUS_DEADLINE_SECONDS for it. An overrun is reported and abandoned;
+      the thread is a daemon, so it cannot hold the process open either.
+
+      WHAT AN ABANDONED CENSUS LEAVES BEHIND, measured rather than reasoned
+      about, because the first version of this paragraph got it backwards. It
+      claimed the truncate-then-insert order leaves mars_census_runs EMPTY and
+      the panel therefore reads "unavailable". It does not. The abandoned
+      thread never reaches conn.commit(), so SQLite rolls its whole
+      transaction back and BOTH TABLES KEEP THE PREVIOUS RUN'S CONTENTS --
+      verified by truncating, inserting, abandoning, and reading the file back
+      from a new process.
+
+      That is the same thing an abandoned census leaves as a census that
+      RAISES, which is the already-accepted path above, so it adds no new
+      failure shape. It is honest for one reason only: the panel's headline
+      leads with the run_at of the run it is describing, so a statement from
+      07:31 says 07:31, and mars_census_view adds "last ran N hours ago" past
+      STALE_HOURS. It is NOT this run's all-clear and must never be described
+      as one -- which is what the overrun line below says, and why it names
+      the stamp rather than promising "unavailable".
+    """
+    print()
+    out = {}
+    worker = threading.Thread(target=_census_worker, name="ams-census",
+                              daemon=True,
+                              args=(payloads, since, until, locations, roster,
+                                    out))
+    worker.start()
+    worker.join(CENSUS_DEADLINE_SECONDS)
+    if worker.is_alive():
+        print(f"  [!] AMS census did not finish within "
+              f"{CENSUS_DEADLINE_SECONDS}s and was abandoned. The index is "
+              f"computed and committed and this run continues to the push. "
+              f"THIS RUN MADE NO STATEMENT ABOUT AMS: the abandoned write was "
+              f"never committed, so the reconciliation panel still shows the "
+              f"PREVIOUS run's result, stamped with that run's own time.")
+        return
+    for line in out.get("lines", ()):
+        print(line)
 
 
 def print_barn_report(conn):

@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 # same mistake as everything else here.
 INDEX_MODULES = ["update_index.py", "app.py", "bucketing.py", "snapshots.py",
                  "composition.py", "volumes.py", "reporting.py", "notify_email.py",
-                 "barn_report.py"]
+                 "barn_report.py", "mars_census.py", "mars_census_view.py"]
 
 # The index's own weight brackets, per CME Rule 10203.A.1 (700-899 lb).
 INDEX_BRACKETS = {700, 750, 800, 850}
@@ -108,7 +108,7 @@ def test_stored_index_rows_are_index_brackets_only():
     if not db_path.exists():
         pytest.skip("no local database")
     import sqlite3
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     try:
         got = {r[0] for r in conn.execute("SELECT DISTINCT weight_low FROM mars_sales")}
     except sqlite3.OperationalError:
@@ -165,3 +165,94 @@ def test_the_read_only_check_can_actually_fail():
     assert [v for v in WRITE_VERBS if v in 'cur.execute("INSERT INTO calf_sales ...")']
     assert [v for v in WRITE_VERBS if v in 'db.merge_replace(conn, "mars_sales", ...)']
     assert not [v for v in WRITE_VERBS if v in 'cur.execute("SELECT * FROM calf_sales")']
+
+
+# ---------------------------------------------------------------------------
+# The AMS census reports; it never repairs.
+#
+# mars_census.py exists because AMS sometimes withdraws or revises a lot and
+# merge_ignore can never remove what it replaced. Three attempts at fixing that
+# automatically were built and reverted -- the event rate is about one per two
+# and a half years, so no threshold in such a module can be calibrated, and the
+# guards that make a delete safe are the same guards that refuse a real
+# withdrawal. The module is a DETECTOR, and these are what keep it one.
+# ---------------------------------------------------------------------------
+
+# A DML verb followed by the table it acts on. Deliberately SQL-shaped rather
+# than a ban on the word: the first version of the calf_sales check in this
+# file banned a string and promptly failed on a comment explaining the
+# isolation, punishing the documentation while proving nothing about the code.
+# mars_census.py's own docstring says "this module deletes nothing from
+# mars_sales, ever", and that sentence must pass.
+#
+# UPDATE requires its SET, because bare "update" is an English word -- "update
+# the runs row" would otherwise read as DML against a table called "the".
+_DML = [
+    re.compile(r"\binsert\s+into\s+([a-z_][a-z0-9_]*)", re.I),
+    re.compile(r"\bdelete\s+from\s+([a-z_][a-z0-9_]*)", re.I),
+    re.compile(r"\bupdate\s+([a-z_][a-z0-9_]*)\s+set\b", re.I),
+    re.compile(r"\bmerge\s+into\s+([a-z_][a-z0-9_]*)", re.I),
+    re.compile(r"\btruncate\s+table\s+([a-z_][a-z0-9_]*)", re.I),
+    re.compile(r"\bdrop\s+table\s+([a-z_][a-z0-9_]*)", re.I),
+    re.compile(r"\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)", re.I),
+    # The helpers, which is how a write really happens in this codebase.
+    re.compile(r"merge_(?:ignore|replace)\(\s*conn,\s*[\"']([a-z_]+)[\"']", re.I),
+    re.compile(r"\btruncate\(\s*conn,\s*[\"']([a-z_]+)[\"']", re.I),
+]
+
+CENSUS_TABLES = {"mars_census", "mars_census_runs"}
+
+
+def dml_targets(text):
+    """Every table name this text writes to, however it writes to it."""
+    return {m.lower() for pat in _DML for m in pat.findall(text)}
+
+
+def test_the_census_writes_only_its_own_two_tables():
+    """
+    The constraint the census was built under: REPORT ONLY. Not argued from
+    the docstring -- read off the source, as the exact set of tables any DML
+    verb in the file names.
+
+    The wholesale replace goes through db.truncate(), which is
+    recompute_fci_daily()'s own precedent, so the row-removing statement lives
+    in snowflake_db.py where it always has and this file can be strict rather
+    than fuzzy.
+    """
+    src = (REPO / "mars_census.py").read_text(encoding="utf-8")
+    assert dml_targets(src) == CENSUS_TABLES, (
+        f"mars_census.py writes to {sorted(dml_targets(src))}; it may write "
+        f"only {sorted(CENSUS_TABLES)}. The index table is repaired by hand, "
+        f"deliberately -- see the module docstring.")
+
+
+def test_the_census_reader_writes_nothing_at_all():
+    """mars_census_view.py runs inside Streamlit. It is a reader."""
+    src = (REPO / "mars_census_view.py").read_text(encoding="utf-8")
+    assert dml_targets(src) == set(), sorted(dml_targets(src))
+
+
+def test_the_dml_scanner_can_actually_fail():
+    """
+    Guard the guard, which is the rule in CLAUDE.md and which three checks
+    written during this work failed. Prose about not deleting must PASS; a
+    real write must FAIL, in every spelling this codebase actually uses.
+    """
+    for prose in (
+            "# this module deletes nothing from mars_sales, ever",
+            "    Reports only -- nothing here removes or rewrites a row.",
+            "# update the runs row before inserting into the findings table",
+            "    a truncated report is indistinguishable from a withdrawal",
+            '"SELECT report_date FROM mars_sales WHERE raw_date >= ?"'):
+        assert dml_targets(prose) == set(), f"prose was read as DML: {prose!r}"
+
+    for real, want in (
+            ("DELETE FROM mars_sales WHERE slug_id = ?", "mars_sales"),
+            ('cur.execute("delete from mars_sales")', "mars_sales"),
+            ('db.merge_replace(conn, "mars_sales", cols, vals)', "mars_sales"),
+            ("UPDATE mars_sales SET head_count = 0", "mars_sales"),
+            ('db.truncate(conn, "mars_sales")', "mars_sales"),
+            ("MERGE INTO mars_sales t USING (SELECT 1) s ON t.a=s.a", "mars_sales"),
+            ("DROP TABLE mars_sales", "mars_sales"),
+            ('conn.execute("INSERT INTO mars_sales VALUES (?)")', "mars_sales")):
+        assert want in dml_targets(real), f"a real write slipped past: {real!r}"

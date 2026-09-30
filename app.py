@@ -27,6 +27,7 @@ except Exception:
 
 import snowflake_db as db
 import barn_report
+import mars_census_view
 import cash_calves
 import barn_basis
 from index_dates import headline_index_date
@@ -602,9 +603,12 @@ def _load_last_refresh():
         return None
 
 
-# The pipeline runs at 07:30 and 13:00 Central, so the longest HEALTHY gap is
-# the overnight one: 13:00 to 07:30 is 18.5 hours. Past 20 means a scheduled
-# run did not land; past 30 means more than one did not.
+# The pipeline runs at 08:00 and 13:00 Central, so the longest HEALTHY gap is
+# the overnight one: 13:00 to 08:00 is 19 hours. Past 20 means a scheduled
+# run did not land; past 30 means more than one did not. The morning run moved
+# from 07:30 to 08:00 on 2026-09-29, so the warn threshold now sits 1 hour above
+# the healthy gap rather than 1.5: the morning run has to slip by more than an
+# hour to warn, where it used to take more than ninety minutes.
 _STALE_WARN_HOURS = 20
 _STALE_ALERT_HOURS = 30
 
@@ -649,15 +653,15 @@ def _render_freshness():
     if hours >= _STALE_ALERT_HOURS:
         st.error(
             f"**This page is {hours:.0f} hours out of date.** The last pipeline run "
-            f"recorded was {stamp} Central; at least two scheduled runs (07:30 and "
+            f"recorded was {stamp} Central; at least two scheduled runs (08:00 and "
             f"13:00) have not reached the database behind this page. Treat every "
             f"figure below as historical until this clears."
         )
     elif hours >= _STALE_WARN_HOURS:
         st.warning(
             f"**A scheduled run appears to have been missed.** Last refresh was "
-            f"{stamp} Central, {hours:.0f} hours ago — longer than the 18.5-hour "
-            f"overnight gap between the 13:00 and 07:30 runs."
+            f"{stamp} Central, {hours:.0f} hours ago — longer than the 19-hour "
+            f"overnight gap between the 13:00 and 08:00 runs."
         )
     else:
         st.caption(f"Last refreshed {stamp} Central ({hours:.1f}h ago).")
@@ -761,6 +765,79 @@ def _render_barn_report():
         return
     st.warning("**" + header + "**\n\n"
                + "\n".join("- " + ln for ln in missing))
+
+
+# ── Does what we hold still match what USDA publishes? ───────────────────────
+# A third, different question from the two above. Freshness says when the
+# pipeline last ran; the barn report says whether today's sample is whole; this
+# says whether the sample we have ALREADY STORED still matches what AMS serves.
+#
+# It is a real failure and it has happened twice. mars_sales is written
+# insert-if-absent and never updated, so when AMS withdraws or revises a lot our
+# copy keeps the old version forever, and recompute_fci_daily() reads that table
+# with no WHERE clause -- a withdrawn lot stays in the published index until a
+# human notices. Mitchell SD cost 2 cents on two index dates and sat there for
+# five days; McAlester OK moved three index dates and was found by accident.
+#
+# The check itself needs the network, so it cannot run on this page. The
+# pipeline does the comparison once, on rows it already has in hand, and leaves
+# the answer in two small tables. See mars_census.py and mars_census_view.py.
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_census():
+    """
+    (state, summary, rows) from the last pipeline census.
+
+    Returns the UNAVAILABLE state rather than an empty clean one whenever the
+    backend cannot be opened. "The check found nothing" and "the check did not
+    report" are different sentences, and a diagnostic must never be the thing
+    that breaks the page it is diagnosing.
+
+    ttl=300 to match the barn report and the freshness stamp: the 13:00 run is
+    what changes this answer, and an hour of cache could keep showing a
+    resolved finding for an hour after it was resolved.
+
+    Returned as plain records, not a DataFrame -- st.cache_data hands every
+    caller the same object back, and a frame is mutable in ways a list of dicts
+    rebuilt per render is not.
+    """
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return mars_census_view.UNAVAILABLE, None, []
+    try:
+        conn = db.get_conn()
+    except Exception:
+        return mars_census_view.UNAVAILABLE, None, []
+    try:
+        state, summary, rows = mars_census_view.census_state(conn)
+        # The whole consumption inside the guard, not just the call --
+        # update_index.py learned that one the expensive way.
+        return state, summary, rows.to_dict("records")
+    except Exception:
+        return mars_census_view.UNAVAILABLE, None, []
+    finally:
+        conn.close()
+
+
+def _render_census():
+    """
+    One caption always, the detail only when there is detail.
+
+    CLIENTS READ THIS PAGE. The wording is "AMS reconciliation ... no
+    discrepancies" -- quality assurance, not an alarm -- and the per-row detail,
+    which carries barn names and prices, stays behind the expander.
+    """
+    state, summary, rows = _load_census()
+    line = mars_census_view.headline(state, summary, _central_now())
+    if state == mars_census_view.FINDINGS:
+        st.warning("**" + line + "**")
+    else:
+        st.caption(line)
+    if rows:
+        with st.expander("AMS reconciliation detail (JSA internal)"):
+            st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                         hide_index=True)
+
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1145,6 +1222,7 @@ _render_freshness()
 # would split them from the "Daily:" caption that the block further down says
 # must stay directly under them.
 _render_barn_report()
+_render_census()
 
 
 # Three tabs. The index is the published number; the cash lookup is what the
@@ -1581,7 +1659,7 @@ with tab_index:
                 _lead += (f' Nothing has reached the index for '
                           f'{_words.get(_age, _age)} business days — treat that '
                           f'as a gap in the data rather than a quiet week, and '
-                          f'check that the 07:30 and 13:00 runs are landing.')
+                          f'check that the 08:00 and 13:00 runs are landing.')
             elif _age == 1:
                 _lead += (' A full reporting day has passed with nothing, which '
                           'is worth a look: 85% of a sale day\'s head is normally '
@@ -2318,7 +2396,7 @@ with tab_index:
     )
 
     _recon = _load_recon_index()
-    # Frozen 07:30 calls. Loaded here rather than down in the peer table because
+    # Frozen morning calls. Loaded here rather than down in the peer table because
     # BOTH sections now score against the number we actually published, not the
     # one fci_daily happens to hold today.
     _openings = _load_opening_calls()
@@ -2414,8 +2492,8 @@ with tab_index:
                 _recon_err = (_s["recon"] - _s["actual"]).abs().mean()
                 st.caption(
                     f"Mean absolute miss over these {len(_s)} dates: "
-                    f"**\\${_s['err'].abs().mean():.2f}** — the 07:30 call as published, "
-                    f"against CME's print"
+                    f"**\\${_s['err'].abs().mean():.2f}** — the frozen morning "
+                    f"call as published, against CME's print"
                     + (f" (no frozen call exists for {_n_live} of them, so the current "
                        f"value stands in there)" if _n_live else "")
                     + f". Our *settled* reconstruction, which goes on absorbing reports "
@@ -2528,7 +2606,7 @@ with tab_index:
                 if len(_e):
                     _bits.append(f"{_short(_s)} {_e.mean():.3f} ({len(_e)})")
             _n_frozen = len([d for d in _scored.index if d in _frozen_dates])
-            _prov = (f" Our figure is the frozen 07:30 call on {_n_frozen} of "
+            _prov = (f" Our figure is the frozen morning call on {_n_frozen} of "
                      f"{len(_scored)} scored date(s)"
                      + (", and the current revised value on the rest — those flatter us, "
                         "since they have seen data the competitors' morning sheets had not."
@@ -2630,7 +2708,7 @@ with tab_basis:
 _year = datetime.now().year
 st.markdown("<hr style='border-color:#e6eaee;margin-top:32px;margin-bottom:16px'>", unsafe_allow_html=True)
 st.markdown(
-    f'<div style="font-family:inherit;color:#9aa2ab;font-size:inherit;line-height:1.6;text-align:center;padding:0 24px 24px;">'
+    f'<div style="color:#9aa2ab;font-size:0.68rem;line-height:1.6;text-align:center;padding:0 24px 24px;">'
     f'Historical index and basis figures are derived from JSA-compiled 12-state feeder steer sale data '
     f'(coverage: {first_date.strftime("%b %d, %Y")}–{last_date.strftime("%b %d, %Y")}) and are provided for informational purposes only. '
     f'Trading commodity futures, options on futures, cash commodities, and over-the-counter derivative products involves substantial risk of loss and may not be suitable for all investors. '

@@ -8,12 +8,20 @@
 #
 #     earliest 08:35    median 09:05    latest 10:05    (all Central)
 #
-# The main pipeline runs at 07:30 and 13:00. 07:30 is ALWAYS before CME
-# publishes -- the earliest print ever observed is an hour later -- so the
-# morning run can never carry yesterday's official number. The 13:00 run is the
-# first poll that sees it. That left the dashboard's "Last CME Print" tile and
-# the whole forecast scorecard running about four hours behind CME every
-# morning: a 09:05 print did not reach the page until 13:05.
+# The main pipeline runs at 08:00 and 13:00. 08:00 is still well ahead of the
+# median print (09:05) and of the latest ever observed (10:05), so the morning
+# run cannot be relied on to carry yesterday's official number. The 13:00 run is
+# the first poll that reliably sees it. That left the dashboard's "Last CME
+# Print" tile and the whole forecast scorecard running about four hours behind
+# CME every morning: a 09:05 print did not reach the page until 13:05.
+#
+# NOTE, since the morning run moved 07:30 -> 08:00 on 2026-09-29: this used to
+# read "07:30 is ALWAYS before CME publishes", and that absolute no longer
+# holds. The wider n=17 sample in scripts/README-schedule.md puts the EARLIEST
+# print at 08:05 Central, and the morning run does not reach its own CME step
+# until several minutes in, so on a rare early day it may now catch the file.
+# That is a bonus, not a guarantee, and it is not a reason to drop this job --
+# on a median day the file still does not exist for another hour.
 #
 # 10:15 clears the 10:05 worst case with ten minutes to spare.
 #
@@ -23,9 +31,22 @@
 # against the main pipeline's 12 minutes.
 #
 # NO HEALTHCHECK PING, on purpose. This run is an accelerator, not a guarantee:
-# if it fails, the 13:00 run pulls the same file with a 10-day lookback and the
-# only cost is that the print appears at 13:05 as it always used to. Monitoring
-# it would add an alert for a condition that self-heals within three hours.
+# if it FAILS TO LOAD, the 13:00 run pulls the same file with a 10-day lookback
+# and the only cost is that the print appears at 13:05 as it always used to.
+# Monitoring that would add an alert for a condition that self-heals within
+# three hours.
+#
+# THAT REASONING DOES NOT COVER PUSH EXIT 3, and saying it did was the same
+# untruth the log line below used to carry. Exit 3 is "the push COMMITTED and
+# the contents disagree with local SQLite": Snowflake is serving new wrong
+# values, not old right ones, and nothing about three hours passing repairs
+# that. It self-heals only if the 13:00 push happens to write correctly what
+# this one wrote wrongly -- which is what happened on 2026-09-29, but the root
+# cause is still unknown, so it is a hope and not a mechanism. What exit 3 gets
+# today is the ERROR line below; check_run.ps1's digest greps the log for
+# 'ERROR', so it does reach the next morning's summary. It does NOT page
+# anybody, and that gap is deliberate-for-now rather than argued: adding a
+# healthcheck slot here is the open item.
 
 $repo = 'C:\Users\RossBaldwin\projects\cme-feeder-cattle-index'
 $py   = Join-Path $repo '.venv\Scripts\python.exe'
@@ -67,14 +88,22 @@ foreach ($f in @($o, $e)) {
 }
 
 if ($code -ne 0) {
-    Log ("CME pull failed (exit {0}). The 13:00 run will retry with a wider " +
-         "lookback; nothing else is affected." -f $code)
+    # NOTE THE OUTER PARENTHESES around the concatenation. PowerShell's -f
+    # binds TIGHTER than +, so ("a {0} " + "b." -f $x) formats only the SECOND
+    # string and logs a literal "{0}" for the first -- which is exactly what
+    # this line and the push line below did until 2026-09-30, printing
+    # "CME pull failed (exit {0})" on every failure and hiding the one number
+    # a reader needs. daily_update.ps1 always wrapped; this file did not.
+    Log (("CME pull failed (exit {0}). The 13:00 run will retry with a wider " +
+          "lookback; nothing else is affected.") -f $code)
     exit $code
 }
 
-# Push only the three tables this job can have changed. Re-uploading all
-# thirteen would take a minute to land two tables' worth of new rows, and would
-# also republish the border and replacement data mid-morning for no reason.
+# Push only the three tables this job can have changed. A bare run pushes all
+# TWENTY (7 CRITICAL + 13 OPTIONAL in 02_migrate_data.py -- this comment said
+# "thirteen", which is the optional count alone), taking a minute to land two
+# tables' worth of new rows, and would also republish the border and
+# replacement data mid-morning for no reason.
 $pushCode = 0
 $po = Join-Path $env:TEMP ('cme_po_{0}.txt' -f $PID)
 $pe = Join-Path $env:TEMP ('cme_pe_{0}.txt' -f $PID)
@@ -98,9 +127,35 @@ foreach ($f in @($po, $pe)) {
 
 if ($pushCode -eq 0) {
     Log 'CME print pull OK - the published print and scorecard are current'
+} elseif ($pushCode -eq 3) {
+    # Exit 3 is "every table LOADED, but its contents do not match local
+    # SQLite", and the generic message below is FALSE for it in the way that
+    # matters most. That message says the dashboard is merely behind and the
+    # 13:00 run will carry the print across; here the write COMMITTED, so the
+    # dashboard is not waiting on anything -- it is serving NEW WRONG VALUES
+    # right now, and re-running at 13:00 pushes the same local rows again.
+    #
+    # This job pushes cme_ftp_daily, cme_ftp_locations and cme_ftp_brackets,
+    # and all three are in 02_migrate_data.py's CRITICAL_TABLES, so exit 3 is
+    # genuinely reachable from here and not a code only the daily job can see.
+    # Those three back the "Last CME Print" tile and the forecast scorecard --
+    # the numbers our estimate is scored against.
+    #
+    # Worded to match daily_update.ps1's exit-3 branch on purpose: two logs
+    # describing the same condition in different words is how an incident gets
+    # misread at 10:15.
+    Log (("ERROR: the CME push COMMITTED but CONTENT VERIFICATION FAILED " +
+          "(exit {0}). This is NOT the stale-dashboard case: Snowflake holds " +
+          "NEW data that disagrees with local SQLite, so the DASHBOARD MAY BE " +
+          "SERVING WRONG VALUES for the published print and the scorecard. " +
+          "Waiting for the 13:00 run does NOT fix this. The differing tables " +
+          "and columns are in the push output above - read them before " +
+          "re-pushing. This is the shape of the 2026-09-29 incident.") -f $pushCode)
 } else {
-    Log ("ERROR: push failed (exit {0}). SQLite has the print; the dashboard " +
-         "will pick it up at 13:00." -f $pushCode)
+    # A load failure rolls each table back on its own, so Snowflake still holds
+    # its previous contents and the 13:00 run really does catch it up.
+    Log (("ERROR: push failed (exit {0}). SQLite has the print; the dashboard " +
+          "will pick it up at 13:00.") -f $pushCode)
 }
 
 Log ("CME print pull finished  pull_exit={0}  push_exit={1}  {2}" -f `

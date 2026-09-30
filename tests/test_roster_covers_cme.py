@@ -574,7 +574,7 @@ def cme_locations(conn):
     {printed name: (dates, head, first, last, states)} over the whole table.
 
     READ-ONLY, by connection and by query: this opens the live pushed database
-    the 07:30 and 13:00 runs write to.
+    the 08:00 and 13:00 runs write to.
     """
     return {r[0]: r[1:] for r in conn.execute(
         "SELECT location, COUNT(DISTINCT report_date), SUM(head_count), "

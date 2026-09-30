@@ -53,8 +53,8 @@ $wake = Get-WinEvent -FilterHashtable @{LogName='System';
             ProviderName='Microsoft-Windows-Power-Troubleshooter'; Id=1} `
             -MaxEvents 8 -ErrorAction SilentlyContinue |
         Where-Object { $_.TimeCreated -ge $dayStart -and $_.TimeCreated -lt $dayStart.AddDays(1) }
-# Only wakes anywhere near the 07:30 trigger tell us anything. Listing every
-# wake in the day and flagging each as "not 07:30" is noise, and a check that
+# Only wakes anywhere near the 08:00 trigger tell us anything. Listing every
+# wake in the day and flagging each as "not 08:00" is noise, and a check that
 # cries wolf stops being read.
 $near = @()
 foreach ($w in $wake) {
@@ -71,15 +71,29 @@ if (-not $wake) {
     "   WakeToRun was not needed"
 } elseif (-not $near) {
     "   the machine slept and woke on $Date, but not between 05:00 and 10:00 -"
-    "   it was already awake at 07:30, so WakeToRun was not exercised"
+    "   it was already awake at 08:00, so WakeToRun was not exercised"
 } else {
     foreach ($n in $near) {
         "   woke {0}   (slept {1})" -f $n.Wake.ToString('HH:mm:ss'),
             $n.Slept.ToString('MM-dd HH:mm')
-        if ($n.Wake.Hour -eq 7 -and $n.Wake.Minute -le 35) {
-            "     -> WakeToRun fired for the 07:30 trigger"
+        # The trigger is 08:00, so 07:30 to 08:05 is the wake we asked for.
+        #
+        # THE BAND IS DELIBERATELY LOPSIDED -- 30 minutes early, 5 minutes late.
+        # An early wake is WakeToRun doing its job. A LATE one is the failure
+        # this whole section exists to catch: the machine stayed asleep and a
+        # human woke it, which is exactly what WakeToRun is supposed to make
+        # unnecessary. Widening the late side hides the signal.
+        #
+        # The 07:30 version of this test read `Hour -eq 7 -and Minute -le 35`,
+        # and that 35 was a LATE bound sitting 5 minutes past a :30 trigger.
+        # Carrying the literal 35 across to an :00 trigger turns +5 into +35 and
+        # reports a half-hour deferral as a success -- which is what the first
+        # pass at this edit did.
+        if ($n.Wake -ge $n.Wake.Date.AddHours(7).AddMinutes(30) -and
+            $n.Wake -le $n.Wake.Date.AddHours(8).AddMinutes(5)) {
+            "     -> WakeToRun fired for the 08:00 trigger"
         } else {
-            "     -> woke at {0}, NOT 07:30 - the run was probably deferred until someone" -f $n.Wake.ToString('HH:mm')
+            "     -> woke at {0}, NOT 08:00 - the run was probably deferred until someone" -f $n.Wake.ToString('HH:mm')
             "        woke the machine, which is what WakeToRun exists to prevent"
         }
     }
@@ -92,7 +106,7 @@ if (-not (Test-Path $log)) {
     Get-Content $log | Where-Object {
         $_ -match 'run started|run finished|FATAL|ERROR|WARN|healthcheck|Snowflake push|skipping' } |
       ForEach-Object { '   ' + $_ }
-    # The FIRST run of the day is the morning call -- the one the 08:15 deadline
+    # The FIRST run of the day is the morning call -- the one the 08:45 deadline
     # applies to. Taking the last would judge the afternoon pass (or a manual
     # evening run) against a deadline that was never meant for it.
     $started  = (Get-Content $log | Select-String 'run started'  | Select-Object -First 1)
@@ -106,10 +120,17 @@ if (-not (Test-Path $log)) {
         if ($finished.Line -match '(\d{2}:\d{2}:\d{2})\s*$') {
             $t1 = [datetime]::ParseExact($matches[1], 'HH:mm:ss', $null)
             "   finished {0}   (ran {1:n1} minutes)" -f $matches[1], ($t1 - $t0.Date.Add($t0.TimeOfDay)).TotalMinutes
-            $deadline = $t0.Date.AddHours(8).AddMinutes(15)
+            # 08:45 = the 08:00 trigger plus the monitor's 45-minute grace, so
+            # this line and Healthchecks.io judge the same instant. It was 08:15
+            # while the trigger was 07:30, and moving the trigger without moving
+            # this made the deadline unreachable: 2026-09-30 started 08:00:03 and
+            # finished 08:25:00 with every exit code 0, and would have been
+            # reported MISSED by 10 minutes. 14 of the 19 full runs on record
+            # would miss 08:15 from an 08:00 start.
+            $deadline = $t0.Date.AddHours(8).AddMinutes(45)
             $done = $t0.Date.Add($t1.TimeOfDay)
-            if ($done -le $deadline) { "   MET the 08:15 deadline with {0:n0} min to spare" -f ($deadline - $done).TotalMinutes }
-            else { "   MISSED the 08:15 deadline by {0:n0} min" -f ($done - $deadline).TotalMinutes }
+            if ($done -le $deadline) { "   MET the 08:45 deadline with {0:n0} min to spare" -f ($deadline - $done).TotalMinutes }
+            else { "   MISSED the 08:45 deadline by {0:n0} min" -f ($done - $deadline).TotalMinutes }
         }
     } elseif ($started) {
         "   started but NEVER FINISHED - still running, or it died"

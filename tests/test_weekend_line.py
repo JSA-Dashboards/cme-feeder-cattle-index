@@ -195,7 +195,7 @@ def test_span_head_sums_to_the_published_same_day_head():
     db_path = Path(__file__).resolve().parent.parent / "data" / "mars_history.db"
     if not db_path.exists():
         pytest.skip("no local database")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     try:
         mondays = conn.execute(
             "SELECT report_date, same_day_head FROM fci_daily "

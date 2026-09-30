@@ -165,7 +165,7 @@ def build(d, slot="am", failed=None):
             miss = d["scored_call"] - d["cme_value"]
             same = int(d["scored_head"] or 0) == int(d["cme_head"] or 0)
             bits.append(
-                f'<tr><td style="padding:3px 12px 3px 0">JSA frozen 07:30 call</td>'
+                f'<tr><td style="padding:3px 12px 3px 0">JSA frozen morning call</td>'
                 f'<td align="right">{_money(d["scored_call"])}</td>'
                 f'<td align="right" style="padding-left:12px;color:'
                 f'{GREEN if abs(miss) < 0.05 else MUTED}">{miss:+.4f}'

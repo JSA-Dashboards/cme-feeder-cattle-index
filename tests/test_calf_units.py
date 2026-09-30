@@ -165,7 +165,7 @@ def test_the_stored_table_holds_no_per_animal_prices():
     if not db_path.exists():
         pytest.skip("no local database")
     import sqlite3
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     try:
         bad = conn.execute(
             "SELECT report_date, location, weight_low, head_count, avg_weight, "

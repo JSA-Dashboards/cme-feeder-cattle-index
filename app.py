@@ -73,6 +73,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Hide the Streamlit Community Cloud viewer badge (the profile avatar that links
+# to the creator's other apps) for a clean, client-facing footer.
+st.markdown(
+    "<style>[class*='_profileContainer_']{display:none !important;}</style>",
+    unsafe_allow_html=True,
+)
+
 st.markdown(f"""
 <style>
   html, body, [data-testid="stAppViewContainer"] {{

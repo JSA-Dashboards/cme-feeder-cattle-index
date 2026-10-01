@@ -343,15 +343,26 @@ failed. Two near-identical emails a day trains you to ignore both, and the
 afternoon number is a refinement rather than news. A **failure mails from
 either slot** — that is the case worth interrupting someone for.
 
-Sent through **Outlook COM**, not SMTP. That means no mail password stored
-anywhere, no SMTP AUTH exemption to request from IT (Microsoft 365 disables
-basic auth by default), and no third-party mail service holding a key — it uses
-the `JSA` profile already authenticated on this machine.
+Delivery is a **OneDrive drop**, not SMTP and no longer Outlook. The original
+design used Outlook COM so no password had to be stored; that stopped working on
+2026-09-11, when it turned out Ross runs the NEW Outlook (olk.exe), from which
+Microsoft removed the COM automation interface entirely. Classic `OUTLOOK.EXE` is
+still on disk and the CLSID still registered, which is the trap — it appears to
+work and does nothing.
 
-The trade: **Outlook must be running.** `send_email.ps1` starts it minimised if
-it is not, and waits up to 60 seconds for the profile to load. If Outlook
-cannot start, the send logs a warning and the pipeline carries on — the real
-work is already published by that point.
+SMTP is attempted but cannot succeed: the tenant has security defaults enforced,
+so basic auth is permanently off for this account. So `send_email.ps1` writes the
+message into `EMAIL_DROP_DIR` under OneDrive for Business, which syncs on its own,
+and a scheduled Power Automate flow reads the file and sends it. The filenames are
+stable because the flow fetches by path. The drop happens BEFORE the SMTP attempt
+and regardless of it, because it is the path that actually delivers.
+
+**The mail now leaves immediately after the index push, not at the end of the
+run** (changed 2026-10-01). It reads only `fci_daily`, `cme_ftp_daily`,
+`fci_snapshots` and `peer_estimates` — all CRITICAL, all published by that step —
+so it was never waiting for anything it reports. The healthcheck ping deliberately
+did NOT move with it: absence of that ping is the only signal a hang produces, so
+it stays at the end where it certifies the whole run.
 
 Set the recipients in `.env` (comma-separate for several):
 
@@ -362,7 +373,7 @@ EMAIL_CC=
 
 Unset `EMAIL_TO` and no mail is attempted at all.
 
-To see it without sending, which opens a draft in Outlook:
+To write the message out without delivering it:
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\send_email.ps1 -Preview

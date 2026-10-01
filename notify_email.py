@@ -1,13 +1,17 @@
 """
 Build the daily FCI estimate email. Does NOT send -- writes the subject and an
-HTML body to .tmp/ for scripts/send_email.ps1 to hand to Outlook.
+HTML body to .tmp/ for scripts/send_email.ps1 to deliver.
 
-Split that way on purpose. Sending through Outlook COM needs no stored
-credentials at all: it uses the profile already authenticated on this machine,
-so there is no app password in .env, no SMTP AUTH exemption to request from IT,
-and no third-party mail service holding a key. PowerShell speaks COM natively;
-Python would need pywin32. So Python does the numbers and PowerShell does the
-sending.
+Split that way so the numbers and the delivery can fail independently: this file
+is tested like any other query, and a broken mail path cannot take the figures
+with it.
+
+The delivery itself has moved twice and neither reason was Python's. It used
+Outlook COM, for no stored credentials at all, until 2026-09-11, when the NEW
+Outlook (olk.exe) turned out to have no COM interface. SMTP cannot replace it
+either -- the tenant enforces security defaults, so basic auth is permanently
+off. What actually delivers is a OneDrive drop that a Power Automate flow picks
+up. See scripts/send_email.ps1, which carries the full account.
 
     python notify_email.py                 # today's run, morning slot inferred
     python notify_email.py --slot pm

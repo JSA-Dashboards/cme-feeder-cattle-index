@@ -272,6 +272,108 @@ if ($code -eq 0) {
     Log 'skipping Snowflake push: the USDA refresh failed, nothing good to publish'
 }
 
+# -- Daily estimate email -----------------------------------------------------
+# SENT HERE, immediately after the index is published, since 2026-10-01. It used
+# to be the very last thing the script did, which cost the morning mail about
+# twelve minutes for nothing: it waited behind the border, census, calf, corn and
+# herd ingests and the dashboard push, not one of which it reads.
+#
+# WHY IT IS SAFE AT THIS LINE. notify_email.py queries four tables and no others
+# -- cme_ftp_daily, fci_daily, fci_snapshots, peer_estimates -- and all four are
+# in CRITICAL_TABLES in snowflake/02_migrate_data.py, so the --critical-only push
+# above has already committed every row the mail can see. Everything below here
+# is dashboard data: a stale tab, never the number.
+#
+# WHAT DID NOT MOVE, AND MUST NOT. The healthcheck ping stays at the END of this
+# script. The guarantee against a silent failure is the ABSENCE of a ping, not
+# the /fail line: the 13:00 run that hung on 2026-09-10 was killed at its time
+# limit, and a killed process never reaches any line it has not got to yet. Move
+# the SUCCESS ping up here and a hang in the ingests below would be pre-announced
+# as a success -- the monitor satisfied, the alert never fired, and the exact
+# hole the dead-man's switch was built to close re-opened. The email may move
+# because it REPORTS; the ping may not because it CERTIFIES. The ingests do not
+# move either, for the reason recorded above the push: third-party API calls stay
+# off the index's critical path.
+#
+# ONE BEHAVIOUR CHANGE, chosen rather than inherited. If the run hangs below,
+# Ross now gets the estimate where before he got nothing at all, and the monitor
+# still goes DOWN on the missing ping. So a single morning can now produce a
+# normal-looking estimate email AND a DOWN alert. They do not contradict each
+# other: the mail says "the index for this date is published", true the instant
+# the push above returned, and the alert says "the run never reported finishing",
+# also true. Different halves of one job. NO marker is added to the mail to hedge
+# this, and that is a decision, not an oversight -- nothing has failed at this
+# line and nothing here can know whether anything will, so a caveat would print
+# every morning and be wrong on all but the rare one, which is the same cry-wolf
+# argument that keeps the afternoon pass silent. If a marker is ever wanted it
+# belongs in notify_email.py's footer, worded once, not in this dispatch.
+#
+# THE SLOT DOES NOT CHANGE, and that was checked rather than assumed, because
+# whether any mail is sent at all hangs on it. snapshots.run_slot() splits on
+# hour 11 (AM_PM_BOUNDARY_HOUR). The two logged 25.0-minute runs under the 08:00
+# trigger (2026-09-30 and 2026-10-01) mailed at 08:25 and would now mail about
+# 08:13; the same run under the 07:45 trigger finishes about 08:10 and will now
+# mail about 07:58. Every one of those is hour 7 or 8, nowhere near 11, so the
+# morning still mails and the afternoon pass still stays silent. It also reads
+# the clock closer to $slotNow at the top of the script, which applies the same
+# 11:00 boundary about twenty-five minutes earlier -- two readings that could in
+# principle disagree, and now have less room to.
+#
+# THE MORNING RUN MAILS THE ESTIMATE; the afternoon pass stays silent unless it
+# broke. Two identical-looking emails a day trains you to ignore both, and the
+# afternoon number is a refinement rather than news. A FAILURE always mails, from
+# either slot, because that is the case worth interrupting someone for -- and it
+# now leaves twelve minutes sooner too.
+#
+# $mailSummary is NOT the $summary the healthcheck sends at the end, and the two
+# must never be merged back into one variable. This one is stamped when the
+# PUBLISH STEP ended; that one is stamped when the RUN finished, and those are
+# now about twelve minutes apart. Each is true where it is built; sharing one
+# string would silently put the wrong clock on one of them and nobody would
+# notice which.
+#
+# It says publish_step= and not published= on purpose. The only branch that ever
+# sends $mailSummary is the FAILURE branch below, so the one place a human reads
+# this string is a failure email -- where "published=08:13 push_exit=1" would be
+# a flat untruth sitting next to the exit code that contradicts it. Caught by
+# running the stubbed failure path, not by reading it.
+#
+# About those twelve minutes: logs/update_*.log stamps only the run's start and
+# finish, so the figure is a difference of days rather than a measurement. The
+# herd block cost 3.9 min across the 2026-09-25/09-26 boundary (15.1 -> 19.0 min
+# median) and update_imports cost 7.0 min across 09-10/09-11 (5.0 -> 12.0), and
+# it has grown since with calf, corn and feed. The stamp this block logs below
+# turns that inference into a measurement from tomorrow: subtract it from the
+# "run finished" stamp and you have the real tail.
+#
+# Delivery is scripts/send_email.ps1 -- a OneDrive drop that a Power Automate
+# flow sends from Ross's own identity, with SMTP as a fallback for a mailbox that
+# ever permits it. NOT Outlook COM: that was the original design and it died with
+# the new Outlook (olk.exe), which has no COM interface at all; the comment that
+# used to sit here still claimed it. Inert without EMAIL_TO, and never fatal --
+# by this line the pipeline has already done its real work.
+$mailSummary = ("update_exit={0} cme_exit={1} push_exit={2} publish_step={3}" -f `
+                $code, $cmeCode, $pushCode, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+$slot = ''
+try { $slot = (& $py -c "import sys; sys.path.insert(0, r'$repo'); from snapshots import run_slot; print(run_slot())" 2>$null).Trim() } catch { }
+if ($code -eq 0 -and $pushCode -eq 0) {
+    if ($slot -eq 'am') {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $repo 'scripts\send_email.ps1') -Slot $slot |
+            ForEach-Object { Log $_ }
+    } else {
+        Log ("email: {0} slot succeeded - no mail sent by design" -f ($(if ($slot) { $slot } else { 'unknown' })))
+    }
+} else {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $repo 'scripts\send_email.ps1') -Failed $mailSummary |
+        ForEach-Object { Log $_ }
+}
+# Stamped on purpose. Compare it with the "run finished" stamp at the bottom and
+# the log itself tells you how long the mail no longer waits -- the one number
+# this move was made for, which until now could only be inferred across days.
+Log ("estimate email step done  {0}" -f (Get-Date -Format 'HH:mm:ss'))
+
 # Everything past this point is dashboards, not the index, and is NON-FATAL
 # throughout: none of it feeds the FCI estimate, which is already published
 # above. The worst case is a stale tab.
@@ -339,37 +441,26 @@ Get-ChildItem $logDir -Filter 'update_*.log' -ErrorAction SilentlyContinue |
 # here: if the Snowflake push did not land, the dashboard is stale, and that is
 # precisely the silent failure this is meant to surface -- the local run having
 # "worked" is no comfort to someone reading the page.
+#
+# THIS IS THE LAST THING THE SCRIPT DOES, and it has to stay that way. The
+# estimate email moved up to the critical push on 2026-10-01; the ping did not,
+# because the monitor's guarantee is the ABSENCE of this ping. Send it before
+# the optional ingests and a hang in them -- the 2026-09-10 failure, killed at
+# its time limit -- would arrive as a green check. See the long note at the
+# email block for the full argument.
+#
+# $summary is stamped FINISHED and is deliberately a DIFFERENT string from the
+# $mailSummary built at the email block, which is stamped at the end of the
+# PUBLISH STEP. They are about twelve minutes apart now. Do not collapse them
+# into one variable to save
+# a line: whichever call site inherited the other's clock would go on reporting
+# a plausible, wrong time forever.
 $summary = ("update_exit={0} cme_exit={1} push_exit={2} finished={3}" -f `
             $code, $cmeCode, $pushCode, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 if ($code -eq 0 -and $pushCode -eq 0) {
     Ping-Health '' $summary
 } else {
     Ping-Health '/fail' $summary
-}
-
-# -- Daily estimate email -----------------------------------------------------
-# The MORNING run mails the estimate; the afternoon pass stays silent unless it
-# broke. Two identical-looking emails a day trains you to ignore both, and the
-# afternoon number is a refinement rather than news. A FAILURE always mails,
-# from either slot, because that is the case worth interrupting someone for.
-#
-# Sent through Outlook COM (see send_email.ps1) so no mail password is stored
-# anywhere. Inert unless EMAIL_TO is set in .env, and never fatal -- by this
-# point the pipeline has already done its real work and published.
-$slot = ''
-try { $slot = (& $py -c "import sys; sys.path.insert(0, r'$repo'); from snapshots import run_slot; print(run_slot())" 2>$null).Trim() } catch { }
-if ($code -eq 0 -and $pushCode -eq 0) {
-    if ($slot -eq 'am') {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File (Join-Path $repo 'scripts\send_email.ps1') -Slot $slot |
-            ForEach-Object { Log $_ }
-    } else {
-        Log ("email: {0} slot succeeded - no mail sent by design" -f ($(if ($slot) { $slot } else { 'unknown' })))
-    }
-} else {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-        -File (Join-Path $repo 'scripts\send_email.ps1') -Failed $summary |
-        ForEach-Object { Log $_ }
 }
 
 # Distinct exit codes so Task Scheduler's LastTaskResult says WHICH half failed:

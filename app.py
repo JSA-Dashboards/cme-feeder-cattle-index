@@ -603,12 +603,15 @@ def _load_last_refresh():
         return None
 
 
-# The pipeline runs at 08:00 and 13:00 Central, so the longest HEALTHY gap is
-# the overnight one: 13:00 to 08:00 is 19 hours. Past 20 means a scheduled
+# The pipeline runs at 07:45 and 13:00 Central, so the longest HEALTHY gap is
+# the overnight one: 13:00 to 07:45 is 18.75 hours. Past 20 means a scheduled
 # run did not land; past 30 means more than one did not. The morning run moved
-# from 07:30 to 08:00 on 2026-09-29, so the warn threshold now sits 1 hour above
-# the healthy gap rather than 1.5: the morning run has to slip by more than an
-# hour to warn, where it used to take more than ninety minutes.
+# from 07:30 to 08:00 on 2026-09-29 and from 08:00 to 07:45 on 2026-10-01, so
+# the warn threshold now sits 20 - 18.75 = 1.25 hours above the healthy gap,
+# where it was 1.0 at 08:00 and 1.5 at 07:30. In slip terms: 13:00 + 20h is
+# 09:00, so the morning run has to land after 09:00 -- more than an hour and a
+# quarter late -- before this warns. The threshold is anchored to the 13:00
+# run, which did not move, so only the margin changed.
 _STALE_WARN_HOURS = 20
 _STALE_ALERT_HOURS = 30
 
@@ -653,15 +656,15 @@ def _render_freshness():
     if hours >= _STALE_ALERT_HOURS:
         st.error(
             f"**This page is {hours:.0f} hours out of date.** The last pipeline run "
-            f"recorded was {stamp} Central; at least two scheduled runs (08:00 and "
+            f"recorded was {stamp} Central; at least two scheduled runs (07:45 and "
             f"13:00) have not reached the database behind this page. Treat every "
             f"figure below as historical until this clears."
         )
     elif hours >= _STALE_WARN_HOURS:
         st.warning(
             f"**A scheduled run appears to have been missed.** Last refresh was "
-            f"{stamp} Central, {hours:.0f} hours ago — longer than the 19-hour "
-            f"overnight gap between the 13:00 and 08:00 runs."
+            f"{stamp} Central, {hours:.0f} hours ago — longer than the "
+            f"18.75-hour overnight gap between the 13:00 and 07:45 runs."
         )
     else:
         st.caption(f"Last refreshed {stamp} Central ({hours:.1f}h ago).")
@@ -1659,7 +1662,7 @@ with tab_index:
                 _lead += (f' Nothing has reached the index for '
                           f'{_words.get(_age, _age)} business days — treat that '
                           f'as a gap in the data rather than a quiet week, and '
-                          f'check that the 08:00 and 13:00 runs are landing.')
+                          f'check that the 07:45 and 13:00 runs are landing.')
             elif _age == 1:
                 _lead += (' A full reporting day has passed with nothing, which '
                           'is worth a look: 85% of a sale day\'s head is normally '

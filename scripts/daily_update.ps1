@@ -2,7 +2,7 @@
 # (see scripts/README-schedule.md). Runs update_index.py against the repo's venv and
 # appends stdout/stderr to logs/update_<date>.log.
 #
-# TWO TRIGGERS, one script. 08:00 local is the morning call -- the number that goes
+# TWO TRIGGERS, one script. 07:45 local is the morning call -- the number that goes
 # out and the one comparable to CIH's and Compass's morning sheets. 13:00 is the
 # settled pass, and it exists because USDA publication is not finished by then:
 # measured 2026-09-09 over 80 auctions and 246 reports, 85.2% of a sale day's
@@ -10,9 +10,12 @@
 # all of that gap is OKC West (El Reno), which publishes its previous-day sale at a
 # median of +1 day 11:13 and had missed the morning run 7 times out of 7; folding its
 # 09/08 sale in moved that date's estimate +0.33, about 80x the scorecard's MAE.
-# Those shares were measured at 07:30, before the morning run moved to 08:00 on
-# 2026-09-29; the coverage table in README-schedule.md shows 07:30 -> 08:00 adding
-# zero head, so the gap the afternoon pass closes is the same one.
+# Those shares were measured at 07:30. The morning trigger has moved twice since:
+# 07:30 -> 08:00 on 2026-09-29, and 08:00 -> 07:45 on 2026-10-01 so the estimate is
+# in hand before the morning email goes out. Neither move touches the gap the
+# afternoon pass closes -- the coverage table in README-schedule.md reads the same
+# 51,503 head at 07:30 and at 08:00, and 07:45 lies between them, so it cannot
+# differ either.
 #
 # The script needs no argument to tell the runs apart: snapshots.run_slot() reads the
 # clock, files anything before 11:00 as 'am' and the rest as 'pm', and freezes each
@@ -52,14 +55,18 @@ Log ("run started  {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'))
 # ONE CHECK PER SLOT. The original reason was arithmetic: a five-field cron
 # shares a single minute field, and with the runs at 07:30 and 13:00 there was
 # no way to express both in one -- "30 7,13 * * *" means 07:30 and 13:30, and
-# would have cried wolf every afternoon. That constraint LAPSED when the morning
-# run moved to 08:00 on 2026-09-29: both slots are now on minute 0, so
-# "0 8,13 * * *" would express them in a single check. The two checks stay
-# anyway, and now on purpose rather than by necessity -- one per slot keeps a
-# missed morning's alert and history separate from a missed afternoon's, and a
-# combined check would go red without saying which run was lost. Each has its
-# own cron ("0 8 * * *" and "0 13 * * *"), and this script pings whichever one
-# matches the slot it is running in.
+# would have cried wolf every afternoon. That constraint lapsed for one day at
+# 08:00 (2026-09-29), when both slots sat on minute 0 and "0 8,13 * * *" would
+# have expressed them together -- and it came straight BACK on 2026-10-01 with
+# the move to 07:45: the minute fields differ again (45 and 0), so "45 7,13 * * *"
+# means 07:45 and 13:45 and a single five-field cron genuinely cannot describe
+# both runs. The two checks were kept through the one day they were optional,
+# and that is why nothing had to be rebuilt now. Keeping them is also right on
+# its own merits -- one per slot keeps a missed morning's alert and history
+# separate from a missed afternoon's, and a combined check would go red without
+# saying which run was lost. Each has its own cron ("45 7 * * *" and
+# "0 13 * * *"), and this script pings whichever one matches the slot it is
+# running in.
 #
 # Monitoring BOTH matters: the failure that prompted all this was the 13:00 run
 # hanging and being killed on 2026-09-10. A killed process never reaches its

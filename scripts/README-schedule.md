@@ -6,7 +6,7 @@ Scheduler as **`JSA FCI daily update`**.
 
 ## Three triggers, two scripts
 
-`daily_update.ps1` at 08:00 and 13:00 (below), plus `cme_pull.ps1` at 10:15.
+`daily_update.ps1` at 07:45 and 13:00 (below), plus `cme_pull.ps1` at 10:15.
 
 ### The 10:15 CME print pull
 
@@ -16,11 +16,15 @@ own FTP `MDTM` timestamps over 14 consecutive files:
     earliest 08:35    median 09:05    latest 10:05    (Central)
 
 So **07:30 was always too early** -- that run could never carry yesterday's
-official number -- and 13:00 was the first poll that saw it. At the 08:00 trigger
-it is usually still too early but no longer structurally so: CME's earliest file
-in the sample below lands 08:05, so a morning run occasionally catches one. The published print
-and the whole forecast scorecard therefore ran about four hours behind CME every
-morning: a 09:05 print did not reach the dashboard until 13:05.
+official number -- and 13:00 was the first poll that saw it. At the 07:45
+trigger it is still too early on any ordinary day, though no longer
+*structurally* so the way 07:30 was: CME's earliest file in the sample below
+lands 08:05, and the morning run does not reach its own CME step the instant it
+starts, so a rare early file can still be caught. Nothing in the logs times that
+step -- only the run's start and finish are stamped -- so this is "can", not a
+rate. The published print and the whole forecast scorecard therefore ran about
+four hours behind CME every morning: a 09:05 print did not reach the dashboard
+until 13:05.
 
 10:15 clears the 10:05 worst case by ten minutes. The job fetches, stores, and
 pushes only `cme_ftp_daily`, `cme_ftp_locations` and `cme_ftp_brackets` -- about
@@ -35,7 +39,7 @@ and the only cost is that the print appears when it always used to.
 
 | Trigger | Purpose |
 |---|---|
-| **08:00** Central | The morning call — the number that goes out, and the one comparable to CIH's and Compass's morning sheets. |
+| **07:45** Central | The morning call — the number that goes out, and the one comparable to CIH's and Compass's morning sheets. |
 | **13:00** Central | The settled pass. |
 
 The script needs no argument to tell them apart: `snapshots.run_slot()` reads the
@@ -50,9 +54,10 @@ Two measurements, both taken 2026-09-09:
 - **CME posts its own file between 08:05 and 10:05 Central** (median 09:04,
   n=17, from the FTP server's `MDTM` timestamps). The 07:30 run therefore
   *structurally could not* see the file published that morning, so "Last CME
-  Print" was always a day stale. The 08:00 run overlaps the bottom of that
-  window and so may occasionally catch an early file -- it is no longer a
-  structural impossibility, just an unlikely one.
+  Print" was always a day stale. The 07:45 run clears 08:05 only once its own
+  CME step is reached, several minutes in, so it may occasionally catch an
+  early file -- unlikely, but not the structural impossibility 07:30 was. It is
+  less likely than at 08:00, by exactly the fifteen minutes the trigger moved.
 - **USDA publication is only slightly unfinished at 07:30** — less than it
   first appears. Measured against the date a sale is BUCKETED into (not its
   USDA sale date, which is the framing that made El Reno look like a timing
@@ -62,12 +67,13 @@ Two measurements, both taken 2026-09-09:
 
 ### Why 07:30 and not later
 
-*Recorded 2026-09-09. The morning trigger moved to 08:00 on 2026-09-29 anyway,
-so read what follows as the case as it stood then, not as current policy. The
-head-availability measurements still hold — what changed is the decision, not
-the numbers. Two things in this section did go stale with the move and are
-corrected elsewhere in this file: the deadline arithmetic below is written
-against the old 08:15, which is now 08:45, and that is what made an 08:00 start
+*Recorded 2026-09-09. The morning trigger has moved twice since — to 08:00 on
+2026-09-29, then to 07:45 on 2026-10-01 — so read what follows as the case as
+it stood then, not as current policy. The head-availability measurements still
+hold; what changed is the decision, not the numbers. What did go stale with
+those moves, and is corrected elsewhere in this file, is the deadline: the
+arithmetic below is written against the old 08:15, which became 08:45 under the
+08:00 trigger and is 08:30 under 07:45. That 08:15 is what made an 08:00 start
 look impossible here.*
 
 Asked and measured 2026-09-09, against bucket dates:
@@ -93,13 +99,18 @@ strongest single piece of evidence that 07:30 is not costing accuracy: on
 $327.4300 on **9,829 head** — an identical window, matched to six hundredths of
 a cent.
 
-Revisit this only if the deadline itself moves — which it now has: the trigger
-went to 08:00 on 2026-09-29 and the deadline with it, to 08:45. The paragraph
-above rules out an 08:00 start against the old 08:15, and that objection is
-gone. What has NOT been re-measured is whether a later start is now worth it, so
-this section is history, not a recommendation. At 09:00, an 08:30 run would
-collect that 0.40% and also catch CME's own file in the morning rather than at
-13:00.
+Revisit this only if the deadline itself moves — which it has, twice. It went
+to 08:45 when the trigger went to 08:00 on 2026-09-29, and back to **08:30** on
+2026-10-01 when the trigger went to 07:45, so the estimate is in hand before the
+morning email goes out. The brief window in which the paragraph above was moot
+has therefore closed. Against 08:30, at today's 25-minute runtime, an 08:30
+start finishes 08:55 — twenty-five minutes late — and even an 08:00 start
+finishing 08:25 leaves five minutes and assumes zero start latency. A later
+start is forbidden again, now by an earlier deadline rather than by the old
+08:15. The 0.40% has not been re-measured either, so this section stays history
+rather than a recommendation: the 08:30 run that would collect it (and catch
+CME's own file in the morning rather than at 13:00) needs a deadline nearer
+09:00, and the deadline has moved the other way.
 
 `fci_snapshots` is written INSERT-OR-IGNORE per `(index_date, run_date,
 run_slot)`, so the afternoon pass **cannot** overwrite the morning call it
@@ -175,15 +186,19 @@ Logs land in `logs/update_<date>.log` and are pruned after 30 days.
 **Two checks, one per slot.** This began as a cron limitation: a five-field cron
 shares a single minute field, so 07:30 and 13:00 could not be expressed together
 -- `30 7,13 * * *` means 07:30 and 13:30 and would have cried wolf every
-afternoon. At 08:00 that collision is gone and `0 8,13 * * *` would express both.
-Keep the two checks anyway. A single check alerts identically whichever slot went
-missing, and it blends two runs with different jobs into one history -- the
-2026-09-10 hang below is exactly the case you want named rather than averaged.
-Configure the monitor with:
+afternoon. That collision lapsed for exactly one day, at the 08:00 trigger,
+where both slots sat on minute 0 and `0 8,13 * * *` would have expressed both.
+**At 07:45 it is back**: the minute fields differ again (45 and 0), and
+`45 7,13 * * *` means 07:45 and 13:45. Because the two checks were kept through
+the day they were merely optional, nothing had to be rebuilt. Keep them for the
+reason that outlasts the arithmetic: a single check alerts identically whichever
+slot went missing, and it blends two runs with different jobs into one history
+-- the 2026-09-10 hang below is exactly the case you want named rather than
+averaged. Configure the monitor with:
 
 | check | cron | grace | alerts |
 |---|---|---|---|
-| morning | `0 8 * * *` | 45 min | 08:45 |
+| morning | `45 7 * * *` | 45 min | 08:30 |
 | afternoon | `0 13 * * *` | 45 min | 13:45 |
 
 in `America/Chicago`, and put the ping URLs in `.env` as `HEALTHCHECK_URL_AM`
@@ -193,27 +208,80 @@ slots as a fallback.
 **That cron lives on Healthchecks.io, outside this repo, and nothing here can
 read it back.** Move the Task Scheduler trigger without editing the check and the
 monitor goes on expecting the old time, alerting every morning while the pipeline
-is perfectly healthy — which is exactly what happened on 2026-09-30, when the
-task had moved to 08:00 and the check still said `30 7 * * *`. Changing the
-trigger means changing the check in the same sitting.
+is perfectly healthy. Moving the trigger is therefore a two-place change, and the
+second place is one no test, no grep and no reviewer in this repo can see.
+
+The record so far is one for one:
+
+- **2026-09-30 — self-inflicted.** The task had moved to 08:00 and the check
+  still said `30 7 * * *`, so it went red on a healthy run.
+- **2026-10-01 — HALF DONE, and still open at the time of writing.** The task
+  moved to 07:45 and `check_run.ps1`'s deadline moved with it, to 08:30. The
+  Healthchecks.io cron was NOT moved and still reads `0 8 * * *`.
+
+  This one does not go red, and the reason is worth understanding rather than
+  filing as luck. 09-30 moved the trigger LATER than the check expected, so the
+  ping arrived after the deadline and the check fired. 10-01 moved it EARLIER:
+  the check still expects a ping by 08:45 and a 07:45 run delivers one near
+  08:10, comfortably inside. Moving a job earlier cannot trip a stale cron;
+  moving it later always can.
+
+  What it costs instead is tightness. Until the cron becomes `45 7 * * *`, a
+  morning that produces NOTHING is reported at 08:45 rather than 08:30 -- the
+  monitor is 15 minutes looser than the deadline this repo now judges against.
+
+Changing the trigger means changing the check. Both entries stay: one is the cost
+of forgetting in the direction that bites, the other is a reminder that the
+direction which does not bite still leaves the monitor wrong.
 
 Monitoring BOTH matters. The failure that prompted this was the 13:00 run
 hanging on 2026-09-10 and being killed at its time limit. A killed process never
 reaches its `/fail` line, so ABSENCE of a ping is the only signal available --
 and a morning-only check would have stayed green straight through it.
 
-Grace of 45 minutes covers the start latency plus the run itself. Measured over
-the 22 morning runs in `logs/` to 2026-09-30, 19 of them started between 9.7 and
-14 minutes after their trigger. WHAT CAUSES THAT DELAY IS NOT ESTABLISHED HERE:
-the logs carry start times only, no wake times, and `check_run.ps1`'s own reading
-of the power events puts the wake itself at about +3 min — so most of the offset
-is something else, and calling it "wake overhead" would be a guess dressed as a
-measurement. (The three exceptions are the
-07:51 start on 2026-09-09, reconstructed from power events below, and 09-29 and
-09-30, when the machine happened to be awake already.) A full run — optional
-ingests included, so from 2026-09-12 on — takes 13 to 26 minutes start to
-success ping, median 19. Worst realistic case is therefore an 08:14 start
-finishing 08:40, five minutes inside the grace.
+A full run -- optional ingests included, so from 2026-09-12 on -- takes 13 to 26
+minutes start to success ping, median 19. Re-derived 2026-10-01 over 20 runs:
+13.43 min fastest, 26.03 slowest (2026-09-14), median 18.73.
+
+Grace of 45 minutes covers the start latency plus the run itself. Re-derived
+from the 23 morning runs in `logs/` to 2026-10-01, start latency splits cleanly
+by whether the machine was asleep at the trigger:
+
+- **Asleep (the 07:30 era, 09-09 to 09-29).** Nineteen of those twenty-one runs
+  started **+9.7 to +14.0 min** after the trigger. The two exceptions are the
+  07:51 start on 2026-09-09, reconstructed from power events below (+21.3), and
+  09-29, which started +3.0 because the machine happened to be awake.
+- **Awake (the 08:00 era, 09-30 and 10-01).** Both runs started within three
+  seconds of the trigger — 08:00:03 and 08:00:02, so **+0.1 and +0.0 min**.
+
+WHAT CAUSES THE ASLEEP DELAY IS NOT ESTABLISHED HERE: the logs carry start times
+only, no wake times, and `check_run.ps1`'s own reading of the power events puts
+the wake itself at about +3 min — so most of the offset is something else, and
+calling it "wake overhead" would be a guess dressed as a measurement.
+
+**Which side of that boundary 07:45 lands on is not yet known.** It sits between
+a time the machine was reliably asleep and a time it was reliably awake, and no
+07:45 run has happened. Do not assume either; read the first week of starts out
+of `logs/` and come back to this paragraph.
+
+Runtime has grown. The last two morning runs took **25.0 minutes** each
+(08:00:03→08:25:00 and 08:00:02→08:25:01), against 14.9 to 19.2 over the
+preceding week — the census and the push content check are the difference. The
+longest full morning run on record is 26.0 min (2026-09-14). Against an 08:30
+alert that gives:
+
+| start | run length | finish | slack to 08:30 |
+|---|---|---|---|
+| 07:45 (awake) | 25.0 min | 08:10 | 20 min |
+| 07:59 (+14, asleep) | 25.0 min | 08:24 | 6 min |
+| 07:59 (+14, asleep) | 26.0 min, the record | 08:25 | 5 min |
+
+So the worst routine case clears by five to six minutes, the same margin the
+08:00 trigger had against 08:45. The one start that would NOT clear is a repeat
+of 2026-09-09's +21.3: 08:06 plus 25 minutes is 08:31, a minute late. That
+exposure is not new and the move did not widen it — trigger and deadline both
+shifted fifteen minutes, so the arithmetic is unchanged. It is an argument for
+widening the grace if it ever recurs, not against 07:45.
 
 The freshness banner on the dashboard reports staleness, but only when somebody
 opens the page. To be told about a failure with nobody watching, the alert has
@@ -231,22 +299,28 @@ It is inert until configured. To turn it on:
 
 1. Create a free check at <https://healthchecks.io> (or Cronitor — any service
    with a ping URL works).
-2. Set its schedule to **cron `0 8 * * *`**, timezone **America/Chicago**,
-   grace period **45 minutes**. That makes the alert fire at 08:45 if the
+2. Set its schedule to **cron `45 7 * * *`**, timezone **America/Chicago**,
+   grace period **45 minutes**. That makes the alert fire at **08:30** if the
    morning run has not reported success. At the old 07:30 trigger those 45
    minutes landed exactly on the 08:15 deadline, so the check monitored the
-   deadline itself rather than a proxy for it; at 08:00 it lands half an hour
-   past it. The grace is sized to the run — start latency plus the longest run on
-   record — so cutting it to 15 minutes to recover that coincidence would alert
-   on most successful mornings instead. `check_run.ps1` was moved to 08:45 to
-   match, so the two again judge the same instant. The 13:00 run's extra ping is
+   deadline itself rather than a proxy for it; at 08:00 the alert sat half an
+   hour past that deadline, and at 07:45 it sits fifteen minutes past — closer,
+   but still a proxy. The grace is sized to the run — start latency plus the
+   longest run on record — so cutting it to 30 minutes to recover the
+   coincidence would alert on any morning the machine was asleep at 07:45,
+   which finishes about 08:24. `check_run.ps1` was moved to 08:30 to match, so
+   the two again judge the same instant. The 13:00 run's extra ping is
    harmless.
 
    **The cron lives on Healthchecks.io, outside this repo, and nothing here can
    read it back.** Moving the Task Scheduler trigger without editing the check
    produces a silent daily false alarm — which is exactly what happened on
    2026-09-30, when the trigger had moved to 08:00 and the check still expected
-   07:30. If you change one, change both.
+   07:30. On 2026-10-01 the trigger moved again, to 07:45, and `check_run.ps1`
+   moved with it -- but the cron did NOT, and still reads `0 8 * * *`. That one
+   did not fire, because the run now finishes EARLIER than the stale deadline
+   rather than later; it leaves the monitor 15 minutes loose instead. If you
+   change one, change both.
 3. Put the ping URL in `.env`:
 
    ```
@@ -308,10 +382,17 @@ powershell ... -File scripts\check_run.ps1 -Date 2026-09-10
 
 Reports, in order: whether Task Scheduler fired it **on schedule** (event 107)
 rather than at boot (118) or by hand (110); whether WakeToRun actually woke the
-machine near 08:00; the run's own log, exit codes and whether it met 08:45
+machine near 07:45; the run's own log, exit codes and whether it met **08:30**
 (judging the FIRST run of the day, since that is the one the deadline is for);
 and then the data — the frozen morning call, what the freshness banner would
 say, and how the call scored once CME printed. Read-only.
+
+The wake band it accepts is **07:15 to 07:50** — thirty minutes early, five
+late — and the lopsidedness is the point, not sloppiness. An early wake is
+WakeToRun doing its job; a LATE one means a human probably woke the machine,
+which is the failure WakeToRun exists to prevent. **Derive both ends from the
+trigger** when it moves again. Carrying the late end across as a literal is
+what silently turned +5 into +35 at the 08:00 move.
 
 ## Still manual
 

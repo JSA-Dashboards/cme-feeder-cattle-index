@@ -46,7 +46,7 @@ from datetime import date, datetime, timedelta
 import snowflake_db as db
 
 # Runs at or after this hour are the "settled" afternoon pass; earlier ones are
-# the morning call. The pipeline is scheduled at 08:00 and 13:00 local, so any
+# the morning call. The pipeline is scheduled at 07:45 and 13:00 local, so any
 # boundary between 09:00 and 12:00 separates them; 11 leaves room for a morning
 # run that started late (StartWhenAvailable can defer it) without it being
 # misfiled as the afternoon pass.

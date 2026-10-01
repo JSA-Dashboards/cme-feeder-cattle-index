@@ -49,7 +49,7 @@ committing, not after.
     update_imports.py   everything else (see OPTIONAL below)
     app.py              the dashboard (see "two copies" below)
 
-`scripts/daily_update.ps1` runs at **08:00 and 13:00** (Task Scheduler), plus
+`scripts/daily_update.ps1` runs at **07:45 and 13:00** (Task Scheduler), plus
 `scripts/cme_pull.ps1` at **10:15** for CME's print alone. Two runs because
 85% of a sale day's head is fetchable by 07:30 but 95.8% by noon — El Reno
 publishes its previous-day sale at a median +1 day 11:13.

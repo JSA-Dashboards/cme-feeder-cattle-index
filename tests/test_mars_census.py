@@ -2525,7 +2525,7 @@ def test_the_shipped_deadline_is_a_finite_positive_bound():
 
     BOUNDED ABOVE AS WELL AS BELOW, because a deadline is only a deadline if
     the run cannot outlive the thing waiting for it. daily_update.ps1 runs at
-    08:00 and again at 13:00; a census measured at about one second must not
+    07:45 and again at 13:00; a census measured at about one second must not
     be allowed to hold the push past the next scheduled run, so anything on
     the order of hours is a deadline in name only.
 
@@ -3479,7 +3479,7 @@ def test_the_published_index_did_not_move():
     what hold the bucketing, and tests/test_weekend_line.py holds the fold.
 
     Read-only on the live database, recomputed in memory: data/mars_history.db
-    is pushed to production and read by the dashboard, and runs fire at 08:00
+    is pushed to production and read by the dashboard, and runs fire at 07:45
     and 13:00.
     """
     live = REPO / "data" / "mars_history.db"
@@ -3546,7 +3546,7 @@ def test_mars_sales_really_holds_lots_that_only_muscle_grade_separates():
     what says so.
 
     Read-only on the live database, following the test above:
-    data/mars_history.db is pushed to production and runs fire at 08:00 and
+    data/mars_history.db is pushed to production and runs fire at 07:45 and
     13:00. The count is asserted as ">= 1" rather than "== 4" because
     mars_sales only grows -- pinning the number would turn an ordinary ingest
     into a failing test.
@@ -3595,7 +3595,7 @@ def _live_prices():
     database.
 
     Read-only on the live database, following the two tests above:
-    data/mars_history.db is pushed to production and runs fire at 08:00 and
+    data/mars_history.db is pushed to production and runs fire at 07:45 and
     13:00. DISTINCT rather than every row because the same price at two barns
     is one key by design; what the tests below are about is whether two
     DIFFERENT prices can become one.
@@ -3649,7 +3649,7 @@ def test_price_cents_never_merges_two_live_prices_that_differ_in_cents():
     is test_a_one_cent_price_correction_shows_up_in_both_directions().
 
     Read-only on the live database, following the tests above:
-    data/mars_history.db is pushed to production and runs fire at 08:00 and
+    data/mars_history.db is pushed to production and runs fire at 07:45 and
     13:00.
 
     MUTANT THAT MUST DIE: return int(float(Decimal(str(p))) * 100) from

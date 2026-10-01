@@ -8,20 +8,25 @@
 #
 #     earliest 08:35    median 09:05    latest 10:05    (all Central)
 #
-# The main pipeline runs at 08:00 and 13:00. 08:00 is still well ahead of the
-# median print (09:05) and of the latest ever observed (10:05), so the morning
-# run cannot be relied on to carry yesterday's official number. The 13:00 run is
+# The main pipeline runs at 07:45 and 13:00. 07:45 is well ahead of the median
+# print (09:05) and of the latest ever observed (10:05), so the morning run
+# cannot be relied on to carry yesterday's official number. The 13:00 run is
 # the first poll that reliably sees it. That left the dashboard's "Last CME
 # Print" tile and the whole forecast scorecard running about four hours behind
 # CME every morning: a 09:05 print did not reach the page until 13:05.
 #
-# NOTE, since the morning run moved 07:30 -> 08:00 on 2026-09-29: this used to
-# read "07:30 is ALWAYS before CME publishes", and that absolute no longer
-# holds. The wider n=17 sample in scripts/README-schedule.md puts the EARLIEST
-# print at 08:05 Central, and the morning run does not reach its own CME step
-# until several minutes in, so on a rare early day it may now catch the file.
-# That is a bonus, not a guarantee, and it is not a reason to drop this job --
-# on a median day the file still does not exist for another hour.
+# NOTE, since the morning run moved 07:30 -> 08:00 on 2026-09-29 and then
+# 08:00 -> 07:45 on 2026-10-01: this used to read "07:30 is ALWAYS before CME
+# publishes", and that absolute stopped being safe to assert at 08:00. The
+# wider n=17 sample in scripts/README-schedule.md puts the EARLIEST print at
+# 08:05 Central, and the morning run does not reach its own CME step until
+# several minutes in, so on a rare early day it may catch the file. How many
+# minutes in is NOT measured -- the log stamps only the run's start and finish,
+# not the CME step -- so this stays "may", not a number. What is certain is the
+# direction: starting 15 minutes earlier moves that step 15 minutes earlier
+# too, so an early catch is rarer at 07:45 than it was at 08:00, never more
+# likely. Either way it is a bonus, not a guarantee, and not a reason to drop
+# this job -- on a median day the file still does not exist for another hour.
 #
 # 10:15 clears the 10:05 worst case with ten minutes to spare.
 #

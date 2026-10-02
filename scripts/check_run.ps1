@@ -89,7 +89,23 @@ if (-not $wake) {
         # What this code stores is the two OFFSETS, -30 and +5; the clock times
         # come out of $trigH/$trigM at the top of the file.
         #
-        # THE BAND IS DELIBERATELY LOPSIDED -- 30 minutes early, 5 minutes late.
+        # THE BAND IS DELIBERATELY LOPSIDED -- 30 minutes early, 10 late.
+        #
+        # THE +10 IS MEASURED, and the number it replaced was not. Windows'
+        # Power-Troubleshooter events for the 26 mornings to 2026-10-02 put the
+        # wake between +2.65 and +7.97 minutes after the trigger on 23 of them,
+        # clustering +6 to +7. The three that are not -- 09-03 +24.95, 09-04
+        # +28.82, 09-09 +15.30 -- are the real article, and 09-09 is the
+        # 21-minute lag the deadline note below already cites.
+        #
+        # So there is an EMPTY GAP between 7.97 and 15.30, and +10 sits in it:
+        # two minutes clear of the slowest ordinary wake, five clear of the
+        # nearest genuine one. Do not re-tighten it to hug 7.97. The bound this
+        # replaced was +5, which reported 'deferred' on 17 of those 26 mornings
+        # -- 65% -- and the '+3 min' its comment claimed came from the only two
+        # fast days on file (09-10 and 09-11, both +3.7). Nobody had compared it
+        # against the power events until a 07:50:02 wake missed it by two
+        # seconds on 2026-10-02.
         # An early wake is WakeToRun doing its job. A LATE one is the failure
         # this whole section exists to catch: the machine stayed asleep and a
         # human woke it, which is exactly what WakeToRun is supposed to make
@@ -106,7 +122,7 @@ if (-not $wake) {
         # early wake. Derive both bounds or repeat the bug.
         $trigger = TriggerOn $n.Wake
         if ($n.Wake -ge $trigger.AddMinutes(-30) -and
-            $n.Wake -le $trigger.AddMinutes(5)) {
+            $n.Wake -le $trigger.AddMinutes(10)) {
             "     -> WakeToRun fired for the {0} trigger" -f $trigger.ToString('HH:mm')
         } else {
             "     -> woke at {0}, NOT {1} - the run was probably deferred until someone" -f $n.Wake.ToString('HH:mm'), $trigger.ToString('HH:mm')

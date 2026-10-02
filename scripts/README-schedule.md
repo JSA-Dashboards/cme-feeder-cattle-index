@@ -243,6 +243,23 @@ A full run -- optional ingests included, so from 2026-09-12 on -- takes 13 to 26
 minutes start to success ping, median 19. Re-derived 2026-10-01 over 20 runs:
 13.43 min fastest, 26.03 slowest (2026-09-14), median 18.73.
 
+**Which side of the wake boundary does 07:45 land on? The sleeping side.**
+Measured 2026-10-02, the first morning on the new trigger: the machine slept at
+20:29 the night before, WakeToRun woke it at 07:50:02 (+5.03 min) and the run
+started 07:56:02 (+11.0 min). So 07:45 pays the wake penalty that 07:30 paid and
+08:00 did not -- on 09-30 and 10-01 the machine was already awake before an 08:00
+trigger and both runs started within three seconds of it.
+
+That penalty follows the trigger wherever it goes, so moving earlier again buys
+less than the clock suggests. The lever for the remaining ten minutes is keeping
+the machine awake overnight, not an earlier trigger.
+
+While measuring it, the wake records also settled a number nobody had checked.
+Over the 26 mornings to 2026-10-02, WakeToRun landed +2.65 to +7.97 minutes after
+the trigger on 23 of them, with three real outliers at +15.30, +24.95 and +28.82.
+`check_run.ps1`'s band had called anything past +5 a human wake, which was 17 of
+those 26; it is now +10, which sits in the empty gap between the two groups.
+
 Grace of 45 minutes covers the start latency plus the run itself. Re-derived
 from the 23 morning runs in `logs/` to 2026-10-01, start latency splits cleanly
 by whether the machine was asleep at the trigger:

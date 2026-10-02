@@ -23,7 +23,8 @@ Two structural traps this file has fallen into once each:
 * Assuming every shared module has a copy in THIS repo. trimmings_qc.py does
   not -- it is shared between livestock-portal and beef-trimmings-dashboard and
   does not appear here at all. Anchoring the comparison on `HERE / name` meant
-  it was never compared against anything.
+  it was never compared against anything. daily_slaughter.py is a second
+  case: it lives in livestock-portal and beef-weight-dashboard only.
 """
 import ast
 import os
@@ -37,6 +38,7 @@ PORTAL_ROOT = REPOS / "livestock-portal"
 PORTAL_APPS = PORTAL_ROOT / "apps"
 PORTAL = PORTAL_APPS / "cme_feeder_cattle"
 TRIMMINGS = REPOS / "beef-trimmings-dashboard"
+BEEF_WEIGHT = REPOS / "beef-weight-dashboard"
 
 pytestmark = pytest.mark.skipif(
     not PORTAL.is_dir(), reason="livestock-portal not checked out beside this repo")
@@ -44,7 +46,8 @@ pytestmark = pytest.mark.skipif(
 SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
           "composition.py", "volumes.py", "snapshots.py", "cash_calves.py",
           "barn_basis.py", "barn_report.py", "trimmings_qc.py",
-          "test_trimmings_qc.py", "herd.py", "mars_census_view.py"]
+          "test_trimmings_qc.py", "herd.py", "mars_census_view.py",
+          "daily_slaughter.py", "test_daily_slaughter.py"]
 
 # Every directory a shared module is allowed to live in. Explicit rather than a
 # recursive glob, because .venv/Lib/site-packages holds files with some of these
@@ -55,11 +58,16 @@ CODE_DIRS = [
     PORTAL_ROOT / "tests",
     TRIMMINGS,
     TRIMMINGS / "tests",
+    BEEF_WEIGHT,
+    BEEF_WEIGHT / "tests",
 ] + sorted(d for d in PORTAL_APPS.glob("*") if d.is_dir())
 
 # Directories that never hold a first-party copy.
+# ".claude" holds Claude Code worktrees -- transient checkouts of this same
+# repo. A file there is the SAME file at another commit, not a second
+# first-party copy, so comparing it reports drift against history.
 PRUNE = {".venv", "site-packages", "__pycache__", ".git", ".pytest_cache",
-         "output", "node_modules", "_archive", "_backups"}
+         "output", "node_modules", "_archive", "_backups", ".claude"}
 
 
 def _norm(f):
@@ -95,7 +103,8 @@ def test_every_copy_is_identical(name):
     """
     copies = _copies(name)
     if len(copies) < 2:
-        absent = [r.name for r in (PORTAL_ROOT, TRIMMINGS) if not r.is_dir()]
+        absent = [r.name for r in (PORTAL_ROOT, TRIMMINGS, BEEF_WEIGHT)
+                  if not r.is_dir()]
         pytest.skip("{}: only {} copy on disk{}".format(
             name, len(copies),
             " (not checked out: " + ", ".join(absent) + ")" if absent else ""))
@@ -118,7 +127,7 @@ def test_no_copy_escapes_the_search_path():
     """
     for name in SHARED:
         found = set()
-        for repo in (HERE, PORTAL_ROOT, TRIMMINGS):
+        for repo in (HERE, PORTAL_ROOT, TRIMMINGS, BEEF_WEIGHT):
             if repo.is_dir():
                 found |= _walk_for(name, repo)
         declared = {f.resolve() for f in _copies(name)}

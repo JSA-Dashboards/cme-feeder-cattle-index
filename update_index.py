@@ -576,7 +576,10 @@ def run_update(since: date, verbose=True):
     video_results = fetch_all_video_rows(verbose=verbose)
     video_inserted = 0
     video_stale = 0
-    for name, (report_date_, published_date_, rows) in video_results.items():
+    video_unlabelled = []
+    for name, (report_date_, published_date_, rows, unlabelled_) in video_results.items():
+        for _u in unlabelled_:
+            video_unlabelled.append((name, report_date_, _u))
         if report_date_ is None:
             continue
         # AMS keeps the last edition of a seasonal report posted forever, so

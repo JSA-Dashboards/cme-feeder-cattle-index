@@ -156,6 +156,32 @@ _MONTHS = {m: i for i, m in enumerate(
      "August", "September", "October", "November", "December"], start=1)}
 
 TARGET_GRADES = {"1", "1-2"}
+
+# A delivery cell holds "Current" or a month, possibly a hyphenated range:
+# Current, Oct, Nov, Dec, Jan, Oct-Nov, Nov-Dec. Nothing else is a delivery.
+#
+# WHY THIS EXISTS. cur_timing is STICKY -- it applies to every row beneath the
+# cell that set it -- and the old code took cells["delivery"][0] on trust. On
+# the live Superior report that column also carries "USDA", "OK", "Oklahoma",
+# "us", "STEERS" and "www.ams.usda.gov/lpgmn", eighteen times in one document,
+# because page furniture lands in it at a break. Each one silently became the
+# delivery in force for whatever followed.
+#
+# It cost nothing on the day it was measured: a row that carries its own label
+# overwrites the garbage before it matters. It cost 2,162 head of Texas Direct
+# in direct_reports.py, where the same pattern met a continuation row that had
+# no label of its own. See direct_reports.parse_direct_pdf and
+# tests/test_direct_reports.py -- same bug, same shape, found the expensive way.
+# NOT _MONTHS: this module already has one, a {name: number} dict that
+# _parse_published_date() uses. Shadowing it with a tuple made every video
+# report raise "tuple indices must be integers or slices, not str" and skip --
+# the whole video ingest, lost to a name collision, caught only by running the
+# live path rather than the unit tests.
+_DELIVERY_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+DELIVERY_RE = re.compile(
+    r"^(Current|(?:%s)(?:-(?:%s))?)$"
+    % ("|".join(_DELIVERY_MONTHS), "|".join(_DELIVERY_MONTHS)))
 TARGET_BRACKETS = {700, 750, 800, 850}
 
 # Derived from inspecting actual word positions in the Superior report.
@@ -238,6 +264,7 @@ def parse_video_pdf(pdf_bytes):
     qualifying-row shape otherwise.
     """
     rows = []
+    unlabelled = []
     report_date = None
     cur_region = None
     cur_class = cur_grade = cur_timing = None
@@ -270,9 +297,20 @@ def parse_video_pdf(pdf_bytes):
 
                 m = SECTION_RE.match(line)
                 if m:
-                    cur_class = m.group(1).title().replace("Beef/Dairy", "Beef/Dairy ").replace("  ", " ").strip()
-                    cur_grade = m.group(2)
-                    cur_timing = None
+                    section = (
+                        m.group(1).title().replace("Beef/Dairy", "Beef/Dairy ")
+                        .replace("  ", " ").strip(),
+                        m.group(2),
+                    )
+                    # A header REPEATED at a page break is a continuation, not a
+                    # new group, and its first rows inherit the delivery from the
+                    # previous page. Resetting there is what turned a 2,162-head
+                    # row into nothing in direct_reports.py. Reset only when the
+                    # section genuinely changes; a row with its own delivery
+                    # cell still overwrites this.
+                    if section != (cur_class, cur_grade):
+                        cur_timing = None
+                    cur_class, cur_grade = section
                     continue
 
                 if not in_qualifying_region or line.startswith("Delivery") or not cur_class:
@@ -285,7 +323,9 @@ def parse_video_pdf(pdf_bytes):
                         cells.setdefault(col, []).append(w["text"])
 
                 if cells.get("delivery"):
-                    cur_timing = cells["delivery"][0]
+                    candidate = cells["delivery"][0]
+                    if DELIVERY_RE.match(candidate):
+                        cur_timing = candidate
 
                 if "head" not in cells or "avg_wt" not in cells or "avg_price" not in cells:
                     continue
@@ -301,6 +341,20 @@ def parse_video_pdf(pdf_bytes):
                 if "Steers" not in cur_class or "Beef/Dairy" in cur_class:
                     continue
                 if cur_grade not in TARGET_GRADES:
+                    continue
+                bracket_now = int(avg_wt // 50 * 50)
+                if cur_timing is None:
+                    # Would have been judged on its delivery and there is none.
+                    # "Nov" is an exclusion; no delivery at all is a parse
+                    # failure, and the two must not look alike.
+                    if bracket_now in TARGET_BRACKETS:
+                        unlabelled.append({
+                            "muscle_grade": cur_grade,
+                            "weight_break_low": bracket_now,
+                            "head_count": head,
+                            "avg_weight": avg_wt,
+                            "avg_price": avg_price,
+                        })
                     continue
                 if cur_timing != "Current":
                     continue
@@ -322,7 +376,7 @@ def parse_video_pdf(pdf_bytes):
                     "region": cur_region,
                 })
 
-    return report_date, rows
+    return report_date, rows, unlabelled
 
 
 _WV_SECTION_RE = re.compile(
@@ -434,7 +488,11 @@ def parse_western_video_pdf(pdf_bytes):
             "region": cur_region,
         })
 
-    return report_date, rows
+    # Always empty: this parser carries no sticky delivery label of the kind
+    # parse_video_pdf does, so there is no state for page furniture to corrupt.
+    # Returned anyway so both parsers have one shape and fetch_all_video_rows
+    # needs no special case -- a special case is where the next one hides.
+    return report_date, rows, []
 
 
 _PARSERS = {"WESTERN_VIDEO": parse_western_video_pdf}
@@ -452,13 +510,13 @@ def fetch_all_video_rows(verbose=True):
         parser = _PARSERS.get(name, parse_video_pdf)
         try:
             pdf_bytes = fetch_video_pdf(name)
-            report_date, rows = parser(pdf_bytes)
+            report_date, rows, unlabelled = parser(pdf_bytes)
             published_date = extract_published_date(pdf_bytes)
         except Exception as e:
             if verbose:
                 print(f"  [skip] {name} video report: {e}")
             continue
-        out[name] = (report_date, published_date, rows)
+        out[name] = (report_date, published_date, rows, unlabelled)
         if verbose:
             lag = ""
             if report_date and published_date and published_date != report_date:

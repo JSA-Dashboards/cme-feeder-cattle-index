@@ -84,6 +84,20 @@ SECTION_RE = re.compile(
 )
 DATE_RE = re.compile(r"week ending (\d{1,2}/\d{1,2}/\d{4})")
 TARGET_GRADES = {"1", "1-2"}
+
+# A Delivery/Freight label is "<timing...> <basis>" -- "Current FOB",
+# "Current DEL", "Oct DEL", "Oct - Nov FOB". The basis is always the LAST token
+# and the timing always starts with one of these, which is what lets a real
+# label be told from the page furniture that lands in the same column.
+#
+# WHY THAT MATTERS. cur_timing/cur_freight are STICKY -- a label applies to
+# every weight row under it until the next label -- so anything that overwrites
+# them silently drops cattle. "USDA AMS Livestock, Poultry & Grain Market News"
+# and "Email us with accessibility issues with this report." both sit in the
+# freight column on a page break and both used to be read as labels.
+FREIGHT_BASES = {"FOB", "DEL"}
+TIMINGS = {"Current", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
 TARGET_BRACKETS = {700, 750, 800, 850}
 
 # (column name, x0 lower bound, x0 upper bound) -- derived from inspecting
@@ -154,8 +168,18 @@ def parse_direct_pdf(pdf_bytes, state):
 
                 m = SECTION_RE.match(line)
                 if m:
-                    cur_class, cur_grade = m.group(1), m.group(2)
-                    cur_timing = cur_freight = None
+                    # A section header REPEATED at the top of a page is a
+                    # continuation, not a new group, and its first rows inherit
+                    # the label from the previous page. Resetting there dropped
+                    # 2,162 head of Texas Direct on 2026-10-02 -- the whole of a
+                    # $1.79 error against CIH, on a number that had gone to
+                    # clients. Reset only when the section genuinely changes; if
+                    # the next row does carry its own label it overwrites this
+                    # anyway, so inheriting costs nothing when it is wrong.
+                    section = (m.group(1), m.group(2))
+                    if section != (cur_class, cur_grade):
+                        cur_timing = cur_freight = None
+                    cur_class, cur_grade = section
                     continue
                 if line.startswith("Delivery/Freight") or not cur_class:
                     continue
@@ -168,8 +192,17 @@ def parse_direct_pdf(pdf_bytes, state):
 
                 if cells.get("freight_label"):
                     label_tokens = " ".join(cells["freight_label"]).split()
-                    if len(label_tokens) >= 2:
-                        cur_timing, cur_freight = label_tokens[0], label_tokens[1]
+                    # Both ends must look like a label, and the BASIS is the last
+                    # token, not the second: "Oct - Nov FOB" is a four-token
+                    # label whose basis is FOB. Reading token[1] made its basis
+                    # "-", which happened to exclude the row for the wrong
+                    # reason -- and would have included it had the dash ever
+                    # been absent.
+                    if (len(label_tokens) >= 2
+                            and label_tokens[0] in TIMINGS
+                            and label_tokens[-1] in FREIGHT_BASES):
+                        cur_timing = " ".join(label_tokens[:-1])
+                        cur_freight = label_tokens[-1]
 
                 if "head" not in cells or "avg_wt" not in cells or "avg_price" not in cells:
                     continue

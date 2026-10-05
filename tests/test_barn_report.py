@@ -58,6 +58,7 @@ number; the median fixture's minimum WAS its median. Vary the shape, not just
 the values.
 """
 import ast
+import re
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -813,3 +814,80 @@ def test_the_two_labels_align_so_one_kind_does_not_shift_the_other():
     assert len(lines) == 3
     cols = [ln.index("~") for ln in lines[1:]]
     assert len(set(cols)) == 1, "the lb column must not move between labels"
+
+
+# ---------------------------------------------------------------------------
+# The placeholder trap: SQLite takes ?, Snowflake takes %s.
+# ---------------------------------------------------------------------------
+
+def _sql_literals(path):
+    """Executed string literals, comments and docstrings excluded."""
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            b = getattr(node, "body", None)
+            if (b and isinstance(b[0], ast.Expr)
+                    and isinstance(b[0].value, ast.Constant)
+                    and isinstance(b[0].value.value, str)):
+                docs.add(id(b[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docs]
+
+
+# "= ?", "BETWEEN ? AND ?", "IN (?, ?)", "VALUES (?, ?)" -- a literal ? sitting
+# where a bound parameter goes. Plain question marks in prose do not match.
+_PLACEHOLDER = re.compile(r"(?:=\s*\?|\bBETWEEN\s+\?|\bIN\s*\(\s*\?|VALUES\s*\(\s*\?)",
+                          re.IGNORECASE)
+
+
+def test_no_sql_here_hardcodes_a_placeholder():
+    """
+    barn_report runs against BOTH backends, so every bound parameter must come
+    from db.placeholders().
+
+    THIS IS THE TEST THAT WAS MISSING. reported_without_qualifying() shipped
+    with a literal "WHERE report_date BETWEEN ? AND ?". On SQLite that is
+    correct and every fixture in this file is SQLite, so the suite was green.
+    On Snowflake it raises "not all arguments converted during string
+    formatting", the except swallowed it, and the function returned an empty
+    set -- which reads as "no barn filed anything", so every barn printed
+    "missing" exactly as before the feature existed. It reached the live
+    dashboard and Ross found it there.
+
+    A source check rather than a behavioural one, because no sqlite fixture can
+    reproduce a Snowflake paramstyle error. The cost of that is it only catches
+    the shape; the benefit is it catches it before deployment.
+    """
+    bad = [s for s in _sql_literals(REPO / "barn_report.py")
+           if _PLACEHOLDER.search(s)]
+    assert not bad, (
+        "barn_report.py hardcodes a '?' placeholder: {}. SQLite takes ? and "
+        "Snowflake takes %s -- use db.placeholders(n).".format(bad))
+
+
+def test_barn_report_uses_the_placeholder_helper():
+    """Positive assertion on the call site, so deleting the SQL does not pass."""
+    src = (REPO / "barn_report.py").read_text(encoding="utf-8")
+    assert "db.placeholders(" in src, \
+        "barn_report must build bound parameters via db.placeholders()"
+
+
+def test_the_placeholder_check_can_actually_fail():
+    """
+    Guard the guard, both ways: real SQL must trip it, and prose containing a
+    question mark must not -- this file's own docstrings ask questions.
+    """
+    for real in ("SELECT 1 FROM t WHERE d = ?",
+                 "SELECT 1 FROM t WHERE d BETWEEN ? AND ?",
+                 "INSERT INTO t VALUES (?, ?)",
+                 "SELECT 1 FROM t WHERE x IN (?, ?)"):
+        assert _PLACEHOLDER.search(real), real
+    for ok in ("is the sample whole?",
+               "SELECT 1 FROM t WHERE d = %s",
+               "which barns reported? the roster knows",
+               "SELECT 1 FROM t WHERE d BETWEEN %s AND %s"):
+        assert not _PLACEHOLDER.search(ok), ok

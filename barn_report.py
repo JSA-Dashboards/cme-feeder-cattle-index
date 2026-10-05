@@ -155,11 +155,27 @@ def reported_without_qualifying(conn, index_date):
     lo = (index_date - timedelta(days=7)).isoformat()
     hi = (index_date + timedelta(days=7)).isoformat()
     seen = set()
+    # db.placeholders(), NOT a literal "?". SQLite takes ? and Snowflake takes
+    # %s, and the first version of this hardcoded ? -- so on the DEPLOYED
+    # backend every call raised "not all arguments converted during string
+    # formatting", the except below swallowed it, and every barn read "missing"
+    # exactly as it had before this function existed. It shipped that way and
+    # Ross spotted it on the live page.
+    #
+    # The tests could not catch it: every fixture is sqlite3, where ? is right.
+    # tests/test_barn_report.py::test_no_sql_here_hardcodes_a_placeholder is the
+    # guard that can, because it reads the source rather than running it.
+    ph = db.placeholders(2).split(",")
     try:
         rows = conn.cursor().execute(
             "SELECT report_date, location, slug_id FROM calf_sales "
-            "WHERE report_date BETWEEN ? AND ?", (lo, hi)).fetchall()
-    except Exception:                          # noqa: BLE001 -- table absent
+            "WHERE report_date BETWEEN {} AND {}".format(ph[0].strip(), ph[1].strip()),
+            (lo, hi)).fetchall()
+    except Exception as e:                     # noqa: BLE001 -- table absent
+        # SAY SO. Returning an empty set silently is what turned a TypeError
+        # into four hours of the page quietly printing the old wording.
+        print("  [warn] barn report could not read calf_sales: {}: {}".format(
+            type(e).__name__, e))
         return set()
     for report_date, location, slug_id in rows:
         if shifted_bucket_date(location, report_date) == want:

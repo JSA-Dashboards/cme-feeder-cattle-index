@@ -225,3 +225,61 @@ def test_the_label_names_the_run_date():
     t = _text(ne.build(_base(value=337.7363, head=20201,
                              prior_call=AM_CALL), slot="pm")[1])
     assert "10/5/26 08:12" in t
+
+
+# ---------------------------------------------------------------------------
+# Capturing the peer figure, which is the guard that catches most.
+# ---------------------------------------------------------------------------
+
+def test_a_cih_post_parses_to_the_estimate():
+    """
+    The real format from x.com/CIHCattleTeam. Measured against the six index
+    dates that moved a dime or more between the morning call and the settle,
+    the peer check would have fired on FIVE -- every one where a peer had been
+    recorded. The sixth had none, and nothing fired. So capture is the binding
+    constraint, not detection.
+    """
+    from add_peer_estimate import parse_cih_post
+    got = parse_cih_post(
+        "Feeder Cattle Index +$0.92\n"
+        "CIH Est: $337.76; Previous: $336.84\n"
+        "8,703 head dropping off (40% of index); 7,082 head traded (35%)\n"
+        "#ag #cattle #feedercattle")
+    assert got["value"] == 337.76
+    assert got["previous"] == 336.84
+    assert got["head_traded"] == 7082
+
+
+def test_a_negative_day_parses_too():
+    from add_peer_estimate import parse_cih_post
+    got = parse_cih_post("Feeder Cattle Index -$2.13\n"
+                         "CIH Est: $336.84; Previous: $338.97\n"
+                         "4,849 head dropping off (21% of index); "
+                         "3,087 head traded (14%)")
+    assert got["value"] == 336.84 and got["head_traded"] == 3087
+
+
+def test_a_post_that_is_not_the_index_tweet_returns_none():
+    """
+    Most of that account is not the daily index post, and the seminar advert is
+    pinned to the top of the feed -- the obvious way a paste goes wrong.
+    Returning None beats guessing: a wrong peer value would silence the one
+    check that works, or fire it on nothing.
+    """
+    from add_peer_estimate import parse_cih_post
+    for junk in ("Want to sharpen your approach to managing cattle margins? "
+                 "CIH's Beef Margin Management Seminars",
+                 "Mexican feeder cattle crossings are back",
+                 "WTD slaughter: 548k head", "", None):
+        assert parse_cih_post(junk) is None, junk
+
+
+def test_the_parser_does_not_mistake_the_previous_for_the_estimate():
+    """
+    Both numbers are on the same line and the PREVIOUS is CME's published
+    figure, not CIH's call. add_peer_estimate.py's own docstring warns that
+    logging it would credit them with a number they copied.
+    """
+    from add_peer_estimate import parse_cih_post
+    got = parse_cih_post("CIH Est: $337.76; Previous: $336.84")
+    assert got["value"] == 337.76, "the estimate is the first figure, not the second"

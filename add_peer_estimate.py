@@ -25,6 +25,7 @@ Upserts, so a mistyped figure is fixed by re-running with the right one. Writes
 to SQLite; the daily job's Snowflake push carries it to the dashboard.
 """
 import argparse
+import re
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -35,6 +36,48 @@ import snowflake_db as db
 
 KNOWN_SOURCES = ("CIH", "COMPASS")
 
+# CIH posts the estimate to x.com/CIHCattleTeam as TEXT, not only as the image
+# on their sheet, and the format is stable:
+#
+#   Feeder Cattle Index +$0.92
+#   CIH Est: $337.76; Previous: $336.84
+#   8,703 head dropping off (40% of index); 7,082 head traded (35%)
+#
+# --paste takes that verbatim so the figure is copied rather than retyped.
+# Typing it is where the transcription errors live, and this is the check that
+# would have caught five of the six worst mornings on record.
+#
+# NOT FETCHED AUTOMATICALLY, and not for want of trying: x.com renders through
+# JavaScript, so a plain GET returns 200 with none of the post text in it;
+# nitter.net is dead and r.jina.ai answers 403. Automating it needs a headless
+# browser on the droplet or the paid API, neither of which is worth it for one
+# number a day. One paste is.
+_CIH_EST = re.compile(r"CIH\s+Est:?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
+_CIH_PREV = re.compile(r"Previous:?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
+_CIH_TRADED = re.compile(r"([0-9,]+)\s+head\s+traded", re.I)
+
+
+def parse_cih_post(text):
+    """
+    {value, previous, head_traded} from a CIH post, or None if it is not one.
+
+    Returns None rather than guessing: a post that is not the daily index
+    tweet -- and most of that account is not -- must not be recorded as an
+    estimate. The seminar advert pinned to the top of the feed is the obvious
+    way that goes wrong.
+    """
+    m = _CIH_EST.search(text or "")
+    if not m:
+        return None
+    out = {"value": float(m.group(1)), "previous": None, "head_traded": None}
+    p = _CIH_PREV.search(text)
+    if p:
+        out["previous"] = float(p.group(1))
+    t = _CIH_TRADED.search(text)
+    if t:
+        out["head_traded"] = int(t.group(1).replace(",", ""))
+    return out
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -43,7 +86,27 @@ def main():
     ap.add_argument("--value", type=float, help="their estimate, $/cwt")
     ap.add_argument("--note", default=None, help="optional free text")
     ap.add_argument("--list", action="store_true", help="show what is recorded and exit")
+    ap.add_argument("--paste", help="a CIH post pasted verbatim; fills --source "
+                                    "and --value from it")
     args = ap.parse_args()
+
+    if args.paste:
+        got = parse_cih_post(args.paste)
+        if not got:
+            raise SystemExit(
+                "that does not look like a CIH index post -- expected a line "
+                "like 'CIH Est: $337.76; Previous: $336.84'")
+        args.source = args.source or "CIH"
+        args.value = args.value if args.value is not None else got["value"]
+        bits = []
+        if got["previous"] is not None:
+            bits.append("their previous %.2f" % got["previous"])
+        if got["head_traded"] is not None:
+            bits.append("%s head traded" % format(got["head_traded"], ","))
+        if bits and not args.note:
+            args.note = "from x.com/CIHCattleTeam; " + ", ".join(bits)
+        print("parsed CIH post: $%.2f%s" % (
+            got["value"], " (%s)" % ", ".join(bits) if bits else ""))
 
     conn = db.get_conn()
 

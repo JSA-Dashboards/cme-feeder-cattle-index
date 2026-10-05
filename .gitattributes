@@ -1,0 +1,22 @@
+# What `git archive` ships to the droplet.
+#
+# deploy/DROPLET_SETUP.md deploys with `git archive HEAD | ssh ... tar -x`,
+# which shipped 47.5 MB every time and, worse, OVERWROTE the droplet's own
+# data/mars_history.db with whatever happened to be on the deploying laptop.
+# The droplet runs USE_SNOWFLAKE=1 and never reads that file, so the overwrite
+# has been harmless -- "has been" is not a guarantee, and 39.5 MB over SSH to
+# clobber a file nothing opens is not a thing to keep doing.
+#
+# export-ignore affects `git archive` ONLY. Streamlit Community Cloud clones
+# the repo, so the dashboard still gets everything it needs.
+#
+# data/mars_roster.json IS NOT EXCLUDED AND MUST NOT BE. update_index.py line
+# 464 does json.loads(ROSTER_PATH.read_text()) unconditionally -- it is the
+# roster of ~60 sale barns the whole reconstruction walks, and without it the
+# 07:45 run dies on a missing file. A blanket `data/ export-ignore` was the
+# obvious change here and it would have taken the pipeline out.
+#
+# 47.5 MB -> 1.9 MB.
+
+data/mars_history.db export-ignore
+data/*.xlsx export-ignore

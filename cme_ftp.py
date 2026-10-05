@@ -293,6 +293,45 @@ def _tail_to_row(tail):
     return None
 
 
+def bracket_anomalies(parsed, head_tol=0, lb_tol=0.0005):
+    """
+    Rows whose eight bracket triples do not reproduce the row's own stated
+    totals. A list of dicts; EMPTY is the expected result every day.
+
+    WHY ARITHMETIC AND NOT A COUNT. len(toks) == 29 was the only validity check
+    on the token path, and it passed a row where two values had glued together
+    -- "761.08341 9.0" where the file says 761.08 and 341.90 -- because the
+    space moved without changing how many tokens there were. A count cannot see
+    that. The brackets summing back to the row can: the file states both, so
+    they are two independent derivations of the same quantity, which is the only
+    kind of check this project trusts.
+
+    It is also what would have made the 2026-09-14 layout change loud. That one
+    was found by a human noticing the index had stopped moving, days later.
+
+    Silent on all 335 bracket-bearing rows across the 30 most recent files,
+    measured 2026-10-05. A check that fires on ordinary data is a check that
+    gets turned off.
+    """
+    out = []
+    for loc in parsed.get("locations") or []:
+        br = loc.get("brackets") or []
+        if not br or not loc.get("head"):
+            continue
+        b_head = sum(b["head"] for b in br)
+        b_lb = sum(b["head"] * b["avg_weight"] for b in br)
+        d_head = b_head - loc["head"]
+        d_lb = ((b_lb - loc["total_lb"]) / loc["total_lb"]
+                if loc.get("total_lb") else 0.0)
+        if abs(d_head) > head_tol or abs(d_lb) > lb_tol:
+            out.append({
+                "date": parsed.get("date"), "location": loc.get("location"),
+                "stated_head": loc["head"], "bracket_head": b_head,
+                "stated_lb": loc.get("total_lb"), "bracket_lb": b_lb,
+            })
+    return out
+
+
 def parse_daily_file(text: str, file_date: date) -> dict | None:
     """
     Returns {
@@ -357,6 +396,33 @@ def parse_daily_file(text: str, file_date: date) -> dict | None:
             if row is None:
                 continue
             head, w_lbs, avg_w, dollars, avg_p = row
+        elif layout and not is_totals and _row_values(ln, layout) is not None:
+            # SLICE BEFORE TOKENIZING whenever the file states its own columns.
+            #
+            # The token path survives a mis-split that happens to preserve the
+            # count. On 2026-09-30 El Reno's 750 bracket read "761.08341 9.0"
+            # where the file says 761.08 lb and $341.90: the space moved, two
+            # tokens stayed two tokens, len(toks) == 29 still passed, and the
+            # bracket landed with a weight off by 0.003 lb and a price of $9.00.
+            # Ten rows in 72,822 carry it. len(toks) == 29 is the ONLY validity
+            # check on that path, which is the same shape as the 2026-09-14
+            # break -- a layout change that no count could notice.
+            #
+            # Slicing uses the positions the header itself states and does not
+            # care how many decimals a value carries. The token branch stays
+            # below as the fallback for pre-2021 files, which have no header for
+            # header_layout() to read.
+            bracket_nums, tail = _row_values(ln, layout)
+            row = _tail_to_row(tail)
+            if row is None:
+                continue
+            head, w_lbs, avg_w, dollars, avg_p = row
+            for i, (grade, wlow) in enumerate(BRACKETS):
+                b_head, b_wt, b_price = bracket_nums[i * 3:i * 3 + 3]
+                if b_head > 0:
+                    brackets.append({"grade": grade, "weight_low": wlow,
+                                     "head": int(b_head), "avg_weight": b_wt,
+                                     "avg_price": b_price})
         elif len(toks) == 29:
             head, w_lbs, avg_w, dollars, avg_p = (float(t) for t in toks[24:29])
             _sliced = None

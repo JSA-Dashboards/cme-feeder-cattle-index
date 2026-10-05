@@ -101,6 +101,17 @@ def main():
              daily.get("avg_price"), daily.get("head"), daily.get("avg_weight")),
             ["report_date"],
         )
+        # Two independent derivations of the same row, compared. Empty every
+        # ordinary day; see cme_ftp.bracket_anomalies for why this is
+        # arithmetic rather than a token count.
+        for bad in cme_ftp.bracket_anomalies(parsed):
+            print("  *** CME BRACKETS DO NOT SUM TO THE ROW: {} {} -- "
+                  "row states {:,} head / {:,.0f} lb, its brackets give "
+                  "{:,} head / {:,.0f} lb. The file's layout may have changed; "
+                  "do not trust this row's brackets.".format(
+                      bad["date"], bad["location"], bad["stated_head"],
+                      bad["stated_lb"] or 0, bad["bracket_head"],
+                      bad["bracket_lb"]))
         for loc in parsed["locations"]:
             for b in loc.get("brackets") or []:
                 db.merge_replace(

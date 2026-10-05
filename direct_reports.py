@@ -142,13 +142,36 @@ def fetch_direct_pdf(state, timeout=30):
 
 def parse_direct_pdf(pdf_bytes, state):
     """
-    Returns (report_date: date | None, rows: list[dict]).
+    Returns (report_date: date | None, rows: list[dict],
+    unlabelled: list[dict]).
+
+    UNLABELLED is the completeness check, and it is the reason this returns a
+    third thing. A row excluded because its label says "Current DEL" or
+    "Nov FOB" is an intentional exclusion; a row excluded because this parser
+    could not work out what its label WAS is a parse failure wearing the same
+    clothes, and on 2026-10-02 that silence cost 2,162 head of Texas Direct and
+    put a number $1.82 wrong in front of clients.
+
+    No threshold and nothing to calibrate -- it is the difference between "I
+    know this row does not qualify" and "I do not know what this row is", which
+    is exact. Measured over every direct state on 2026-10-05 it is empty, which
+    is what makes a non-empty one worth stopping for.
+
+    A STATISTICAL CHECK WAS TRIED FIRST AND DOES NOT WORK. Comparing each
+    barn's pounds against its own 12-occurrence median, TX Direct that day was
+    62% of normal -- utterly unremarkable, when the 25th percentile of all
+    barn-days is 51% and barns routinely print at 2-3% of their median. Any
+    cutoff that caught this one would have printed two or more lines of noise
+    every sale day, and the module it would live in says plainly what happens
+    then: "a census that prints two lines every morning gets ignored inside a
+    week and then the real one is invisible."
     rows already match update_index.py's qualifying-row shape:
     class/frame/muscle_grade/weight_break_low/head_count/avg_weight/avg_price.
     report_date is None if the PDF's own date couldn't be parsed (caller
     should skip rather than guess).
     """
     rows = []
+    unlabelled = []
     report_date = None
     cur_class = cur_grade = cur_timing = cur_freight = None
 
@@ -219,6 +242,21 @@ def parse_direct_pdf(pdf_bytes, state):
                     continue
                 if cur_grade not in TARGET_GRADES:
                     continue
+                bracket_now = int(avg_wt // 50 * 50)
+                if cur_timing is None or cur_freight is None:
+                    # Would have been judged on its label, and there is none to
+                    # judge. Recorded rather than counted so the caller can name
+                    # the row, because "something was dropped" sends a human
+                    # back to the PDF and "2,162 head at 820 lb" does not.
+                    if bracket_now in TARGET_BRACKETS:
+                        unlabelled.append({
+                            "muscle_grade": cur_grade,
+                            "weight_break_low": bracket_now,
+                            "head_count": head,
+                            "avg_weight": avg_wt,
+                            "avg_price": avg_price,
+                        })
+                    continue
                 if cur_timing != "Current" or cur_freight != "FOB":
                     continue
                 if "Mexican" in notes or "Origin" in notes:
@@ -238,7 +276,7 @@ def parse_direct_pdf(pdf_bytes, state):
                     "final_ind": "Final",
                 })
 
-    return report_date, rows
+    return report_date, rows, unlabelled
 
 
 def fetch_all_direct_rows(states=None, verbose=True):
@@ -254,12 +292,20 @@ def fetch_all_direct_rows(states=None, verbose=True):
     for state in states:
         try:
             pdf_bytes = fetch_direct_pdf(state)
-            report_date, rows = parse_direct_pdf(pdf_bytes, state)
+            report_date, rows, unlabelled = parse_direct_pdf(pdf_bytes, state)
         except Exception as e:
             if verbose:
                 print(f"  [skip] {state} direct report: {e}")
             continue
-        out[state] = (report_date, rows)
+        out[state] = (report_date, rows, unlabelled)
         if verbose:
             print(f"  {state} DIRECT  {report_date}  +{len(rows)} qualifying rows")
+            # Loud, inline, and naming the rows. This is the line that would
+            # have caught 2026-10-02 on the morning it happened.
+            for u in unlabelled:
+                print(f"    *** UNLABELLED ROW NOT INGESTED: {u['head_count']:,} head "
+                      f"at {u['avg_weight']:.0f} lb, ${u['avg_price']:.2f}, "
+                      f"grade {u['muscle_grade']}, bracket {u['weight_break_low']} "
+                      f"-- the parser could not resolve its Delivery/Freight "
+                      f"label, so it is NOT an intentional exclusion")
     return out

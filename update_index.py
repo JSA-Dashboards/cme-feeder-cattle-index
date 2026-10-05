@@ -531,7 +531,10 @@ def run_update(since: date, verbose=True):
         print("\nDirect trade reports (this week only):")
     direct_results = fetch_all_direct_rows(verbose=verbose)
     direct_inserted = 0
-    for state, (report_date_, rows) in direct_results.items():
+    direct_unlabelled = []
+    for state, (report_date_, rows, unlabelled_) in direct_results.items():
+        for _u in unlabelled_:
+            direct_unlabelled.append((state, report_date_, _u))
         if report_date_ is None:
             continue
         iso_date = report_date_.isoformat()
@@ -545,6 +548,19 @@ def run_update(since: date, verbose=True):
             db.merge_ignore(conn, "mars_sales", cols, values, key_cols)
         direct_inserted += len(rows)
     total_inserted += direct_inserted
+    # Surfaced AFTER the loop so it is the last thing on screen for this stage
+    # rather than buried among ten states' progress lines. Empty on an ordinary
+    # run; see parse_direct_pdf's docstring for why it has no threshold.
+    if direct_unlabelled and verbose:
+        print("\n  *** {} DIRECT ROW(S) IN THE INDEX WEIGHT BAND WERE NOT "
+              "INGESTED because this parser could not resolve a "
+              "Delivery/Freight label. This is a PARSE FAILURE, not an "
+              "exclusion -- the index is short by this much:".format(
+                  len(direct_unlabelled)))
+        for st, rd, uu in direct_unlabelled:
+            print("        {} DIRECT {}  {:,} head at {:.0f} lb, ${:.2f}, "
+                  "grade {}".format(st, rd, uu["head_count"], uu["avg_weight"],
+                                    uu["avg_price"], uu["muscle_grade"]))
 
     # Video/internet auction trade: Superior Livestock (by far the largest
     # platform, ~200k head/week), plus Cattle Country Video, CMS, LiveAg,

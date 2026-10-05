@@ -48,6 +48,12 @@ def tx_pdf():
 
 
 def parsed():
+    """(report_date, rows) -- the two most tests care about."""
+    report_date, rows, _unlabelled = dr.parse_direct_pdf(tx_pdf(), "TX")
+    return report_date, rows
+
+
+def parsed_full():
     return dr.parse_direct_pdf(tx_pdf(), "TX")
 
 
@@ -153,3 +159,77 @@ def test_the_fixture_actually_exercises_the_page_break():
         assert len(pdf.pages) >= 2, "the fixture must span a page break"
         page_two = pdf.pages[1].extract_text() or ""
     assert "Steers" in page_two, "page 2 must carry a Steers section"
+
+
+# ---------------------------------------------------------------------------
+# The completeness channel: rows this parser could not classify at all.
+# ---------------------------------------------------------------------------
+
+def test_a_correct_parse_reports_nothing_unlabelled():
+    """
+    Empty on a good day is the product. A check that prints on an ordinary
+    morning gets ignored inside a week, and then the real one is invisible --
+    mars_census.py says exactly that about itself and it applies here.
+    """
+    _d, _rows, unlabelled = parsed_full()
+    assert unlabelled == []
+
+
+def test_the_page_two_bug_would_now_announce_itself(monkeypatch):
+    """
+    THE WHOLE POINT. Re-break the parser the way it was broken on 2026-10-02 --
+    reset the sticky label on every section header, including a repeat at a
+    page break -- and the 2,162-head row must come back as UNLABELLED rather
+    than vanishing.
+
+    An intentional exclusion and a parse failure looked identical before this,
+    which is why a $1.82 error reached clients with the job exiting 0.
+    """
+    real = dr.parse_direct_pdf
+    src = Path(dr.__file__).read_text(encoding="utf-8")
+    broken_src = src.replace(
+        "                    if section != (cur_class, cur_grade):\n"
+        "                        cur_timing = cur_freight = None\n",
+        "                    cur_timing = cur_freight = None\n")
+    assert broken_src != src, "the fix moved; this test is no longer re-breaking it"
+
+    ns = {}
+    exec(compile(broken_src, "broken_direct_reports", "exec"), ns)
+    _d, rows, unlabelled = ns["parse_direct_pdf"](tx_pdf(), "TX")
+
+    assert sum(r["head_count"] for r in rows) == 1779, \
+        "this should reproduce the broken ingest exactly"
+    assert len(unlabelled) == 1, \
+        "the dropped row must be announced, not silently excluded"
+    u = unlabelled[0]
+    assert u["head_count"] == 2162
+    assert u["weight_break_low"] == 800
+    assert u["avg_price"] == pytest.approx(322.79)
+    assert real is dr.parse_direct_pdf, "the real parser must be untouched"
+
+
+def test_an_intentional_exclusion_is_not_reported_as_unlabelled():
+    """
+    Guard the guard, in the direction that would make this noise. Current DEL,
+    Oct DEL, Nov FOB, Nov DEL, Dec DEL and "Oct - Nov FOB" rows all sit in the
+    index weight band on this report and are excluded ON PURPOSE. Not one may
+    appear as unlabelled, or the channel means nothing.
+    """
+    _d, _rows, unlabelled = parsed_full()
+    assert not unlabelled, (
+        "labelled-but-excluded rows leaked into the unlabelled channel: "
+        f"{unlabelled}")
+
+
+def test_fetch_all_direct_rows_carries_the_channel_through():
+    """
+    The caller contract. update_index.py destructures three values now, and a
+    parser that quietly went back to two would break the run rather than fail
+    here -- so pin the shape at the seam.
+    """
+    import inspect
+    src = inspect.getsource(dr.fetch_all_direct_rows)
+    assert "unlabelled" in src, \
+        "fetch_all_direct_rows dropped the completeness channel"
+    assert "out[state] = (report_date, rows, unlabelled)" in src, \
+        "the per-state tuple must carry the unlabelled rows to update_index"

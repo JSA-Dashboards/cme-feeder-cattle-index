@@ -153,6 +153,41 @@ def gather(index_date=None):
                            "at": str(cap)[11:16], "date": str(db.iso(rd))}
         break
 
+    # WHY did it move? Rows whose report was PUBLISHED on or after the previous
+    # call's run date are the ones that could not have been in it.
+    #
+    # This is attribution, not prediction. Predicting a late report needs a
+    # population to calibrate against and there is none -- 39 rows carry a
+    # published_date and exactly one (location, sale date) group has ever
+    # arrived in two waves. But once it HAS arrived, published_date says so
+    # exactly, and the difference matters: a move explained by a late report is
+    # ordinary data arriving, while an unexplained one of the same size is a
+    # parser bug. On 2026-10-05 they looked identical in the email.
+    #
+    # VERIFIABLE RATHER THAN ASSERTED: when the late rows' head equals the head
+    # the window gained, they account for the whole move and the email says so.
+    # When it is less, it says how much of it. On 2026-10-01 the two Superior
+    # South Central rows were 217 head against a gain of exactly 217.
+    d["late_published"] = []
+    if d.get("prior_call"):
+        w0 = (date.fromisoformat(index_date) - timedelta(days=6)).isoformat()
+        p2 = db.placeholders(2).split(",")
+        try:
+            for loc, rd, hd, wt, pr, pub in cur.execute(
+                    f"SELECT location, report_date, head_count, avg_weight, "
+                    f"avg_price, published_date FROM mars_sales "
+                    f"WHERE published_date IS NOT NULL "
+                    f"AND report_date BETWEEN {p2[0].strip()} AND {p2[1].strip()}",
+                    (w0, index_date)).fetchall():
+                if str(db.iso(pub)) >= d["prior_call"]["date"]:
+                    d["late_published"].append(
+                        {"location": loc, "sale_date": str(db.iso(rd)),
+                         "head": hd, "avg_weight": wt, "avg_price": pr,
+                         "published": str(db.iso(pub))})
+        except Exception as e:                 # noqa: BLE001
+            print("  [warn] could not read late-published rows: %s: %s"
+                  % (type(e).__name__, e))
+
     # Is today's sample whole? barn_report owns the roster logic and returns
     # strings; nothing here re-derives it, so the email and the run log cannot
     # disagree about which barns are out.
@@ -243,6 +278,25 @@ def build(d, slot="am", failed=None):
             + (f'<p style="margin:4px 0 0;color:{RED};font:13px system-ui,'
                f'Segoe UI,Arial">If the {p["at"]} figure went to anyone, it is '
                f'now {abs(delta):,.2f} out of date.</p>' if loud else ""))
+
+        late = d.get("late_published") or []
+        if late:
+            lh = sum(x["head"] or 0 for x in late)
+            how = ("all of" if dh and lh == dh else
+                   f"{lh:,} of the {dh:,}" if dh else "some of")
+            li = "".join(
+                f'<li>{x["location"]} — {x["head"]:,} head at '
+                f'{float(x["avg_weight"] or 0):,.0f} lb, {_money(x["avg_price"])}, '
+                f'sold {_mdy(x["sale_date"])}, <b>published '
+                f'{_mdy(x["published"])}</b></li>' for x in late)
+            moved += (
+                f'<p style="margin:8px 0 2px;font:13px system-ui,Segoe UI,Arial">'
+                f'<b>Why:</b> {how} the head that arrived came from a report '
+                f'published on or after the previous call, so it could not have '
+                f'been in it. This is data landing late, not a number changing '
+                f'its mind.</p>'
+                f'<ul style="margin:0 0 0 18px;padding:0;font:13px system-ui,'
+                f'Segoe UI,Arial">{li}</ul>')
 
     # --- The live peer check -------------------------------------------------
     # Ahead of everything else in the body, because it is the one line that

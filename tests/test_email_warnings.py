@@ -36,7 +36,7 @@ def _base(**over):
         "window": [("2026-10-02", 7050, 816.0, 333.73)],
         "cme_date": "2026-10-01", "cme_value": 336.84, "cme_head": 21854,
         "scored_call": 337.15, "scored_head": 21854, "peers": [],
-        "live_peers": [("CIH", 337.76)], "prior_call": None, "barn_lines": ["Barn report -- 2 of 2 expected barns reported"],
+        "live_peers": [("CIH", 337.76)], "prior_call": None, "late_published": [], "barn_lines": ["Barn report -- 2 of 2 expected barns reported"],
         "ingest_warnings": [],
     }
     d.update(over)
@@ -283,3 +283,68 @@ def test_the_parser_does_not_mistake_the_previous_for_the_estimate():
     from add_peer_estimate import parse_cih_post
     got = parse_cih_post("CIH Est: $337.76; Previous: $336.84")
     assert got["value"] == 337.76, "the estimate is the first figure, not the second"
+
+
+# ---------------------------------------------------------------------------
+# WHY did it move: late publication, or something we should look at?
+# ---------------------------------------------------------------------------
+
+SUPERIOR_LATE = [
+    {"location": "SUPERIOR VIDEO (South Central)", "sale_date": "2026-10-01",
+     "head": 62, "avg_weight": 840.0, "avg_price": 329.00, "published": "2026-10-02"},
+    {"location": "SUPERIOR VIDEO (South Central)", "sale_date": "2026-10-01",
+     "head": 155, "avg_weight": 890.0, "avg_price": 299.92, "published": "2026-10-02"},
+]
+AM_1001 = {"value": 337.1512, "head": 21637, "slot": "am",
+           "at": "08:00", "date": "2026-10-02"}
+
+
+def test_a_late_report_explains_its_own_move():
+    """
+    2026-10-01. The 08:00 call was 337.1512 and the 13:07 settle 336.8375,
+    because two Superior South Central rows -- 62 head at 840 lb and 155 at
+    890 lb, $299.92 against a $336.84 index -- were published the next morning.
+    """
+    t = _text(ne.build(_base(value=336.8375, head=21854, prior_call=AM_1001,
+                             late_published=SUPERIOR_LATE), slot="pm")[1])
+    assert "Why:" in t
+    assert "SUPERIOR VIDEO (South Central)" in t
+    assert "155 head" in t and "299.92" in t
+    assert "published 10/2/26" in t, "the publication date is the whole argument"
+
+
+def test_it_says_ALL_when_the_late_head_accounts_for_the_whole_gain():
+    """
+    VERIFIABLE, not asserted: 62 + 155 = 217, and the window gained exactly 217.
+    When those agree the late rows are the entire explanation and the email
+    says so; when they do not it must not claim they are.
+    """
+    t = _text(ne.build(_base(value=336.8375, head=21854, prior_call=AM_1001,
+                             late_published=SUPERIOR_LATE), slot="pm")[1])
+    assert "all of the head that arrived" in t
+
+
+def test_it_says_HOW_MUCH_when_the_late_head_is_only_part_of_it():
+    """A partial explanation must read as partial."""
+    part = [dict(SUPERIOR_LATE[1])]          # 155 of the 217
+    t = _text(ne.build(_base(value=336.8375, head=21854, prior_call=AM_1001,
+                             late_published=part), slot="pm")[1])
+    assert "155 of the 217" in t
+    assert "all of the head" not in t
+
+
+def test_an_unexplained_move_gets_no_excuse():
+    """
+    THE CONTRAST THAT MAKES THIS WORTH HAVING. 2026-10-05 moved 1.82 on +2,162
+    head and NOT ONE of those rows was published late -- it was the Texas
+    Direct parser dropping a page-2 continuation. A move with no late report
+    behind it is the one to investigate, and it must not be handed a reason it
+    does not have.
+    """
+    t = _text(ne.build(_base(value=337.7363, head=20201,
+                             prior_call={"value": 339.5514, "head": 18039,
+                                         "slot": "am", "at": "08:12",
+                                         "date": "2026-10-05"},
+                             late_published=[]), slot="pm")[1])
+    assert "Moved since" in t
+    assert "Why:" not in t, "an unexplained move must stay unexplained"

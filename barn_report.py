@@ -273,18 +273,32 @@ def report_lines(conn):
         # every week and did not is real signal. The ratio stays as the headline
         # for that list, and the counts in front of it say what the day was.
         #
-        # The tail "N of M expected barns reported" is LOAD-BEARING: app.py's
-        # _barn_header_is_healthy() parses the last six tokens to tell a real
-        # roster from "Barn report skipped: <Type>: <msg>". Add before it, never
-        # after, or both dashboards take the loud path on every healthy day.
+        # NO RATIO. "1 of 2 expected barns reported" beside "11 barns in the
+        # index" reads as a contradiction -- if eleven reported, why do we
+        # expect two? -- and the honest answer is that 2 is the ROSTER size, an
+        # internal detail that happens to be tiny on a Friday. It is also
+        # redundant: the list underneath already names every regular that is
+        # out, with its pounds. A denominator nobody can interpret is worse
+        # than no denominator.
+        #
+        # The count of barns that usually sell is still here, in words, because
+        # that is the fact the reader needs: is anybody who normally shows up
+        # missing. app.py::_barn_header_is_healthy() matches this shape by
+        # regex now rather than by counting tokens; both copies changed with it.
         filed = reported_without_qualifying(conn, index_date)
         in_index = len(reported)
         total_filed = in_index + len({s for s in filed if s not in reported})
+        day = f"{index_date:%A}"
+        if missing:
+            tail = (f"{len(missing)} barn{'s' if len(missing) != 1 else ''} that "
+                    f"usually sell{'' if len(missing) != 1 else 's'} on a {day} "
+                    f"{'have' if len(missing) != 1 else 'has'} not:")
+        else:
+            tail = f"every barn that usually sells on a {day} is in"
         lines = [f"Barn report -- index date {index_date.isoformat()} "
                  f"({index_date:%a}): {in_index} barns in the index"
                  + (f" ({total_filed} filed)" if total_filed != in_index else "")
-                 + f"; {len(roster) - len(missing)} of "
-                 f"{len(roster)} expected barns reported"]
+                 + f" — {tail}"]
         if not missing:
             return lines
         names = _names(conn)

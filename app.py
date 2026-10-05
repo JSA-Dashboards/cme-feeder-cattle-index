@@ -1,4 +1,5 @@
 import os
+import re
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -703,10 +704,9 @@ def _barn_header_is_healthy(header):
     roster could be built, which is a fault, not a whole day. A holiday reads
     "0 of 8" and takes the loud path because all eight are listed as missing.
     """
-    tail = header.split()[-6:]
-    return (len(tail) == 6 and tail[1] == "of"
-            and tail[3:] == ["expected", "barns", "reported"]
-            and tail[2].isdigit() and int(tail[2]) > 0)
+    m = re.search(r"-- index date \d{4}-\d{2}-\d{2} \([A-Za-z]{3}\): "
+                  r"(\d+) barns in the index", header)
+    return bool(m) and int(m.group(1)) > 0
 
 
 @st.cache_data(ttl=300, show_spinner=False)

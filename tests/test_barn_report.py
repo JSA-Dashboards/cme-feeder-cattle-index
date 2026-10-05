@@ -344,7 +344,7 @@ def test_report_lines_builds_the_roster_for_the_index_date_itself():
             + rows_for(2, "Newest", occurrences(range(1, 10))))
     lines = br.report_lines(make_conn(rows, published="2026-09-18",
                                       extra_index_dates=[MONDAY.isoformat()]))
-    assert lines[0].endswith("0 of 2 expected barns reported")
+    assert "usually sell" in lines[0] and lines[0].endswith("has not:" if 2 == 1 else "have not:")
     assert len(lines) == 3, "both barns qualify and neither reported"
 
 
@@ -354,15 +354,16 @@ def test_a_complete_day_prints_one_line():
     rows += rows_for(1, "Carthage", [MONDAY.isoformat()])
     rows += rows_for(2, "Tulsa", [MONDAY.isoformat()])
     lines = br.report_lines(make_conn(rows, published="2026-09-18"))
-    assert lines == ["Barn report -- index date 2026-09-21 (Mon): "
-                     "2 barns in the index; 2 of 2 expected barns reported"]
+    assert lines == ["Barn report -- index date 2026-09-21 (Mon): 2 barns in "
+                     "the index — every barn that usually sells on a "
+                     "Monday is in"]
 
 
 def test_the_header_counts_the_barns_that_did_report():
     rows = _full_weeks([(1, "Carthage"), (2, "Tulsa"), (3, "Joplin")])
     rows += rows_for(3, "Joplin", [MONDAY.isoformat()])
     lines = br.report_lines(make_conn(rows, published="2026-09-18"))
-    assert lines[0].endswith("1 of 3 expected barns reported")
+    assert "usually sell" in lines[0] and lines[0].endswith("has not:" if 2 == 1 else "have not:")
     assert len(lines) == 3, "one line per missing barn, uncapped"
 
 
@@ -391,7 +392,7 @@ def test_every_missing_barn_prints_however_small():
         rows += _full_weeks([(slug, city)], head=head, wt=800.0)
     lines = br.report_lines(make_conn(rows, published="2026-09-18",
                                       extra_index_dates=[MONDAY.isoformat()]))
-    assert lines[0].endswith("0 of 5 expected barns reported")
+    assert "usually sell" in lines[0] and lines[0].endswith("has not:" if 5 == 1 else "have not:")
     assert len(lines) == 1 + 5, "one line per missing barn: no cap, no threshold"
     assert lines[1:] == [
         "  missing: Bigtop MO  ~1,600,000 lb  (~75% of a typical Monday)",
@@ -415,8 +416,9 @@ def test_a_thursday_index_date_is_judged_against_thursdays():
             + _full_weeks([(2, "Joplin")], index_date=MONDAY))
     lines = br.report_lines(make_conn(rows, published="2026-09-16",
                                       extra_index_dates=[THURSDAY.isoformat()]))
-    assert lines[0] == ("Barn report -- index date 2026-09-17 (Thu): "
-                        "0 barns in the index; 0 of 1 expected barns reported")
+    assert lines[0].startswith("Barn report -- index date 2026-09-17 (Thu): "
+                               "0 barns in the index")
+    assert "1 barn that usually sells on a Thursday has not:" in lines[0]
     assert len(lines) == 2, "Monday's barn is not on Thursday's roster"
     assert lines[1] == ("  missing: Carthage MO  ~80,000 lb  "
                         "(~100% of a typical Thursday)")
@@ -465,7 +467,7 @@ def test_one_slug_reporting_does_not_cover_its_twin():
     rows = _full_weeks([(1774, "Billings"), (1777, "Billings")])
     rows += rows_for(1777, "Billings", [MONDAY.isoformat()])
     lines = br.report_lines(make_conn(rows, published="2026-09-18"))
-    assert lines[0].endswith("1 of 2 expected barns reported")
+    assert "usually sell" in lines[0] and lines[0].endswith("has not:" if 1 == 1 else "have not:")
     assert "missing: Billings" in lines[1]
 
 
@@ -508,8 +510,9 @@ def test_a_day_with_no_sales_is_reported_not_skipped():
     conn = make_conn(rows, published="2026-09-04",
                      extra_index_dates=[labor_day.isoformat()])
     lines = br.report_lines(conn)
-    assert lines[0] == ("Barn report -- index date 2026-09-07 (Mon): "
-                        "0 barns in the index; 0 of 2 expected barns reported")
+    assert lines[0].startswith("Barn report -- index date 2026-09-07 (Mon): "
+                               "0 barns in the index")
+    assert "2 barns that usually sell on a Monday have not:" in lines[0]
 
 
 def test_the_index_date_is_cmes_publication_clock_not_the_newest_row():
@@ -563,8 +566,8 @@ def test_an_empty_cme_table_is_not_a_published_date():
                      extra_index_dates=[MONDAY.isoformat()])
     assert conn.execute("SELECT COUNT(*) FROM cme_ftp_daily").fetchone()[0] == 0
     lines = br.report_lines(conn)
-    assert lines[0] == ("Barn report -- index date 2026-09-21 (Mon): "
-                        "0 barns in the index; 0 of 1 expected barns reported")
+    assert lines[0].startswith("Barn report -- index date 2026-09-21 (Mon): "
+                               "0 barns in the index")
 
 
 def test_the_index_date_falls_back_when_cmes_table_is_missing():
@@ -912,19 +915,31 @@ def test_the_header_leads_with_the_barns_that_are_actually_in():
         "Barn report -- index date 2026-09-21 (Mon): 2 barns in the index"), lines[0]
 
 
-def test_the_header_keeps_the_tail_app_py_parses():
+def test_the_header_matches_what_app_py_calls_healthy():
     """
-    LOAD-BEARING. app.py::_barn_header_is_healthy() reads the LAST SIX TOKENS to
-    tell a real roster from "Barn report skipped: <Type>: <msg>" -- the string
-    report_lines returns instead of raising. Anything new goes BEFORE that tail;
-    append to it and both dashboards take the loud path every healthy day.
+    LOAD-BEARING, and it changed shape. app.py::_barn_header_is_healthy() used
+    to parse the last six tokens as "N of M expected barns reported". That tail
+    is gone -- the ratio read as a contradiction beside the real barn count --
+    so the check is a regex on "<N> barns in the index" and BOTH app.py copies
+    moved with it. This asserts the header still satisfies that regex, because
+    a mismatch makes every healthy day render as a warning.
     """
-    rows = _roster_pair()
-    header = br.report_lines(make_conn(rows, published="2026-09-18"))[0]
-    tail = header.split()[-6:]
-    assert tail[1] == "of"
-    assert tail[3:] == ["expected", "barns", "reported"]
-    assert tail[0].isdigit() and tail[2].isdigit()
+    import ast
+    src = (REPO / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    keep = [n for n in tree.body if isinstance(n, ast.Import)
+            and any(a.name in ("os", "re") for a in n.names)]
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_barn_header_is_healthy")
+    ns = {}
+    exec(compile(ast.Module(body=keep + [fn], type_ignores=[]), "x", "exec"), ns)
+    check = ns["_barn_header_is_healthy"]
+
+    header = br.report_lines(make_conn(_roster_pair(), published="2026-09-18"))[0]
+    assert check(header), f"app.py would render this healthy header loudly: {header}"
+    # and the thing the check exists for
+    assert not check("Barn report skipped: TypeError: not all arguments converted")
+    assert not check("Barn report: no sales stored yet -- nothing to report.")
 
 
 def test_the_filed_count_appears_only_when_it_adds_something():

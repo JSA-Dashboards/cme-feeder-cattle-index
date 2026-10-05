@@ -251,6 +251,16 @@ def _drive_render(src, lines):
             calls.append(("warning", t))
 
     ns = {}
+    # The module's OWN stdlib imports, not a namespace assembled by hand.
+    # _barn_header_is_healthy uses re; building ns without it made this helper
+    # raise NameError on code that is perfectly fine in app.py, which is a
+    # harness bug masquerading as a product bug. Carrying the real import lines
+    # means the function is exercised the way the page runs it.
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Import) and all(
+                a.name in ("os", "re", "json", "math", "sqlite3")
+                for a in node.names):
+            exec(compile(ast.Module([node], []), "<drift>", "exec"), ns)
     for node in ast.parse(src).body:
         if (isinstance(node, ast.Assign)
                 and getattr(node.targets[0], "id", "") == "_BARN_MD_ESCAPE"):
@@ -269,10 +279,15 @@ def test_a_broken_barn_report_is_not_rendered_as_a_healthy_one():
     """
     report_lines() never raises; on an internal error it returns the single
     line "Barn report skipped: ...". Branching on the line COUNT alone put that
-    in the same grey caption as "6 of 6 expected barns reported", so a check
-    that had failed looked exactly like a morning with nothing wrong -- the
-    silent failure this line exists to prevent. "0 of 0" is the same shape: no
-    roster could be built, which is a fault, not a whole day.
+    in the same grey caption as a healthy header, so a check that had failed
+    looked exactly like a morning with nothing wrong -- the silent failure this
+    line exists to prevent.
+
+    ZERO BARNS IN THE INDEX is the same shape. It used to be "0 of 0", meaning
+    no roster could be built; it is now "0 barns in the index", meaning nothing
+    qualified anywhere. Either way it is a fault and not a whole day, which is
+    why _barn_header_is_healthy requires a POSITIVE count and not merely a
+    header it can parse.
 
     MUTATION: drop `and _barn_header_is_healthy(header)` from either copy, or
     restore the bare `return` when the loader yields nothing. Both cases go
@@ -281,16 +296,18 @@ def test_a_broken_barn_report_is_not_rendered_as_a_healthy_one():
     for app in (HERE / "app.py", PORTAL / "app.py"):
         src = app.read_text(encoding="utf-8")
 
-        whole = _drive_render(src, ["Barn report -- index date 2026-09-22 "
-                                    "(Tue): 6 of 6 expected barns reported"])
+        whole = _drive_render(src, [
+            "Barn report -- index date 2026-09-22 (Tue): 9 barns in the index "
+            "— every barn that usually sells on a Tuesday is in"])
         assert [k for k, _ in whole] == ["caption"], \
             f"{app}: a complete day should stay quiet, got {whole}"
 
         for bad, why in (
                 (["Barn report skipped: OperationalError: no such column"],
                  "a report that failed"),
-                (["Barn report -- index date 2026-09-22 (Tue): "
-                  "0 of 0 expected barns reported"], "an empty roster")):
+                (["Barn report -- index date 2026-09-22 (Tue): 0 barns in "
+                  "the index — every barn that usually sells on a "
+                  "Tuesday is in"], "a day with nothing in the index")):
             got = _drive_render(src, bad)
             assert [k for k, _ in got] == ["warning"], (
                 f"{app}: {why} rendered as {got or 'nothing'} -- it must be "

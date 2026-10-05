@@ -36,7 +36,7 @@ def _base(**over):
         "window": [("2026-10-02", 7050, 816.0, 333.73)],
         "cme_date": "2026-10-01", "cme_value": 336.84, "cme_head": 21854,
         "scored_call": 337.15, "scored_head": 21854, "peers": [],
-        "live_peers": [("CIH", 337.76)], "barn_lines": ["Barn report -- 2 of 2 expected barns reported"],
+        "live_peers": [("CIH", 337.76)], "prior_call": None, "barn_lines": ["Barn report -- 2 of 2 expected barns reported"],
         "ingest_warnings": [],
     }
     d.update(over)
@@ -172,3 +172,56 @@ def test_the_email_would_have_stopped_2026_10_05():
     # and the subject still carries the (wrong) number, so nothing here hides it
     subj = ne.build(_base(value=339.5514), slot="am")[0]
     assert "339.55" in subj
+
+
+# ---------------------------------------------------------------------------
+# Did the number move since we last sent it?
+# ---------------------------------------------------------------------------
+
+AM_CALL = {"value": 339.5514, "head": 18039, "slot": "am",
+           "at": "08:12", "date": "2026-10-05"}
+
+
+def test_a_material_move_says_the_earlier_figure_is_out_of_date():
+    """
+    THE 2026-10-05 GAP. The 07:45 call went to clients at 339.55 and the 13:00
+    run settled at 337.74. Nothing said it had moved -- the afternoon email
+    simply carried a different number as though it had always been that, and
+    the correction came from Ross reading CIH hours later.
+    """
+    t = _text(ne.build(_base(value=337.7363, head=20201,
+                             prior_call=AM_CALL), slot="pm")[1])
+    assert "Moved since the am call of" in t
+    assert "-1.8151" in t
+    assert "out of date" in t
+    assert "+2,162 head" in t, "say what arrived, not just that something did"
+
+
+def test_an_ordinary_settle_does_not_cry_wolf():
+    """
+    Measured over 44 index dates the median move is 0.0000 and only six moved a
+    dime or more. A block that shouts on every pm run is a block nobody reads,
+    so under a nickel it reports the move and stops.
+    """
+    small = dict(AM_CALL, value=337.7326, head=20201)
+    t = _text(ne.build(_base(value=337.7363, head=20201,
+                             prior_call=small), slot="pm")[1])
+    assert "Changed since the am call" in t
+    assert "out of date" not in t
+
+
+def test_no_prior_call_prints_nothing():
+    """The first call of the day has nothing to move from."""
+    t = _text(ne.build(_base(prior_call=None))[1])
+    assert "since the" not in t
+
+
+def test_the_label_names_the_run_date():
+    """
+    An index date accumulates snapshots across several days once CME is behind,
+    so "the 08:12 am call" alone cannot say which morning. The first version
+    omitted the date and was ambiguous exactly when it mattered most.
+    """
+    t = _text(ne.build(_base(value=337.7363, head=20201,
+                             prior_call=AM_CALL), slot="pm")[1])
+    assert "10/5/26 08:12" in t

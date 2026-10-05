@@ -123,6 +123,36 @@ def gather(index_date=None):
         f"SELECT source, fci_value FROM peer_estimates WHERE index_date = {ph} "
         f"ORDER BY source", (index_date,)).fetchall()
 
+    # HAS THIS NUMBER MOVED SINCE THE LAST TIME WE SENT IT?
+    #
+    # The gap that cost 2026-10-05. The 07:45 call went to clients at 339.55 and
+    # the 13:00 run settled it at 337.74, and nothing anywhere said it had moved
+    # -- the afternoon email simply carried a different number as if it had
+    # always been that. Same shape on 2026-10-01: an 08:00 call of 337.1512, a
+    # 13:07 settle of 336.8375, 217 head of late Superior Video in between.
+    #
+    # EXACT AND THRESHOLD-FREE: the previous snapshot of THIS index date is a
+    # number we stored, so the move is arithmetic, not an estimate. Measured
+    # over 44 index dates the median move is 0.0000 and six moved a dime or
+    # more, the worst 2.0199 -- so it is quiet on an ordinary day, which is the
+    # only reason it is worth printing on the days it is not.
+    prior = cur.execute(
+        f"SELECT fci_value, total_head, run_slot, run_date, captured_at "
+        f"FROM fci_snapshots WHERE index_date = {ph} "
+        f"ORDER BY captured_at DESC", (index_date,)).fetchall()
+    # Skip snapshots that ARE this run's own -- update_index freezes one before
+    # the email is built -- and take the last call that said something
+    # different. The run DATE goes in the label: this date's snapshots span
+    # several days once CME is behind, so "the 08:12 am call" alone would be
+    # ambiguous about which morning.
+    d["prior_call"] = None
+    for v, h, slot_, rd, cap in prior:
+        if d["value"] is not None and abs(v - d["value"]) <= 1e-9 and h == d["head"]:
+            continue
+        d["prior_call"] = {"value": v, "head": h, "slot": slot_,
+                           "at": str(cap)[11:16], "date": str(db.iso(rd))}
+        break
+
     # Is today's sample whole? barn_report owns the roster logic and returns
     # strings; nothing here re-derives it, so the email and the run log cannot
     # disagree about which barns are out.
@@ -194,6 +224,25 @@ def build(d, slot="am", failed=None):
             f'{f"{wt:,.0f} lb" if wt else "—"}</td>'
             f'<td align="right" style="padding:4px 0">'
             f'{_money(price) if price else "—"}</td></tr>')
+
+    # --- Did this number move since we last sent it? -------------------------
+    moved = ""
+    p = d.get("prior_call")
+    if p and d["value"] is not None:
+        delta = d["value"] - p["value"]
+        dh = (d["head"] or 0) - (p["head"] or 0)
+        loud = abs(delta) >= 0.05
+        moved = (
+            f'<p style="margin:18px 0 6px;font-weight:600'
+            f'{";color:" + RED if loud else ""}">'
+            f'{"Moved" if loud else "Changed"} since the '
+            f'{p["slot"]} call of {_mdy(p["date"])} {p["at"]}</p>'
+            f'<p style="margin:0;font:13px system-ui,Segoe UI,Arial">'
+            f'{_money(p["value"])} &rarr; <b>{_money(d["value"])}</b> '
+            f'(<b>{delta:+.4f}</b>){f" on {dh:+,} head" if dh else ""}</p>'
+            + (f'<p style="margin:4px 0 0;color:{RED};font:13px system-ui,'
+               f'Segoe UI,Arial">If the {p["at"]} figure went to anyone, it is '
+               f'now {abs(delta):,.2f} out of date.</p>' if loud else ""))
 
     # --- The live peer check -------------------------------------------------
     # Ahead of everything else in the body, because it is the one line that
@@ -315,6 +364,7 @@ text-transform:uppercase">JSA FCI Estimate · {label}</p>
 <p style="margin:6px 0 0">Index date <b>{_mdy(d['index_date'])}</b> ·
 {int(d['head'] or 0):,} head across {d['locs'] or 0} locations</p>
 {daily}
+{moved}
 {warn}
 {peercheck}
 {barn}

@@ -31,6 +31,14 @@ from index_dates import headline_index_date
 MIN_PRESENT = 9
 OCCURRENCES = 12
 
+# The two reasons a roster barn contributes nothing, which call for opposite
+# responses: one day is incomplete, the other is whole. Both still print, so a
+# barn whose qualifying cattle quietly stopped parsing cannot hide behind the
+# benign wording. NO_REPORT keeps the original spelling so the line a reader
+# already knows is unchanged when nothing else is.
+NO_REPORT = "missing:"
+NOTHING_QUALIFYING = "no qualifying cattle:"
+
 
 def barn_days(conn):
     """
@@ -85,6 +93,78 @@ def expected(days, index_date):
             pounds.setdefault(slug_id, []).append(lbs)
     return {slug_id: median(seen) for slug_id, seen in pounds.items()
             if len(seen) >= MIN_PRESENT}
+
+
+def typical_day(days, index_date):
+    """
+    Median TOTAL pounds this weekday normally brings -- EVERY barn that sold,
+    not just the roster -- over the same occurrences expected() reads.
+
+    THE DENOMINATOR USED TO BE sum(roster.values()), which is not what the line
+    claims and is not close to it. The roster holds only barns that sell nearly
+    every week; a Friday's volume is mostly direct-trade reports that do not
+    report often enough to qualify. On 2026-10-02 the Friday roster was 43,018
+    lb against a real Friday of 1.53M, so Belen NM printed as "~19% of a
+    typical Friday" when it was 0.5% -- a 36x overstatement, on the one line
+    whose job is to say whether a number is safe to send to clients.
+
+    The suite could not catch it. Every fixture had the whole roster reporting
+    every week and nothing outside it, so sum(roster) and the day's own total
+    were the same number and the two denominators were indistinguishable.
+    test_share_is_against_the_whole_day_not_just_the_roster now puts a sporadic
+    barn in the data, which is what tells them apart.
+
+    Returns None when no occurrence has sales; the caller then prints no share
+    at all. A missing percentage is honest, a wrong one is what this fixes.
+    """
+    totals = []
+    for k in range(1, OCCURRENCES + 1):
+        occurrence = (index_date - timedelta(days=7 * k)).isoformat()
+        barns = days.get(occurrence)
+        if barns:
+            totals.append(sum(lbs for _head, lbs in barns.values()))
+    return median(totals) if totals else None
+
+
+def reported_without_qualifying(conn, index_date):
+    """
+    slug_ids that filed a report for this bucket date and put nothing in the
+    index -- the barn sold, but none of it was 700-899 lb Medium & Large #1 or
+    #1-2 steers.
+
+    "Missing" covered both this and a barn that never reported, and they mean
+    opposite things: this day is COMPLETE. Belen NM on 2026-10-02 filed 19 lots
+    of Medium & Large #1 and #1-2 steers, every one of them under 700 lb, and
+    the report called it out as missing on an index that was whole.
+
+    READS calf_sales, which is ingested from the SAME AMS barn reports through a
+    wider 400-900 lb band -- so a barn present there and absent from mars_sales
+    filed and did not qualify. This module is LOG ONLY (see the file docstring):
+    nothing here can reach the index, which is why the cash series is safe to
+    read from it and is not safe to read from the modules
+    tests/test_index_isolation.py guards.
+
+    calf_sales is OPTIONAL and written AFTER the index push (CLAUDE.md, step
+    order), so on a same-morning report it can lag a cycle and a barn reads as
+    no-report briefly. That is the old wording, which is the safe direction.
+
+    Empty set if the table is absent or unreadable -- every caller then gets
+    exactly the behaviour that predated this function.
+    """
+    want = index_date.isoformat()
+    lo = (index_date - timedelta(days=7)).isoformat()
+    hi = (index_date + timedelta(days=7)).isoformat()
+    seen = set()
+    try:
+        rows = conn.cursor().execute(
+            "SELECT report_date, location, slug_id FROM calf_sales "
+            "WHERE report_date BETWEEN ? AND ?", (lo, hi)).fetchall()
+    except Exception:                          # noqa: BLE001 -- table absent
+        return set()
+    for report_date, location, slug_id in rows:
+        if shifted_bucket_date(location, report_date) == want:
+            seen.add(slug_id)
+    return seen
 
 
 def _names(conn):
@@ -155,14 +235,23 @@ def report_lines(conn):
                  f"{len(roster)} expected barns reported"]
         if not missing:
             return lines
-        names, typical = _names(conn), sum(roster.values())
-        rows = [(names[s], f"{roster[s]:,.0f}", roster[s] / typical)
+        names = _names(conn)
+        typical = typical_day(days, index_date)
+        filed = reported_without_qualifying(conn, index_date)
+        rows = [(NOTHING_QUALIFYING if s in filed else NO_REPORT,
+                 names[s], f"{roster[s]:,.0f}",
+                 None if not typical else roster[s] / typical)
                 for s in missing]
-        wide = max(len(name) for name, _lbs, _share in rows)
-        lbs_wide = max(len(lbs) for _name, lbs, _share in rows)
-        for name, lbs, share in rows:
-            lines.append(f"  missing: {name:<{wide}}  ~{lbs:>{lbs_wide}} lb  "
-                         f"(~{share:.0%} of a typical {index_date:%A})")
+        # Labels pad to the widest in play, so an all-NO_REPORT day renders
+        # byte-for-byte as it did before this split existed.
+        lab_wide = max(len(lab) for lab, _n, _lbs, _share in rows)
+        wide = max(len(name) for _lab, name, _lbs, _share in rows)
+        lbs_wide = max(len(lbs) for _lab, _name, lbs, _share in rows)
+        for lab, name, lbs, share in rows:
+            tail = ("" if share is None else
+                    f"  (~{share:.0%} of a typical {index_date:%A})")
+            lines.append(f"  {lab:<{lab_wide}} {name:<{wide}}  "
+                         f"~{lbs:>{lbs_wide}} lb{tail}")
         return lines
     except Exception as e:                     # noqa: BLE001 -- deliberate
         return [f"Barn report skipped: {type(e).__name__}: {e}"]

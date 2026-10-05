@@ -654,3 +654,162 @@ def test_the_guard_check_can_actually_fail():
     assert not _loop_is_guarded(unguarded)
     assert _loop_is_guarded(guarded)
     assert not _loop_is_guarded("x = 1\n"), "no loop at all is not a pass"
+
+
+# ---------------------------------------------------------------------------
+# The share's denominator, and the two reasons a barn contributes nothing.
+#
+# Both defects reached a client-facing morning on 2026-10-05. The report read
+# "missing: Belen NM  ~8,002 lb  (~19% of a typical Friday)" when Belen had
+# filed 19 lots of Medium & Large #1/#1-2 steers, every one under 700 lb, and
+# was 0.5% of a real Friday. Nothing was missing and the day was whole.
+# ---------------------------------------------------------------------------
+
+def with_calf_rows(conn, rows):
+    """
+    (iso date, slug_id, city) in calf_sales -- the table barn_report reads to
+    tell a barn that FILED from one that never reported.
+
+    Created here rather than in SCHEMA on purpose: every test that does not
+    call this runs with the table ABSENT, which is the degradation path
+    reported_without_qualifying() promises, so the old wording stays covered by
+    the twenty-nine tests that predate this one.
+    """
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS calf_sales ("
+        "report_date TEXT, raw_date TEXT, published_date TEXT, slug_id INTEGER,"
+        "location TEXT, state TEXT, weight_low INTEGER, weight_high INTEGER,"
+        "muscle_grade TEXT, head_count INTEGER, avg_weight REAL, avg_price REAL)")
+    conn.executemany(
+        "INSERT INTO calf_sales (report_date, raw_date, slug_id, location, "
+        "state, weight_low, weight_high, muscle_grade, head_count, avg_weight, "
+        "avg_price) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [(d, d, s, c, "MO", 500, 550, "1", 10, 520.0, 300.0) for d, s, c in rows])
+    conn.commit()
+    return conn
+
+
+def _roster_pair(index_date=MONDAY):
+    """Big (75,000 lb) and Small (25,000 lb) on every occurrence, Small also on
+    the index date itself -- so Big is the one barn outstanding."""
+    rows = (rows_for(1, "Big", occurrences(range(1, 13), index_date),
+                     head=100, wt=750.0)
+            + rows_for(2, "Small", occurrences(range(1, 13), index_date),
+                       head=100, wt=250.0))
+    return rows + rows_for(2, "Small", [index_date.isoformat()],
+                           head=100, wt=250.0)
+
+
+def test_share_is_against_the_whole_day_not_just_the_roster():
+    """
+    THE TEST THIS FILE WAS MISSING. Every fixture had the whole roster
+    reporting every week and nothing outside it, so sum(roster.values()) and
+    the day's own total were the same number -- the old denominator and the
+    right one were indistinguishable, and the line ran 36x wrong in production
+    while this file was green.
+
+    Extra sells 8 of 12 Mondays: below MIN_PRESENT so it never joins the
+    roster, but on enough days to carry the median. Roster is 100,000 lb; a
+    typical Monday is 200,000 lb.
+
+    MUTATION: divide by sum(roster.values()) and Big reads 75%.
+    """
+    rows = _roster_pair() + rows_for(3, "Extra", occurrences(range(1, 9)),
+                                     head=125, wt=800.0)
+    conn = make_conn(rows, published="2026-09-18")
+
+    days = br.barn_days(conn)
+    assert 3 not in br.expected(days, MONDAY), "Extra must not reach the roster"
+    assert br.typical_day(days, MONDAY) == 200_000
+
+    lines = br.report_lines(conn)
+    assert "~75,000 lb" in lines[1]
+    assert "(~38% of a typical Monday)" in lines[1]
+    assert "75% of a typical" not in lines[1], \
+        "the roster is not the day -- that is the 36x bug"
+
+
+def test_typical_day_is_the_median_not_the_mean():
+    """
+    One enormous Monday must not move the yardstick. 2026-09-25 was 7.1M lb
+    against a 1.5M median, and a mean would have halved every share that week.
+    """
+    rows = (rows_for(1, "Big", occurrences(range(1, 12)), head=100, wt=750.0)
+            + rows_for(1, "Big", occurrences([12]), head=10_000, wt=750.0))
+    days = br.barn_days(make_conn(rows, published="2026-09-18"))
+    assert br.typical_day(days, MONDAY) == 75_000
+
+
+def test_typical_day_is_none_when_no_occurrence_sold():
+    """None, not zero -- the caller prints no share rather than dividing."""
+    assert br.typical_day({}, MONDAY) is None
+
+
+def test_a_barn_that_filed_but_had_nothing_qualifying_says_so():
+    """
+    Belen's case. The barn reported and sold nothing in the 700-899 lb band, so
+    the index is COMPLETE -- calling that "missing" sent Ross hunting for a data
+    gap on a morning he was about to publish to clients.
+
+    It still PRINTS. A barn whose qualifying cattle quietly stopped parsing
+    would otherwise hide behind the benign wording.
+    """
+    conn = with_calf_rows(make_conn(_roster_pair(), published="2026-09-18"),
+                          [(MONDAY.isoformat(), 1, "Big")])
+    lines = br.report_lines(conn)
+    assert len(lines) == 2
+    assert lines[1].strip().startswith("no qualifying cattle: Big MO")
+    assert "missing:" not in lines[1]
+
+
+def test_a_barn_absent_from_both_tables_still_reads_missing():
+    """
+    The other half, and the one that must not be softened: nothing was filed,
+    so the day really is incomplete.
+    """
+    conn = with_calf_rows(make_conn(_roster_pair(), published="2026-09-18"),
+                          [(MONDAY.isoformat(), 2, "Small")])
+    lines = br.report_lines(conn)
+    assert lines[1].strip().startswith("missing: Big MO")
+    assert "no qualifying cattle" not in lines[1]
+
+
+def test_a_calf_row_on_another_date_does_not_excuse_the_barn():
+    """
+    Guard the guard. The filing has to be for THIS bucket date; last week's
+    report must not make today's absence read as benign.
+    """
+    conn = with_calf_rows(
+        make_conn(_roster_pair(), published="2026-09-18"),
+        [((MONDAY - timedelta(days=7)).isoformat(), 1, "Big")])
+    lines = br.report_lines(conn)
+    assert lines[1].strip().startswith("missing: Big MO"), lines[1]
+
+
+def test_an_absent_calf_table_degrades_to_the_old_wording():
+    """
+    calf_sales is OPTIONAL and written after the index push, so it can be
+    missing or a cycle stale. A diagnostic must never be what breaks the report
+    it is diagnosing -- and the fallback is the wording that predated this.
+    """
+    conn = make_conn(_roster_pair(), published="2026-09-18")   # no calf_sales
+    assert br.reported_without_qualifying(conn, MONDAY) == set()
+    lines = br.report_lines(conn)
+    assert lines[1].strip().startswith("missing: Big MO")
+
+
+def test_the_two_labels_align_so_one_kind_does_not_shift_the_other():
+    """
+    Both labels pad to the widest in play. Without that the lb column jumps
+    between kinds, which is how a reader scanning for a big number misses one.
+    """
+    rows = (rows_for(1, "Big", occurrences(range(1, 13)), head=100, wt=750.0)
+            + rows_for(2, "Small", occurrences(range(1, 13)), head=100, wt=250.0)
+            + rows_for(3, "Third", occurrences(range(1, 13)), head=100, wt=100.0))
+    rows += rows_for(3, "Third", [MONDAY.isoformat()], head=100, wt=100.0)
+    conn = with_calf_rows(make_conn(rows, published="2026-09-18"),
+                          [(MONDAY.isoformat(), 2, "Small")])
+    lines = br.report_lines(conn)
+    assert len(lines) == 3
+    cols = [ln.index("~") for ln in lines[1:]]
+    assert len(set(cols)) == 1, "the lb column must not move between labels"

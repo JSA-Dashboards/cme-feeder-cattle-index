@@ -16,6 +16,7 @@ similar-looking ingests into one, and the index quietly changes.
 These tests are structural rather than numeric so they keep working as the data
 moves. They run without a database; the one that wants it skips politely.
 """
+import ast
 import re
 from pathlib import Path
 
@@ -29,7 +30,15 @@ REPO = Path(__file__).resolve().parent.parent
 # same mistake as everything else here.
 INDEX_MODULES = ["update_index.py", "app.py", "bucketing.py", "snapshots.py",
                  "composition.py", "volumes.py", "reporting.py", "notify_email.py",
-                 "barn_report.py", "mars_census.py", "mars_census_view.py"]
+                 "mars_census.py", "mars_census_view.py"]
+
+# On the index path, but EXEMPT from the calf_sales ban because they cannot
+# carry anything to the index: they return text, nothing consumes that text but
+# a log line and a caption, and they write nothing at all. barn_report.py moved
+# here on 2026-10-05 -- see the block at the foot of this file for what it has
+# to keep proving to stay here. Do not add to this list casually; the ban is
+# cheap and robust, and every exemption costs some of that.
+DIAGNOSTIC_MODULES = ["barn_report.py"]
 
 # The index's own weight brackets, per CME Rule 10203.A.1 (700-899 lb).
 INDEX_BRACKETS = {700, 750, 800, 850}
@@ -256,3 +265,123 @@ def test_the_dml_scanner_can_actually_fail():
             ("DROP TABLE mars_sales", "mars_sales"),
             ('conn.execute("INSERT INTO mars_sales VALUES (?)")', "mars_sales")):
         assert want in dml_targets(real), f"a real write slipped past: {real!r}"
+
+
+# ---------------------------------------------------------------------------
+# The diagnostic exemption, and what pays for it.
+#
+# barn_report.py reads calf_sales to tell a barn that FILED a report with no
+# 700-899 lb cattle in it from a barn that never reported. Those are opposite
+# facts -- one day is complete, the other is not -- and "missing" covered both
+# until 2026-10-05, when Belen NM filed 19 lots of Medium & Large #1/#1-2
+# steers, every one under 700 lb, and the report called it missing on an index
+# that was whole, on a morning the number was about to go to clients.
+#
+# WHY THIS IS SAFE WHERE IT WOULD NOT BE ELSEWHERE. The ban exists because
+# recompute_fci_daily() reads mars_sales with no WHERE clause, so anything that
+# can put a row there can publish 400 lb calves as index cattle. barn_report
+# cannot put a row anywhere: it returns a list of strings, nothing consumes it
+# but a log line and a caption, and it issues no write of any kind. The three
+# tests below assert each of those rather than taking them on trust -- an
+# exemption nobody can check is just a hole.
+# ---------------------------------------------------------------------------
+
+def _code_strings(src):
+    """
+    String literals a module actually executes -- f-string parts included,
+    comments absent by construction, docstrings removed.
+
+    AST rather than a text scan for the reason recorded at the top of this
+    file: the first version of the calf_sales ban matched a COMMENT explaining
+    the isolation and failed on the documentation. Comments are not in an AST,
+    and the docstrings here legitimately discuss both tables at once.
+    """
+    tree = ast.parse(src)
+    docs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docs.add(id(body[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docs]
+
+
+@pytest.mark.parametrize("name", DIAGNOSTIC_MODULES)
+def test_a_diagnostic_module_never_writes(name):
+    """
+    The whole price of the exemption. A diagnostic that can write is an index
+    module again, and belongs back in INDEX_MODULES.
+    """
+    f = REPO / name
+    if not f.exists():
+        pytest.skip(f"{name} not present")
+    src = f.read_text(encoding="utf-8")
+    found = [v for v in WRITE_VERBS if v in src]
+    assert not found, (
+        f"{name} contains {found}. It is exempt from the calf_sales ban only "
+        f"because it cannot write; if it can, the exemption is void.")
+
+
+@pytest.mark.parametrize("name", DIAGNOSTIC_MODULES)
+def test_a_diagnostic_module_never_queries_both_tables_at_once(name):
+    """
+    The creep this exemption has to survive. Reading calf_sales on its own is
+    harmless; UNIONing or JOINing it into a query that also reads mars_sales is
+    the exact move the ban was written to stop, and it would be invisible in a
+    module nobody thinks of as touching the index.
+    """
+    f = REPO / name
+    if not f.exists():
+        pytest.skip(f"{name} not present")
+    both = [s for s in _code_strings(f.read_text(encoding="utf-8"))
+            if "calf_sales" in s.lower() and "mars_sales" in s.lower()]
+    assert not both, (
+        f"{name} has SQL naming both calf_sales and mars_sales: {both}. The "
+        f"cash series may be read beside the index, never joined to it.")
+
+
+def test_the_diagnostic_checks_can_actually_fail():
+    """
+    Guard the guards. Both of the above pass trivially on a module that does
+    nothing, which is the shape of check this project keeps having to go back
+    and fix -- so feed each one a known violation.
+    """
+    assert [v for v in WRITE_VERBS
+            if v in 'cur.execute("INSERT INTO calf_sales ...")']
+    assert [v for v in WRITE_VERBS
+            if v in 'db.merge_ignore(conn, "mars_sales", cols, vals)']
+    assert not [v for v in WRITE_VERBS
+                if v in 'cur.execute("SELECT slug_id FROM calf_sales")']
+
+    joined = ('q = "SELECT * FROM mars_sales m JOIN calf_sales c '
+              'ON c.report_date = m.report_date"\n')
+    assert [s for s in _code_strings(joined)
+            if "calf_sales" in s.lower() and "mars_sales" in s.lower()], \
+        "a join of the two tables must be detectable"
+
+    # ...and prose about both must NOT trip it, or the check punishes the
+    # documentation the way this file's first version did.
+    prose = ('"""calf_sales is wider than mars_sales and never reaches it."""\n'
+             '# calf_sales must not join mars_sales\n'
+             'q = "SELECT slug_id FROM calf_sales"\n')
+    assert not [s for s in _code_strings(prose)
+                if "calf_sales" in s.lower() and "mars_sales" in s.lower()], \
+        "comments and docstrings must not trip the join check"
+
+
+def test_the_diagnostic_list_and_the_index_list_do_not_overlap():
+    """
+    A module cannot be both. If one is added back to INDEX_MODULES without
+    being taken out of DIAGNOSTIC_MODULES, the ban silently stops applying to
+    it -- the parametrised ban would still pass, because it would be testing
+    the exempt copy of the name.
+    """
+    overlap = sorted(set(INDEX_MODULES) & set(DIAGNOSTIC_MODULES))
+    assert not overlap, (
+        f"{overlap} is listed as both an index module and a diagnostic. Pick "
+        f"one: the exemption is meaningless if the ban also claims to cover it.")

@@ -80,6 +80,14 @@ never reach it. `tests/test_index_isolation.py` enforces this structurally — n
 index module may query `calf_sales`, `calf_sales.py` may write only its own
 table, and `mars_sales` must contain only brackets 700/750/800/850.
 
+ONE EXEMPTION, in `DIAGNOSTIC_MODULES`: `barn_report.py` reads `calf_sales` to
+tell a barn that filed a report with no 700–899 lb cattle in it from a barn that
+never reported. It is allowed because it cannot carry anything to the index — it
+returns strings, nothing consumes them but a log line and a caption, and it
+writes nothing. That is not taken on trust: the exemption is paid for by tests
+asserting it contains no write verb and never names `calf_sales` and
+`mars_sales` in one query. Weaken either and it belongs back under the ban.
+
 ## Backends
 
 `snowflake_db.py` abstracts SQLite (local) vs Snowflake (`USE_SNOWFLAKE=1`).

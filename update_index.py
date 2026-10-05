@@ -345,6 +345,46 @@ def derived_dates(row) -> tuple[str, str]:
     return shift_weekend_to_monday(sale_date).isoformat(), sale_date.isoformat()
 
 
+INGEST_WARNINGS = DATA_DIR / "ingest_warnings.json"
+
+
+def _record_ingest_warnings(items, append=False):
+    """
+    Write the run's unlabelled rows to a sidecar so notify_email.py can put them
+    in front of a human.
+
+    A SIDECAR AND NOT A TABLE, deliberately. These are transient facts about one
+    run, not index data, and JSA.CME_FEEDER_CATTLE is owned by ACCOUNTADMIN --
+    SYSADMIN has no MODIFY there, so a new table needs an admin and a migration
+    for something that is read once and overwritten. The file lives beside the
+    roster, is rewritten every run, and its absence is read as "no warnings"
+    rather than as an error.
+
+    WHY THIS EXISTS AT ALL. The warning itself was already correct on
+    2026-10-05 -- the parser knew it had dropped 2,162 head of Texas Direct and
+    said so. It said so into /opt/cme-feeder-cattle-index/logs/update_*.log on a
+    droplet, which nothing reads and which deletes itself after 30 days. A check
+    nobody receives is not a check, and the thing that actually caught Texas was
+    a human reading CIH's sheet.
+    """
+    import json
+    try:
+        prior = []
+        if append and INGEST_WARNINGS.exists():
+            prior = json.loads(INGEST_WARNINGS.read_text(encoding="utf-8"))
+        payload = prior + [
+            {"source": src, "report_date": str(rd), "head": w.get("head_count"),
+             "avg_weight": w.get("avg_weight"), "avg_price": w.get("avg_price"),
+             "muscle_grade": w.get("muscle_grade"),
+             "weight_low": w.get("weight_break_low")}
+            for src, rd, w in items
+        ]
+        INGEST_WARNINGS.parent.mkdir(parents=True, exist_ok=True)
+        INGEST_WARNINGS.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    except Exception as e:                     # noqa: BLE001 -- never fail a run
+        print("  [warn] could not record ingest warnings: %s" % e)
+
+
 def recompute_fci_daily(conn):
     """
     Recomputes the FULL fci_daily table from ALL stored mars_sales, using a
@@ -551,6 +591,7 @@ def run_update(since: date, verbose=True):
     # Surfaced AFTER the loop so it is the last thing on screen for this stage
     # rather than buried among ten states' progress lines. Empty on an ordinary
     # run; see parse_direct_pdf's docstring for why it has no threshold.
+    _record_ingest_warnings(direct_unlabelled)
     if direct_unlabelled and verbose:
         print("\n  *** {} DIRECT ROW(S) IN THE INDEX WEIGHT BAND WERE NOT "
               "INGESTED because this parser could not resolve a "
@@ -620,6 +661,14 @@ def run_update(since: date, verbose=True):
             )
         video_inserted += len(rows)
     total_inserted += video_inserted
+    _record_ingest_warnings(video_unlabelled, append=True)
+    if video_unlabelled and verbose:
+        print("\n  *** {} VIDEO ROW(S) IN THE INDEX WEIGHT BAND WERE NOT "
+              "INGESTED -- no resolvable delivery label:".format(
+                  len(video_unlabelled)))
+        for nm, rd, uu in video_unlabelled:
+            print("        {} {}  {:,} head at {:.0f} lb, ${:.2f}".format(
+                nm, rd, uu["head_count"], uu["avg_weight"], uu["avg_price"]))
     conn.commit()
 
     # Verify the per-location bucketing corrections still describe CME's own

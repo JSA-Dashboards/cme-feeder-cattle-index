@@ -232,7 +232,18 @@ def test_the_boundary_census_matches_the_data(conn, float_columns):
         f"labels {block.count('ONE ULP BELOW')}. Calling a near-miss an exact "
         f"half is what made this paragraph reassuring and wrong.")
 
+    # ZERO is now the expected count, and the assertion below must tolerate it.
+    # On 2026-09-30 three values sat near a boundary, all in
+    # cme_ftp_brackets.avg_weight. All three turned out to be PARSER ARTEFACTS:
+    # cme_ftp.py's token path glued two columns, so "782.93 365..." became the
+    # single value 782.93365, and the five-decimal precision that put them on a
+    # boundary was never in CME's file. The 2026-10-05 slice-first fix removed
+    # them. Asserting "exactly one column" was right about the data and wrong as
+    # an invariant -- it fails the moment the data gets CLEANER, which is the
+    # worst time for a test to go red.
     tables = {f"{t}.{c}" for t, c, _, _ in near}
+    if not near:
+        return
     assert len(tables) == 1 and "cme_ftp_brackets.avg_weight" in tables, (
         f"the boundary values are no longer confined to "
         f"cme_ftp_brackets.avg_weight: {sorted(tables)}")

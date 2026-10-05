@@ -114,8 +114,45 @@ def gather(index_date=None):
         d["scored_call"] = d["scored_head"] = None
         d["peers"] = []
 
+    # PEERS FOR THE DATE WE ARE PUBLISHING, not just the one CME already
+    # printed. The block above scores a settled call after the fact; this is the
+    # live check, and it is the one that mattered on 2026-10-05 -- CIH and
+    # Compass both had 337.76 while we published 339.55, and the only thing that
+    # caught the $1.79 was Ross reading CIH's sheet on X by eye.
+    d["live_peers"] = cur.execute(
+        f"SELECT source, fci_value FROM peer_estimates WHERE index_date = {ph} "
+        f"ORDER BY source", (index_date,)).fetchall()
+
+    # Is today's sample whole? barn_report owns the roster logic and returns
+    # strings; nothing here re-derives it, so the email and the run log cannot
+    # disagree about which barns are out.
+    try:
+        import barn_report
+        d["barn_lines"] = list(barn_report.report_lines(conn))
+    except Exception as e:                     # noqa: BLE001 -- diagnostics only
+        d["barn_lines"] = ["Barn report unavailable: %s" % e]
+
     conn.close()
+    d["ingest_warnings"] = _ingest_warnings()
     return d
+
+
+def _ingest_warnings():
+    """
+    Rows the parsers could not classify on the last run, written by
+    update_index._record_ingest_warnings().
+
+    Absence is NOT an error -- a fresh checkout has no sidecar and that reads
+    as "nothing to report", which is also what an ordinary day looks like.
+    """
+    import json
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "data", "ingest_warnings.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:                          # noqa: BLE001
+        return []
 
 
 def _mdy(iso):
@@ -157,6 +194,84 @@ def build(d, slot="am", failed=None):
             f'{f"{wt:,.0f} lb" if wt else "—"}</td>'
             f'<td align="right" style="padding:4px 0">'
             f'{_money(price) if price else "—"}</td></tr>')
+
+    # --- The live peer check -------------------------------------------------
+    # Ahead of everything else in the body, because it is the one line that
+    # would have stopped 2026-10-05 leaving the building. Both desks had 337.76
+    # and we published 339.55; nothing in this email mentioned them, so the
+    # $1.79 was caught by a human opening CIH's feed by eye.
+    peercheck = ""
+    if d["value"] is not None:
+        if d.get("live_peers"):
+            prow = ""
+            worst = 0.0
+            for src, val in d["live_peers"]:
+                gap = d["value"] - val
+                worst = max(worst, abs(gap))
+                prow += (f'<tr><td style="padding:3px 12px 3px 0">'
+                         f'{src if src == "CIH" else src.title()}</td>'
+                         f'<td align="right">{_money(val)}</td>'
+                         f'<td align="right" style="padding-left:12px;color:'
+                         f'{GREEN if abs(gap) < 0.05 else RED}">'
+                         f'{gap:+.4f}</td></tr>')
+            # 5 cents: the project's own bar is "matches CME to the cent", and
+            # measured agreement with CME since 2026-08-28 is inside half a
+            # cent. Anything past a nickel against BOTH desks has meant a real
+            # defect every time it has happened.
+            flag = ("" if worst < 0.05 else
+                    f'<p style="margin:4px 0 0;color:{RED};font-weight:600">'
+                    f'We are {worst:,.2f} from a published peer. Every time that '
+                    f'has exceeded a nickel it has been our bug, not theirs — '
+                    f'check the ingest before sending this out.</p>')
+            peercheck = (
+                f'<p style="margin:18px 0 6px;font-weight:600">Against the desks, '
+                f'same index date</p><table style="font:13px system-ui,Segoe UI,'
+                f'Arial"><tr><td style="padding:3px 12px 3px 0">JSA</td>'
+                f'<td align="right"><b>{_money(d["value"])}</b></td>'
+                f'<td align="right"></td></tr>{prow}</table>{flag}')
+        else:
+            peercheck = (
+                f'<p style="margin:18px 0 6px;color:{MUTED};font:13px system-ui,'
+                f'Segoe UI,Arial">No CIH or Compass estimate recorded for '
+                f'{_mdy(d["index_date"])} yet — nothing is checking this number '
+                f'against an outside source. '
+                f'<code>python add_peer_estimate.py --date {d["index_date"]} '
+                f'--source CIH --value &lt;x&gt;</code></p>')
+
+    # --- Is the sample whole? ------------------------------------------------
+    barn = ""
+    if d.get("barn_lines"):
+        head_line = d["barn_lines"][0]
+        rest = [l.strip() for l in d["barn_lines"][1:]]
+        colour = MUTED if not rest else RED
+        barn = (f'<p style="margin:18px 0 6px;font-weight:600">Sample</p>'
+                f'<p style="margin:0;font:13px system-ui,Segoe UI,Arial;color:'
+                f'{colour}">{head_line}</p>')
+        if rest:
+            barn += ('<ul style="margin:4px 0 0 18px;padding:0;font:13px '
+                     'system-ui,Segoe UI,Arial">'
+                     + "".join(f"<li>{l}</li>" for l in rest) + "</ul>")
+
+    # --- Rows the parsers could not classify ---------------------------------
+    # The 2026-10-05 warning, delivered. It was always produced; it went into a
+    # log file on a droplet that nothing reads and that deletes itself after 30
+    # days, which is why a $1.82 error reached clients with the job exiting 0.
+    warn = ""
+    if d.get("ingest_warnings"):
+        li = "".join(
+            f'<li>{w["source"]} {w["report_date"]}: '
+            f'{int(w["head"] or 0):,} head at {float(w["avg_weight"] or 0):,.0f} lb, '
+            f'{_money(w["avg_price"])}, grade {w["muscle_grade"]}</li>'
+            for w in d["ingest_warnings"])
+        warn = (f'<p style="margin:18px 0 6px;color:{RED};font-weight:600">'
+                f'{len(d["ingest_warnings"])} row(s) NOT ingested — the parser '
+                f'could not read their delivery label</p>'
+                f'<p style="margin:0 0 4px;font:13px system-ui,Segoe UI,Arial;'
+                f'color:{MUTED}">These are not exclusions. They are rows in the '
+                f'index weight band that we failed to classify, so this estimate '
+                f'is short by them.</p>'
+                f'<ul style="margin:0 0 0 18px;padding:0;font:13px system-ui,'
+                f'Segoe UI,Arial">{li}</ul>')
 
     scored = ""
     if d["cme_value"] is not None:
@@ -200,6 +315,9 @@ text-transform:uppercase">JSA FCI Estimate · {label}</p>
 <p style="margin:6px 0 0">Index date <b>{_mdy(d['index_date'])}</b> ·
 {int(d['head'] or 0):,} head across {d['locs'] or 0} locations</p>
 {daily}
+{warn}
+{peercheck}
+{barn}
 <p style="margin:18px 0 6px;font-weight:600">7-day window</p>
 <table style="font:13px system-ui,Segoe UI,Arial;border-collapse:collapse">
 <tr style="color:{MUTED};border-bottom:1px solid #e5e7eb">

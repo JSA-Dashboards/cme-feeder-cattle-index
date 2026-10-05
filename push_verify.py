@@ -243,30 +243,33 @@ of completeness, so:
     0.49999999999999994 + 0.5 is exactly 1.0 as a double, so SQLite's
     ROUND(0.49999999999999994) is 1.0 where Snowflake's, on a FLOAT, is 0.0.
 
-    MEASURED EXPOSURE IN THE REAL DATA, re-derived read-only 2026-09-30 across
-    all 35 float columns -- not 26, which is what this paragraph claimed before
-    anyone counted. Three values sit within 1e-6 of a .5 boundary, all three in
-    cme_ftp_brackets.avg_weight, and only TWO of them are exact halves:
+    MEASURED EXPOSURE IN THE REAL DATA, re-derived read-only 2026-10-05 across
+    all 35 float columns: ZERO values sit within 1e-6 of a .5 boundary. The
+    closest approach in the whole database is 9.08e-4, at fci_daily.fci_value
+    = 262.21194990916575.
 
-        878.00155 -> 8780015.5           exact half     both engines 8780016
-        764.26255 -> 7642625.5           exact half     both engines 7642626
-        782.93365 -> 7829336.499999999   ONE ULP BELOW  both engines 7829336
+    THAT NUMBER USED TO BE THREE, AND WHY IT IS NOW ZERO MATTERS. On 2026-09-30
+    this paragraph listed 878.00155, 764.26255 and 782.93365, all three in
+    cme_ftp_brackets.avg_weight, and singled out the last (El Reno, 2026-05-13,
+    750 lb bracket) as sitting ONE ULP BELOW a half -- exactly the shape the
+    paragraph warns about. All three were artefacts. cme_ftp.py's token path
+    was gluing two columns together, so "782.93 365..." parsed as the single
+    value 782.93365; the five-decimal precision that put them on a rounding
+    boundary was never in CME's file at all. The slice-first fix on 2026-10-05
+    corrected the twelve post-2020 dates carrying it and the pathological
+    floats went with them.
 
-    The third (El Reno, 2026-05-13, 750 lb bracket) is exactly the shape this
-    paragraph warns about, so the reassurance cannot rest on "they are all
-    exact halves" -- it rests on the row-by-row comparison, which does hold for
-    all three. It is safe because of its magnitude, not its luck: at 7.8e6 the
-    +0.5 lands on 7829336.999999999, still a distinct double from 7829337.0, so
-    the trick has nothing to tip. The hazard needs a small value, which is why
-    the synthetic 0.49999999999999994 above shows it and a cattle weight does
-    not.
+    Which is the useful lesson here: a value sitting improbably close to a
+    rounding boundary was evidence of a PARSER bug, not of float arithmetic.
+    The census was measuring corruption and reporting it as a numerical edge
+    case. Fifty-two rows across 2020-09-21..09-30 still carry the glue -- those
+    files have no header for the slice path to read -- but none of them land
+    within 1e-6 of a boundary.
 
-    Outside cme_ftp_brackets.avg_weight, no float column's population comes
-    within 9.08e-4 of a boundary (the closest is fci_daily.fci_value at
-    262.21194990916575). So a one-unit mismatch on a single float column and
-    nothing else should be investigated as arithmetic before corruption -- but
-    that is a measurement of the data as it stood, not a property of the
-    schema. Re-run it before leaning on it.
+    So a one-unit mismatch on a single float column and nothing else should be
+    investigated as arithmetic before corruption -- but that is a measurement
+    of the data as it stands, not a property of the schema, and it has already
+    changed once. Re-run it before leaning on it.
 
 Placement: called from snowflake/02_migrate_data.py immediately after each
 table's COMMIT. Kept here, standalone and importable, because a guard that can

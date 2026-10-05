@@ -116,9 +116,20 @@ def test_the_published_date_parser_still_works():
 
 def test_both_parsers_return_the_completeness_channel():
     """
-    parse_western_video_pdf has no sticky delivery of this kind and always
-    returns an empty list, deliberately -- so fetch_all_video_rows needs no
-    special case, and a special case is where the next one of these hides.
+    BOTH parsers carry sticky delivery state and both need a real channel.
+
+    The first version of this file said parse_western_video_pdf "has no sticky
+    delivery of this kind" and returned an empty list on purpose. That was
+    wrong, and it was wrong in the code comment too: line 425 of the module has
+    always said cur_delivery "carries forward across rows within one section",
+    and _WV_DELIVERY_RE accepted ANY three letters followed by a number, so
+    "USD 123" was a delivery as far as it was concerned. An audit against the
+    live report found all three faults present there -- dormant only because
+    that document's page break happened to land mid-section with no reprinted
+    header, which is the document's shape and not the parser's.
+
+    Worth about 17 cents of index on a 7-day window: one heavy lot, 75 head of
+    54,750 lb, against a 14.8M lb pool. Seventeen times the "to the cent" bar.
     """
     import inspect
     for fn in (vr.parse_video_pdf, vr.parse_western_video_pdf):
@@ -146,3 +157,42 @@ def test_update_index_destructures_four_values():
         encoding="utf-8")
     assert "for name, (report_date_, published_date_, rows, unlabelled_) in video_results.items():" in src, \
         "update_index.py and fetch_all_video_rows disagree about the tuple shape"
+
+
+# ---------------------------------------------------------------------------
+# Western Video's own delivery pattern.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("junk", ["USD 123", "Ema 456", "Web 789", "Not 1"])
+def test_wv_delivery_rejects_any_three_letters(junk):
+    """
+    _WV_DELIVERY_RE used to be [A-Za-z]{3} and would take all of these. The
+    trailing digits requirement kept real furniture out in practice, which is
+    why it never fired -- but that is a fact about this month's PDFs.
+    """
+    assert not vr._WV_DELIVERY_RE.match(junk),         f"{junk!r} is not a delivery; three letters and a number is not enough"
+
+
+@pytest.mark.parametrize("real", ["Current 105 415 415 544.00",
+                                  "Oct 100 535 535 480.00",
+                                  "Sep-Oct 60 900 900 298.00",
+                                  "Nov-Dec 12 850 850 300.00"])
+def test_wv_delivery_still_accepts_the_real_ones(real):
+    """
+    The direction that would silently drop cattle if the tightening went too
+    far: a rejected real label leaves cur_delivery stale or unset.
+    """
+    assert vr._WV_DELIVERY_RE.match(real), f"{real!r} is a real Western Video row"
+
+
+def test_wv_carries_sticky_delivery_state_at_all():
+    """
+    Pin the fact the first version of this file got wrong, so nobody writes
+    that comment again. If this parser ever genuinely loses its sticky
+    delivery, this test should be deleted deliberately rather than quietly
+    becoming untrue.
+    """
+    import inspect
+    src = inspect.getsource(vr.parse_western_video_pdf)
+    assert "cur_delivery" in src
+    assert "if section != (cur_class, cur_grade):" in src,         "a reprinted section header must not reset the delivery"

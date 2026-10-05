@@ -384,7 +384,13 @@ _WV_SECTION_RE = re.compile(
     r"(Medium and Large 1-2|Medium and Large 1|Large 1-2|Large 1|Medium 1-2|Medium 1) "
     r"\(Per (?:Cwt|Head)",
 )
-_WV_DELIVERY_RE = re.compile(r"^(Current|[A-Za-z]{3}(?:-[A-Za-z]{3})?)\s+(\d.*)$")
+# Was [A-Za-z]{3}, which accepts ANY three letters -- "USD 123" parsed as a
+# delivery. It never fired, because the trailing \s+\d keeps most page
+# furniture out, but "never fired" is a property of this month's PDFs and not
+# of the pattern. Restricted to the months parse_video_pdf accepts.
+_WV_DELIVERY_RE = re.compile(
+    r"^(Current|(?:%s)(?:-(?:%s))?)\s+(\d.*)$"
+    % ("|".join(_DELIVERY_MONTHS), "|".join(_DELIVERY_MONTHS)))
 _WV_GRADE_MAP = {"Medium and Large 1": "1", "Medium and Large 1-2": "1-2"}
 
 
@@ -420,6 +426,7 @@ def parse_western_video_pdf(pdf_bytes):
     report_date = _parse_report_date(full_text)
 
     rows = []
+    unlabelled = []
     cur_region = None
     cur_class = cur_grade = None
     cur_delivery = None  # carries forward across rows within one section
@@ -438,9 +445,17 @@ def parse_western_video_pdf(pdf_bytes):
 
         m = _WV_SECTION_RE.match(stripped)
         if m:
-            cur_class, descriptor = m.group(1), m.group(2)
-            cur_grade = _WV_GRADE_MAP.get(descriptor)  # None for Large-only/Medium-only -- correctly excluded
-            cur_delivery = None
+            descriptor = m.group(2)
+            # None for Large-only/Medium-only -- correctly excluded
+            section = (m.group(1), _WV_GRADE_MAP.get(descriptor))
+            # Same continuation rule as the other two parsers: a header
+            # reprinted at a page break does not start a new delivery group. On
+            # today's report the page break landed mid-section with no reprint,
+            # which is the only reason this has never cost anything -- that is
+            # the document's shape, not the parser's.
+            if section != (cur_class, cur_grade):
+                cur_delivery = None
+            cur_class, cur_grade = section
             continue
 
         if not cur_region or cur_class != "STEERS" or cur_grade not in TARGET_GRADES:
@@ -454,9 +469,6 @@ def parse_western_video_pdf(pdf_bytes):
             data = dm.group(2)
         else:
             data = stripped
-
-        if cur_delivery != "Current":
-            continue
 
         tokens = data.split()
         try:
@@ -476,6 +488,20 @@ def parse_western_video_pdf(pdf_bytes):
         if bracket not in TARGET_BRACKETS:
             continue
 
+        if cur_delivery is None:
+            # "Oct" is an exclusion; no delivery at all is a parse failure, and
+            # the whole point of this channel is that the two stop looking alike.
+            unlabelled.append({
+                "muscle_grade": cur_grade,
+                "weight_break_low": bracket,
+                "head_count": head,
+                "avg_weight": avg_wt,
+                "avg_price": avg_price,
+            })
+            continue
+        if cur_delivery != "Current":
+            continue
+
         rows.append({
             "class": "Steers",
             "frame": "Medium and Large",
@@ -488,11 +514,7 @@ def parse_western_video_pdf(pdf_bytes):
             "region": cur_region,
         })
 
-    # Always empty: this parser carries no sticky delivery label of the kind
-    # parse_video_pdf does, so there is no state for page furniture to corrupt.
-    # Returned anyway so both parsers have one shape and fetch_all_video_rows
-    # needs no special case -- a special case is where the next one hides.
-    return report_date, rows, []
+    return report_date, rows, unlabelled
 
 
 _PARSERS = {"WESTERN_VIDEO": parse_western_video_pdf}

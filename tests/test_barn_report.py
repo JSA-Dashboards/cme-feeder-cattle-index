@@ -355,7 +355,7 @@ def test_a_complete_day_prints_one_line():
     rows += rows_for(2, "Tulsa", [MONDAY.isoformat()])
     lines = br.report_lines(make_conn(rows, published="2026-09-18"))
     assert lines == ["Barn report -- index date 2026-09-21 (Mon): "
-                     "2 of 2 expected barns reported"]
+                     "2 barns in the index; 2 of 2 expected barns reported"]
 
 
 def test_the_header_counts_the_barns_that_did_report():
@@ -416,7 +416,7 @@ def test_a_thursday_index_date_is_judged_against_thursdays():
     lines = br.report_lines(make_conn(rows, published="2026-09-16",
                                       extra_index_dates=[THURSDAY.isoformat()]))
     assert lines[0] == ("Barn report -- index date 2026-09-17 (Thu): "
-                        "0 of 1 expected barns reported")
+                        "0 barns in the index; 0 of 1 expected barns reported")
     assert len(lines) == 2, "Monday's barn is not on Thursday's roster"
     assert lines[1] == ("  missing: Carthage MO  ~80,000 lb  "
                         "(~100% of a typical Thursday)")
@@ -509,7 +509,7 @@ def test_a_day_with_no_sales_is_reported_not_skipped():
                      extra_index_dates=[labor_day.isoformat()])
     lines = br.report_lines(conn)
     assert lines[0] == ("Barn report -- index date 2026-09-07 (Mon): "
-                        "0 of 2 expected barns reported")
+                        "0 barns in the index; 0 of 2 expected barns reported")
 
 
 def test_the_index_date_is_cmes_publication_clock_not_the_newest_row():
@@ -564,7 +564,7 @@ def test_an_empty_cme_table_is_not_a_published_date():
     assert conn.execute("SELECT COUNT(*) FROM cme_ftp_daily").fetchone()[0] == 0
     lines = br.report_lines(conn)
     assert lines[0] == ("Barn report -- index date 2026-09-21 (Mon): "
-                        "0 of 1 expected barns reported")
+                        "0 barns in the index; 0 of 1 expected barns reported")
 
 
 def test_the_index_date_falls_back_when_cmes_table_is_missing():
@@ -891,3 +891,52 @@ def test_the_placeholder_check_can_actually_fail():
                "which barns reported? the roster knows",
                "SELECT 1 FROM t WHERE d BETWEEN %s AND %s"):
         assert not _PLACEHOLDER.search(ok), ok
+
+
+# ---------------------------------------------------------------------------
+# The header counts: what the day actually was, in front of the roster ratio.
+# ---------------------------------------------------------------------------
+
+def test_the_header_leads_with_the_barns_that_are_actually_in():
+    """
+    "1 of 2 expected barns reported" was true of the roster and useless about
+    2026-10-02, when 11 barns put cattle in the index and 13 filed. The roster
+    covers a minority on every weekday -- Wed 4 of 10, Thu 8 of 14, Fri 2 of 9 --
+    and no threshold fixes it: loosening MIN_PRESENT to 4 leaves Friday short at
+    6 of 9 while Thursday's roster reaches 16 against 14 barns that exist.
+    """
+    rows = _roster_pair() + rows_for(3, "Extra", [MONDAY.isoformat()],
+                                     head=100, wt=800.0)
+    lines = br.report_lines(make_conn(rows, published="2026-09-18"))
+    assert lines[0].startswith(
+        "Barn report -- index date 2026-09-21 (Mon): 2 barns in the index"), lines[0]
+
+
+def test_the_header_keeps_the_tail_app_py_parses():
+    """
+    LOAD-BEARING. app.py::_barn_header_is_healthy() reads the LAST SIX TOKENS to
+    tell a real roster from "Barn report skipped: <Type>: <msg>" -- the string
+    report_lines returns instead of raising. Anything new goes BEFORE that tail;
+    append to it and both dashboards take the loud path every healthy day.
+    """
+    rows = _roster_pair()
+    header = br.report_lines(make_conn(rows, published="2026-09-18"))[0]
+    tail = header.split()[-6:]
+    assert tail[1] == "of"
+    assert tail[3:] == ["expected", "barns", "reported"]
+    assert tail[0].isdigit() and tail[2].isdigit()
+
+
+def test_the_filed_count_appears_only_when_it_adds_something():
+    """
+    "(13 filed)" is worth a reader's attention; "(11 filed)" next to "11 barns in
+    the index" is noise. A parenthetical that is always there stops being read.
+    """
+    rows = _roster_pair()
+    conn = with_calf_rows(make_conn(rows, published="2026-09-18"),
+                          [(MONDAY.isoformat(), 1, "Big")])
+    with_extra = br.report_lines(conn)[0]
+    assert "filed)" in with_extra, "a barn that filed without qualifying must be counted"
+
+    plain = br.report_lines(make_conn(rows, published="2026-09-18"))[0]
+    assert "filed)" not in plain, "no extra filers means no parenthetical"

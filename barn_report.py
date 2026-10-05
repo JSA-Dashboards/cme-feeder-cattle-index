@@ -246,14 +246,49 @@ def report_lines(conn):
         reported = days.get(index_date.isoformat(), {})
         missing = sorted((s for s in roster if s not in reported),
                          key=lambda s: (-roster[s], s))
+        # THE REAL COUNTS FIRST, the roster ratio second.
+        #
+        # "1 of 2 expected barns reported" was true of the roster and useless as
+        # a description of 2026-10-02, when 11 barns put cattle in the index and
+        # 13 filed. The roster admits only barns selling 9 of 12 same-weekday
+        # dates, and measured across the last 8 occurrences of each weekday it
+        # covers a minority everywhere -- Mon 6 of 8, Tue 6 of 8, Wed 4 of 10,
+        # Thu 8 of 14, Fri 2 of 9.
+        #
+        # NO THRESHOLD FIXES THAT, which is why the ratio is kept rather than
+        # retuned. Loosening MIN_PRESENT to 4 takes Friday to 6 against 9 -- still
+        # short -- while Thursday's roster reaches 16 against 14 barns that exist.
+        # Barn attendance is genuinely irregular and differs by weekday, so
+        # "how many barns should report today" has no stable answer.
+        #
+        # A POUNDS COVERAGE FIGURE WAS TRIED AND IS WORSE, for now: against a
+        # 12-occurrence median it ranges 99%-733% over the last three weeks, and
+        # even a 4-occurrence median spreads 77%-258%. The ingest has grown too
+        # fast for any backward-looking norm -- direct trade only joined on
+        # 2026-08-28 -- so today always looks enormous against its own history. A
+        # 12-week baseline fully inside the current regime arrives around
+        # 2026-11-20; revisit then, and measure before trusting it.
+        #
+        # What the roster IS good at is the list below: a barn that sells nearly
+        # every week and did not is real signal. The ratio stays as the headline
+        # for that list, and the counts in front of it say what the day was.
+        #
+        # The tail "N of M expected barns reported" is LOAD-BEARING: app.py's
+        # _barn_header_is_healthy() parses the last six tokens to tell a real
+        # roster from "Barn report skipped: <Type>: <msg>". Add before it, never
+        # after, or both dashboards take the loud path on every healthy day.
+        filed = reported_without_qualifying(conn, index_date)
+        in_index = len(reported)
+        total_filed = in_index + len({s for s in filed if s not in reported})
         lines = [f"Barn report -- index date {index_date.isoformat()} "
-                 f"({index_date:%a}): {len(roster) - len(missing)} of "
+                 f"({index_date:%a}): {in_index} barns in the index"
+                 + (f" ({total_filed} filed)" if total_filed != in_index else "")
+                 + f"; {len(roster) - len(missing)} of "
                  f"{len(roster)} expected barns reported"]
         if not missing:
             return lines
         names = _names(conn)
         typical = typical_day(days, index_date)
-        filed = reported_without_qualifying(conn, index_date)
         rows = [(NOTHING_QUALIFYING if s in filed else NO_REPORT,
                  names[s], f"{roster[s]:,.0f}",
                  None if not typical else roster[s] / typical)

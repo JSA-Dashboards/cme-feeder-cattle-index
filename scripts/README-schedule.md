@@ -202,8 +202,11 @@ averaged. Configure the monitor with:
 | afternoon | `0 13 * * *` | 45 min | 13:45 |
 
 in `America/Chicago`, and put the ping URLs in `.env` as `HEALTHCHECK_URL_AM`
-and `HEALTHCHECK_URL_PM`. A single `HEALTHCHECK_URL` is still honoured for both
-slots as a fallback.
+and `HEALTHCHECK_URL_PM`. A single `HEALTHCHECK_URL` is still **pinged** for both
+slots, so an older setup does not go dark — but one five-field cron cannot
+express 07:45 and 13:00, so whichever slot it does not describe is genuinely
+unmonitored, and `healthcheck_schedule.py` reports it as such. Two checks is the
+configuration, not a preference.
 
 **That cron lives on Healthchecks.io, outside this repo.** Move the Task
 Scheduler trigger without editing the check and the monitor goes on expecting the
@@ -397,9 +400,11 @@ It is inert until configured. To turn it on:
 treat them as secrets. With no `HEALTHCHECK_URL` set the script logs
 `monitoring inert` and carries on; a monitoring outage is caught and logged as a
 warning and can never fail the pipeline. With no `HEALTHCHECK_API_KEY` the live
-comparison is skipped, and `582 passed` becoming `581 passed, 1 skipped` is the
-difference between "the monitor is watching the right time" and "nobody checked";
-`pytest -rs` prints which.
+comparison is skipped: the suite reports a skip rather than running clean, and
+that skip is the difference between "the monitor is watching the right time" and
+"nobody checked". `pytest -rs` prints the reason, which names this step. No
+absolute pass count is quoted here on purpose — it would be stale the next time
+a test is added, which is the rot this document exists to argue against.
 
 **Nothing in this repo ever requests a ping URL.** A GET on `hc-ping.com/<uuid>`
 registers a SUCCESS — it would tell the monitor the job ran when it did not,

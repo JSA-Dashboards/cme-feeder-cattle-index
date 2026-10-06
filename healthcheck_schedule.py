@@ -82,6 +82,7 @@ load_dotenv()
 REPO = Path(__file__).resolve().parent
 CHECK_RUN = REPO / "scripts" / "check_run.ps1"
 README = REPO / "scripts" / "README-schedule.md"
+ENV_FILE = REPO / ".env"
 
 # The ONE url this module ever requests. Nothing is concatenated onto it: the
 # listing is fetched UNFILTERED (no ?slug=, no ?tag=) so that a zero-match
@@ -208,16 +209,43 @@ def add_minutes(hour, minute, delta):
 # Ping URLs: compared as strings, never requested.
 # ---------------------------------------------------------------------------
 
+def env_file_value(name, text):
+    """
+    FIRST match wins, quotes stripped -- scripts/daily_update.ps1's Get-EnvValue
+    translated, including its `Select-Object -First 1`.
+
+    THIS DELIBERATELY DOES NOT CONSULT os.environ, and that is the whole point.
+    load_dotenv() defaults to override=False, so a process or Windows user
+    environment variable SHADOWS the file -- and python-dotenv resolves a
+    duplicated key LAST-wins where Get-EnvValue takes the first. Either
+    divergence lets this module audit a different check from the one
+    daily_update.ps1 actually pings, which is the "green and lying" failure
+    identifying by ping_url exists to prevent. The proof is only as strong as
+    the url resolution, so the resolution has to be the pipeline's.
+    """
+    m = re.search(r"^\s*%s\s*=\s*(\S+)" % re.escape(name), text, re.M)
+    if not m:
+        return None
+    return m.group(1).strip().strip('"').strip("'")
+
+
 def resolve_ping_urls(env=None):
     """
-    (am, pm) exactly the way scripts/daily_update.ps1 resolves them: the
-    slot-suffixed name first, the bare HEALTHCHECK_URL as a fallback for both.
-    Either may be None.
+    (am, pm) the way scripts/daily_update.ps1 resolves them: the slot-suffixed
+    name first, the bare HEALTHCHECK_URL as a fallback for both. Either may be
+    None.
+
+    `env` is for tests. With None -- which is what production uses -- the values
+    come from the .env FILE via env_file_value, never the process environment.
     """
-    env = os.environ if env is None else env
-    bare = env.get("HEALTHCHECK_URL")
-    return (env.get("HEALTHCHECK_URL_AM") or bare,
-            env.get("HEALTHCHECK_URL_PM") or bare)
+    if env is None:
+        text = ENV_FILE.read_text(encoding="utf-8") if ENV_FILE.exists() else ""
+        get = lambda n: env_file_value(n, text)
+    else:
+        get = env.get
+    bare = get("HEALTHCHECK_URL")
+    return (get("HEALTHCHECK_URL_AM") or bare,
+            get("HEALTHCHECK_URL_PM") or bare)
 
 
 def _norm(url):
@@ -252,6 +280,33 @@ def _transport():
     return _r
 
 
+def _reject_unusable_key(api_key):
+    """
+    A key `requests` cannot even put in a header is OUR misconfiguration, not an
+    outage -- but it raises from INSIDE requests before any socket opens, where
+    the broad `except` in _api_get would file it as MonitorUnreachable and the
+    live test would SKIP. A typo'd key silently switching the guard off is the
+    one outcome this module exists to prevent, so classify it here, locally,
+    first. (Sorting it out afterwards does not work: requests' InvalidHeader is
+    an OSError subclass and so cannot be told from a real ConnectionError.)
+
+    The key itself is never echoed -- it is a capability.
+    """
+    if not api_key:
+        raise MonitorRejected("HEALTHCHECK_API_KEY is set but empty.")
+    if api_key != api_key.strip() or re.search(r"[\r\n]", api_key):
+        raise MonitorRejected(
+            "HEALTHCHECK_API_KEY has surrounding whitespace or a line break, "
+            "which cannot go in an HTTP header. Check .env for a wrapped or "
+            "quoted value.")
+    try:
+        api_key.encode("latin-1")
+    except UnicodeEncodeError:
+        raise MonitorRejected(
+            "HEALTHCHECK_API_KEY contains a non-latin-1 character, which cannot "
+            "go in an HTTP header. Check .env for a smart quote.")
+
+
 def _api_get(url, api_key, timeout=(3, 10)):
     """
     GET the management API. Refuses any other host before the transport is even
@@ -262,6 +317,7 @@ def _api_get(url, api_key, timeout=(3, 10)):
             "refusing to request a url outside the management API. A GET on a "
             "ping url REGISTERS A SUCCESS and would tell the monitor the job "
             "ran when it did not.")
+    _reject_unusable_key(api_key)
     http = _transport()
     try:
         resp = http.get(url, headers={"X-Api-Key": api_key},
@@ -394,9 +450,8 @@ def _judge(slot, check, want):
                      "longer judge the same instant, which is what that file's "
                      "own comment claims they do.")
         out.append(
-            "the %s grace is %s, expected %s (%s min).%s"
-            % (label, _mins(grace), _mins(want["grace_s"]),
-               want["grace_min"], extra))
+            "the %s grace is %s, expected %s.%s"
+            % (label, _mins(grace), _mins(want["grace_s"]), extra))
 
     if (check.get("status") or "") == "paused":
         out.append("the %s is PAUSED -- it will never alert." % label)
@@ -413,6 +468,12 @@ def notes_for(checks, am_url, pm_url):
     """Reported, never asserted. See check_schedule's docstring for why."""
     notes = []
     for slot, url in (("morning", am_url), ("afternoon", pm_url)):
+        # Same guard check_schedule has. Without it an UNSET url normalises to
+        # "" and matches every row whose ping_url key is absent -- the
+        # read-only-key listing shape -- attributing an arbitrary check to a
+        # slot that is not configured at all.
+        if not _norm(url):
+            continue
         hits = [c for c in checks if _norm(c.get("ping_url")) == _norm(url)]
         if len(hits) != 1:
             continue
@@ -437,11 +498,19 @@ def audit(env=None):
     than the same object formatted differently -- the README's own philosophy,
     made machine-checkable, and the reason the no-key test is never skipped.
     """
-    env = os.environ if env is None else env
     declared = declared_from_readme(README.read_text(encoding="utf-8"))
+    # The URLS come from the .env FILE, and `env` stays None here in production
+    # so that they do. Collapsing this to os.environ -- which an earlier version
+    # of this function did -- quietly puts the resolution back on python-dotenv's
+    # last-wins, env-shadowed semantics and undoes the whole point of
+    # resolve_ping_urls. The identification is only a proof if the url is the one
+    # daily_update.ps1 pings.
     am_url, pm_url = resolve_ping_urls(env)
-
-    key = env.get("HEALTHCHECK_API_KEY")
+    # The KEY is different and is read from the process environment, which
+    # load_dotenv has already populated from .env. daily_update.ps1 never
+    # resolves it, so there is no pipeline behaviour to match, and an ordinary
+    # environment variable is what lets this run somewhere without a .env.
+    key = (os.environ if env is None else env).get("HEALTHCHECK_API_KEY")
     if not key:
         return {
             "verified": False,

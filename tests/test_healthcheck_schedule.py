@@ -70,15 +70,51 @@ def mutate(index=0, **fields):
     return rows
 
 
+def shifted_cron(cron, delta_min):
+    """
+    The declared cron moved `delta_min` minutes.
+
+    Mutations are DERIVED rather than hardcoded so that a legitimate trigger
+    move -- done properly in every place the guard binds -- leaves this suite
+    green. A fixture pinned to `45 7 * * *` would red on the one change the
+    guard exists to police, and a guard that cries wolf gets switched off.
+    """
+    hour, minute = hs.cron_time(cron)
+    total = (hour * 60 + minute + delta_min) % (24 * 60)
+    return "%d %d * * *" % (total % 60, total // 60)
+
+
+def _mutated(text, old, new, what):
+    """
+    A one-shot replace that refuses to be a no-op.
+
+    The README table and the trigger line are matched by the production parsers
+    with `\\s*` tolerance, but these fixtures use exact text. A purely cosmetic
+    re-alignment would otherwise turn the mutation into nothing and leave the
+    test below asserting about an unmodified file.
+    """
+    out = text.replace(old, new, 1)
+    assert out != text, (
+        "the %s fixture no longer matches the file, so this mutation did "
+        "nothing. Re-point it at the current wording." % what)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # local: the repo against itself. No key, no network.
 # ---------------------------------------------------------------------------
 
 def test_check_run_holds_exactly_one_trigger_and_one_grace():
-    """L1. _one() refuses a file it no longer understands."""
+    """
+    L1. _one() refuses a file it no longer understands.
+
+    Deliberately NOT pinned to 07:45. A trigger move done properly in every
+    place the guard binds must leave this suite green; L3 is what checks the
+    VALUE, by binding it to the README rather than to a literal here.
+    """
     t = hs.trigger_from_check_run(hs.CHECK_RUN.read_text(encoding="utf-8"))
-    assert (t["hour"], t["minute"]) == (7, 45)
-    assert t["grace_min"] == 45
+    assert 0 <= t["hour"] < 24 and 0 <= t["minute"] < 60
+    assert t["grace_min"] > 0
 
 
 def test_the_wake_band_literals_are_not_mistaken_for_the_grace():
@@ -164,12 +200,18 @@ def test_the_env_urls_are_two_distinct_ping_urls():
     am, pm = hs.resolve_ping_urls()
     if not am or not pm:
         pytest.skip("healthcheck urls not configured in this .env")
-    assert hs._norm(am) != hs._norm(pm), (
-        "HEALTHCHECK_URL_AM and _PM are the same check; one slot is unmonitored")
-    for url in (am, pm):
-        assert re.match(r"^https://hc-ping\.com/", url.strip().strip("'\"")), (
-            "a healthcheck url is not an hc-ping.com url (redacted: %s)"
-            % hs._redact(url))
+    # pytest.fail, NOT assert. The assertion rewriter prints every
+    # sub-expression of a failing `assert`, so `assert hs._norm(am) != ...`
+    # would put the capability url itself into the failure block -- under a
+    # message that says "redacted". A call is not instrumented, so nothing but
+    # what is written here is ever rendered.
+    if hs._norm(am) == hs._norm(pm):
+        pytest.fail("HEALTHCHECK_URL_AM and _PM are the same check (%s); one "
+                    "slot is unmonitored" % hs._redact(am))
+    for name, url in (("AM", am), ("PM", pm)):
+        if not re.match(r"^https://hc-ping\.com/", url.strip().strip("'\"")):
+            pytest.fail("HEALTHCHECK_URL_%s is not an hc-ping.com url "
+                        "(redacted: %s)" % (name, hs._redact(url)))
 
 
 # ---------------------------------------------------------------------------
@@ -185,30 +227,77 @@ def test_M0_the_baseline_is_clean():
     assert judge(_good_listing()) == []
 
 
-def test_M1_the_2026_09_30_incident():
-    """The trigger had moved to 08:00 and the check still said `30 7 * * *`."""
-    out = judge(mutate(0, schedule="30 7 * * *"))
+def test_M1_a_cron_EARLIER_than_declared_the_2026_09_30_shape():
+    """
+    The trigger had moved to 08:00 and the check still said `30 7 * * *`, so it
+    alerted before a healthy run could finish and went red every morning.
+
+    The stale cron is derived by shifting the declared one 15 minutes earlier,
+    so this stays true if the trigger legitimately moves.
+    """
+    d = declared()["morning"]
+    stale = shifted_cron(d["cron"], -15)
+    out = judge(mutate(0, schedule=stale))
+    hour, minute = hs.cron_time(stale)
     assert len(out) == 1
-    assert "08:15" in out[0], out[0]          # what that stale cron alerts at
-    assert "`45 7 * * *`" in out[0], out[0]   # the exact console edit
+    assert hs.add_minutes(hour, minute, d["grace_min"]) in out[0], out[0]
+    assert "`%s`" % d["cron"] in out[0], out[0]
 
 
-def test_M2_the_still_open_2026_10_01_incident():
+def test_M2_a_cron_LATER_than_declared_the_still_open_2026_10_01_shape():
     """
-    THE HEADLINE. `0 8 * * *` against a 07:45 trigger: healthchecks.io cannot
-    report this itself, because moving a job earlier never trips a stale cron.
-    The message must name both the time it alerts and the time it should.
+    THE HEADLINE, and the case Healthchecks.io structurally cannot report about
+    itself: a cron LATER than the trigger never goes red, because moving a job
+    earlier cannot trip it. The only symptom is a monitor sitting loose.
+
+    The message must name both the time it alerts and the time the repo judges
+    against, because those two numbers are what get the console edited.
     """
+    d = declared()["morning"]
+    stale = shifted_cron(d["cron"], +15)
+    out = judge(mutate(0, schedule=stale))
+    hour, minute = hs.cron_time(stale)
+    assert len(out) == 1
+    assert hs.add_minutes(hour, minute, d["grace_min"]) in out[0], out[0]
+    assert d["alert_hhmm"] in out[0], out[0]
+    assert "`%s`" % d["cron"] in out[0], out[0]
+
+
+def test_M2b_that_shape_is_todays_open_incident_verbatim():
+    """
+    Pins M2 to history while the declared trigger is still 07:45. Guarded, so a
+    legitimate move retires this rather than reddening it -- the incident is a
+    fact about 2026-10-01, not a requirement on the future.
+    """
+    d = declared()["morning"]
+    if d["cron"] != "45 7 * * *":
+        pytest.skip("the morning trigger has moved since 2026-10-01")
+    assert shifted_cron(d["cron"], +15) == "0 8 * * *"
+    assert shifted_cron(d["cron"], -15) == "30 7 * * *"
     out = judge(mutate(0, schedule="0 8 * * *"))
-    assert len(out) == 1
-    assert "08:45" in out[0], out[0]          # what the stale cron alerts at
-    assert "08:30" in out[0], out[0]          # what the repo judges against
-    assert "`45 7 * * *`" in out[0], out[0]   # the exact console edit
+    assert "08:45" in out[0] and "08:30" in out[0], out[0]
 
 
 def test_M3_the_afternoon_slot_is_really_covered():
     out = judge(mutate(1, schedule="0 14 * * *"))
     assert len(out) == 1 and "afternoon" in out[0]
+
+
+def test_M3b_every_judged_message_names_the_slot_it_is_about():
+    """
+    The rest of the M-tests assert `len(out) == 1` plus a substring drawn from a
+    value or a time, and never that the message names WHICH check it means. A
+    _judge that labelled every message "afternoon check" would pass all of them
+    and send Ross to the wrong console row at 08:30.
+    """
+    for index, slot in ((0, "morning"), (1, "afternoon")):
+        for field in ({"schedule": "0 23 * * *"}, {"tz": "UTC"},
+                      {"grace": 60}, {"status": "paused"},
+                      {"schedule": "", "timeout": 86400}):
+            out = judge(mutate(index, **field))
+            assert out, (slot, field)
+            for message in out:
+                assert slot in message, (slot, field, message)
 
 
 def test_M4_an_interval_check_is_rejected():
@@ -273,6 +362,35 @@ def test_M11_one_url_for_both_slots_is_rejected():
     assert any("same check" in v for v in out)
 
 
+def test_M21_an_unset_slot_url_is_its_own_violation():
+    """
+    A machine with only HEALTHCHECK_URL_AM configured. Without this the branch
+    that reports an unmonitored slot is dead to the suite and could be deleted
+    with everything still green -- and the fall-through message would blame
+    hc-ping.com for 404ing a url that was never set.
+    """
+    out = judge(_good_listing(), pm=None)
+    assert len(out) == 1
+    assert "HEALTHCHECK_URL_PM" in out[0] and "unmonitored" in out[0], out[0]
+    assert "404" not in out[0], out[0]
+
+
+def test_M21b_an_unset_url_produces_no_note_either():
+    """
+    notes_for() has the same guard for the same reason: an unset url normalises
+    to "" and would otherwise match every row whose ping_url key is absent,
+    attributing an arbitrary check to a slot that is not configured.
+    """
+    # Exactly ONE ping_url-less row, deliberately. With two, both match the
+    # empty string, len(hits) != 1 drops them, and the test passes whether the
+    # guard is there or not -- which is how the first version of this test
+    # failed to kill the mutant it was written for.
+    rows = [{k: v for k, v in c.items() if k != "ping_url"}
+            for c in _good_listing()[:1]]
+    assert hs.notes_for(rows, None, None) == []
+    assert hs.notes_for(rows, None, PM_URL) == []
+
+
 def test_M12_a_read_only_key_fails_rather_than_matching_nothing():
     """
     The trap the design turns on. With no ping_url, name/slug matching would
@@ -321,41 +439,88 @@ def test_M16_nothing_here_is_hardcoded_to_0745():
 
 def test_M16b_the_check_run_parser_is_not_hardcoded_either():
     src = hs.CHECK_RUN.read_text(encoding="utf-8")
-    moved = src.replace("$trigH = 7; $trigM = 45", "$trigH = 6; $trigM = 15", 1)
-    assert moved != src
+    moved = _mutated(src, "$trigH = 7; $trigM = 45", "$trigH = 6; $trigM = 15",
+                     "check_run.ps1 trigger line")
     t = hs.trigger_from_check_run(moved)
     assert (t["hour"], t["minute"]) == (6, 15)
 
 
+def test_M16c_the_GRACE_expectation_is_not_hardcoded_to_2700():
+    """
+    M16's twin for the other half of the live comparison. M16 moves the cron;
+    this moves the grace. A literal 2700 in _judge passes every other test here
+    -- M7 included, since it feeds 1800 and stays red either way -- and fails
+    only this one.
+    """
+    d = declared()
+    d["morning"] = dict(d["morning"], grace_min=30, grace_s=1800,
+                        alert_hhmm=hs.add_minutes(
+                            *hs.cron_time(d["morning"]["cron"]), 30))
+    out = judge(_good_listing(), d=d)       # listing still carries 2700
+    assert len(out) == 1 and "2700" in out[0], out
+    assert judge(mutate(0, grace=1800), d=d) == []
+
+
+def test_M16d_the_AFTERNOON_expectation_is_not_hardcoded_either():
+    """
+    The slot with NO second repo-side witness: the README afternoon row is the
+    only thing driving it, because check_run.ps1 judges only the first run of
+    the day. A literal `0 13 * * *` in the judging would leave 13:00 unpinned,
+    and M3 cannot tell the difference -- it feeds a bad cron and checks that
+    something was said, which a hardcoded expectation also does.
+    """
+    d = declared()
+    moved = shifted_cron(d["afternoon"]["cron"], +30)
+    d["afternoon"] = dict(d["afternoon"], cron=moved,
+                          alert_hhmm=hs.add_minutes(
+                              *hs.cron_time(moved), d["afternoon"]["grace_min"]))
+    out = judge(_good_listing(), d=d)       # listing still says 0 13 * * *
+    assert len(out) == 1 and "`%s`" % moved in out[0], out
+    assert judge(mutate(1, schedule=moved), d=d) == []
+
+
+def row_text(slot, cron, grace_min, alert):
+    """The README table row as the file writes it, rebuilt from live values."""
+    return "| %s | `%s` | %d min | %s |" % (slot, cron, grace_min, alert)
+
+
+def morning_row(**over):
+    d = dict(declared()["morning"], **over)
+    return row_text("morning", d["cron"], d["grace_min"], d["alert_hhmm"])
+
+
 def test_M17_a_readme_cron_edit_breaks_the_local_chain():
     """The README morning row moved and check_run.ps1 left behind."""
-    md = hs.README.read_text(encoding="utf-8").replace(
-        "| morning | `45 7 * * *` | 45 min | 08:30 |",
-        "| morning | `0 8 * * *` | 45 min | 08:30 |", 1)
+    md = _mutated(hs.README.read_text(encoding="utf-8"), morning_row(),
+                  morning_row(cron=shifted_cron(declared()["morning"]["cron"], 15)),
+                  "README morning row")
     hour, minute = hs.cron_time(hs.declared_from_readme(md)["morning"]["cron"])
     t = hs.trigger_from_check_run(hs.CHECK_RUN.read_text(encoding="utf-8"))
     assert (hour, minute) != (t["hour"], t["minute"])
 
 
 def test_M18_a_stale_alerts_column_is_caught_by_its_own_arithmetic():
-    md = hs.README.read_text(encoding="utf-8").replace(
-        "| morning | `45 7 * * *` | 45 min | 08:30 |",
-        "| morning | `45 7 * * *` | 45 min | 08:45 |", 1)
+    md = _mutated(hs.README.read_text(encoding="utf-8"), morning_row(),
+                  morning_row(alert_hhmm=hs.add_minutes(
+                      *hs.cron_time(declared()["morning"]["cron"]), 999)),
+                  "README morning row")
     row = hs.declared_from_readme(md)["morning"]
     hour, minute = hs.cron_time(row["cron"])
     assert hs.add_minutes(hour, minute, row["grace_min"]) != row["alert_hhmm"]
 
 
 def test_M19_a_deleted_readme_row_fails_loudly():
-    md = hs.README.read_text(encoding="utf-8").replace(
-        "| morning | `45 7 * * *` | 45 min | 08:30 |\n", "", 1)
+    md = _mutated(hs.README.read_text(encoding="utf-8"),
+                  morning_row() + "\n", "", "README morning row")
     with pytest.raises(AssertionError, match="exactly one"):
         hs.declared_from_readme(md)
 
 
 def test_M20_a_duplicated_trigger_literal_fails_loudly():
-    src = hs.CHECK_RUN.read_text(encoding="utf-8").replace(
-        "$trigH = 7; $trigM = 45", "$trigH = 7; $trigM = 45\n$trigH = 7; $trigM = 45", 1)
+    line = re.search(r"\$trigH\s*=\s*\d{1,2}\s*;\s*\$trigM\s*=\s*\d{1,2}",
+                     hs.CHECK_RUN.read_text(encoding="utf-8")).group(0)
+    src = _mutated(hs.CHECK_RUN.read_text(encoding="utf-8"), line,
+                   line + "\n" + line, "check_run.ps1 trigger line")
     with pytest.raises(AssertionError, match="exactly one"):
         hs.trigger_from_check_run(src)
 
@@ -407,6 +572,36 @@ def test_P1_the_whole_audit_makes_exactly_one_request_to_the_api():
     assert kw["headers"] == {"X-Api-Key": "hc_SECRET_TOKEN"}
     # the key travels in the header and nowhere else -- never a query string
     assert "hc_SECRET_TOKEN" not in url
+
+
+def test_P1b_audit_propagates_a_violation_from_the_listing_it_fetched():
+    """
+    audit() is the ONLY function _main(), check_run.ps1 section 5 and the live
+    test ever call. Every M-test calls check_schedule() directly, and P1, P5 and
+    S1 only ever watch audit() return []. Without this, gutting audit() to
+    always report "violations": [] leaves the whole suite green while the
+    still-open 2026-10-01 cron goes unreported -- which is the production path,
+    not a corner of it.
+    """
+    class Stale(Recorder):
+        def get(self, url, **kw):
+            assert "hc-ping.com" not in url
+            self.calls.append((url, kw))
+            return type("R", (), {
+                "status_code": 200,
+                "json": staticmethod(
+                    lambda: {"checks": mutate(0, schedule="0 8 * * *")})})()
+
+    hs.requests = Stale()
+    try:
+        result = hs.audit({"HEALTHCHECK_API_KEY": "hc_SECRET_TOKEN",
+                           "HEALTHCHECK_URL_AM": AM_URL,
+                           "HEALTHCHECK_URL_PM": PM_URL})
+    finally:
+        del hs.requests
+    assert result["verified"] is True
+    assert len(result["violations"]) == 1, result["violations"]
+    assert "08:30" in result["violations"][0]
 
 
 def test_P2_a_ping_url_is_refused_before_the_transport_is_touched():
@@ -478,6 +673,119 @@ def test_P6b_a_rejected_key_is_not_echoed():
     finally:
         del hs.requests
     assert "hc_SECRET_TOKEN" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# url resolution: it must be the PIPELINE's, not python's.
+# ---------------------------------------------------------------------------
+
+def test_the_url_is_resolved_the_way_daily_update_ps1_resolves_it(tmp_path, monkeypatch):
+    """
+    FIRST match wins, and the process environment is ignored -- because
+    Get-EnvValue in scripts/daily_update.ps1 does both.
+
+    This is not pedantry. python-dotenv is LAST-wins on a duplicated key, and
+    load_dotenv() defaults to override=False so a Windows user variable SHADOWS
+    the file. Either divergence would let this module identify, audit and bless
+    a different check from the one that actually receives the morning ping --
+    green while the real dead-man's switch is stale. Identifying by ping_url is
+    only a proof if the url is the one the pipeline uses.
+    """
+    env = tmp_path / ".env"
+    env.write_text(
+        "HEALTHCHECK_URL_AM=https://hc-ping.com/first-wins\n"
+        "HEALTHCHECK_URL_AM=https://hc-ping.com/second-loses\n"
+        "HEALTHCHECK_URL_PM=https://hc-ping.com/pm\n", encoding="utf-8")
+    monkeypatch.setattr(hs, "ENV_FILE", env)
+    monkeypatch.setenv("HEALTHCHECK_URL_AM", "https://hc-ping.com/process-must-lose")
+    am, pm = hs.resolve_ping_urls()
+    assert am == "https://hc-ping.com/first-wins"
+    assert pm == "https://hc-ping.com/pm"
+
+
+def test_audit_ITSELF_resolves_from_the_file_not_the_process(tmp_path, monkeypatch):
+    """
+    The production entry point, not just the helper.
+
+    This exists because the first version of audit() did
+    `env = os.environ if env is None else env` and then handed that to
+    resolve_ping_urls -- which silently put resolution back on os.environ for
+    every real caller (check_run.ps1 section 5 and the live test both call
+    audit() with no arguments), while the helper's own test went on passing.
+    A guard on a helper is not a guard on the path production takes.
+    """
+    env = tmp_path / ".env"
+    env.write_text("HEALTHCHECK_URL_AM=https://hc-ping.com/from-the-file\n"
+                   "HEALTHCHECK_URL_PM=https://hc-ping.com/pm-file\n",
+                   encoding="utf-8")
+    monkeypatch.setattr(hs, "ENV_FILE", env)
+    monkeypatch.setenv("HEALTHCHECK_URL_AM", "https://hc-ping.com/from-the-process")
+    monkeypatch.setenv("HEALTHCHECK_API_KEY", "hc_SECRET_TOKEN")
+
+    d = declared()
+    listing = [
+        {"name": "m", "ping_url": "https://hc-ping.com/from-the-file",
+         "schedule": d["morning"]["cron"], "grace": d["morning"]["grace_s"],
+         "tz": hs.TZ, "status": "up"},
+        {"name": "a", "ping_url": "https://hc-ping.com/pm-file",
+         "schedule": d["afternoon"]["cron"], "grace": d["afternoon"]["grace_s"],
+         "tz": hs.TZ, "status": "up"},
+    ]
+
+    class Stub(Recorder):
+        def get(self, url, **kw):
+            self.calls.append((url, kw))
+            return type("R", (), {"status_code": 200,
+                                  "json": staticmethod(lambda: {"checks": listing})})()
+
+    hs.requests = Stub()
+    try:
+        result = hs.audit()
+    finally:
+        del hs.requests
+    # If audit resolved from the process environment, the morning url would be
+    # /from-the-process, match nothing, and this would be a violation.
+    assert result["violations"] == [], result["violations"]
+
+
+def test_a_bare_HEALTHCHECK_URL_falls_back_for_both_slots(tmp_path, monkeypatch):
+    """daily_update.ps1 honours it, so resolution must -- check_schedule then
+    reports the uncovered slot, which is a different question."""
+    env = tmp_path / ".env"
+    env.write_text("HEALTHCHECK_URL=https://hc-ping.com/single\n", encoding="utf-8")
+    monkeypatch.setattr(hs, "ENV_FILE", env)
+    assert hs.resolve_ping_urls() == ("https://hc-ping.com/single",) * 2
+
+
+def test_quotes_and_padding_are_stripped_like_get_envvalue():
+    text = '  HEALTHCHECK_URL_AM = "https://hc-ping.com/quoted"  \n'
+    assert hs.env_file_value("HEALTHCHECK_URL_AM", text) == \
+        "https://hc-ping.com/quoted"
+    assert hs.env_file_value("NOT_PRESENT", text) is None
+
+
+def test_a_malformed_api_key_FAILS_rather_than_skipping():
+    """
+    A key `requests` cannot put in a header raises from INSIDE requests, before
+    any socket -- where _api_get's broad except would file it as
+    MonitorUnreachable, and the live test skips on that. A typo'd key silently
+    switching the guard off is the one outcome this module exists to prevent.
+    """
+    rec = Recorder()
+    hs.requests = rec
+    try:
+        for bad in ("", " leading", "trailing\n", "mid\rbreak", "smart’quote"):
+            with pytest.raises(hs.MonitorRejected):
+                hs._api_get(hs.API_URL, bad)
+    finally:
+        del hs.requests
+    assert rec.calls == [], "classification must precede the request"
+
+
+def test_an_ordinary_key_is_not_rejected():
+    """The other half: without this, a _reject_unusable_key that refused
+    everything would satisfy the test above."""
+    hs._reject_unusable_key("hc_AbC123-xyz_456")
 
 
 # ---------------------------------------------------------------------------

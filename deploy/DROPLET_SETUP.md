@@ -81,20 +81,27 @@ ssh root@137.184.195.51 "/opt/cme-feeder-cattle-index/deploy/run_update.sh; echo
 sale-barn locations plus the weekly Direct/Video PDF reports. Confirm both logs
 end `rc=0` in `/opt/cme-feeder-cattle-index/logs/`.
 
-## 5. Install the cron jobs
+## 5. The cron jobs
 
-Matches the two old scheduled tasks' times (America/Chicago — confirm with
-`timedatectl`, this droplet is already set to it):
+Times are America/Chicago, the droplet's own timezone (`timedatectl`). These
+are the live crontab lines; edit them on the box with `crontab -e`:
 
-```bash
-ssh root@137.184.195.51 "( crontab -l 2>/dev/null | grep -v -e cme-feeder-cattle-index
-  echo '15 8 * * 1-5 /opt/cme-feeder-cattle-index/deploy/run_update.sh'
-  echo '0 15 * * 1-5 /opt/cme-feeder-cattle-index/deploy/run_ftp_check.sh' ) | crontab -"
-ssh root@137.184.195.51 "crontab -l"
+```
+45 8 * * 1-5 /opt/alerting/cron-alert "CME feeder index update" "/opt/cme-feeder-cattle-index/logs/update_*.log" /opt/cme-feeder-cattle-index/deploy/run_update.sh
+0 15 * * 1-5 /opt/alerting/cron-alert "CME FTP check" "/opt/cme-feeder-cattle-index/logs/ftp_check_*.log" /opt/cme-feeder-cattle-index/deploy/run_ftp_check.sh
 ```
 
-- **8:15 AM Central, Mon–Fri** — `run_update.sh`: official CME files (Step 0) +
-  full MARS/Direct/Video reconstruction (Step 1)
+`/opt/alerting/cron-alert` emails on failure and pings healthchecks.io, where the
+check's slug comes from the job name. So keep the names, and if you change a
+time, change that check's schedule too.
+
+- **8:45 AM Central, Mon–Fri** — `run_update.sh`: official CME files (Step 0) +
+  full MARS/Direct/Video reconstruction (Step 1). Moved from 8:15 on
+  2026-10-05. Ross's desktop job (07:45) pushes to the same
+  `JSA.CME_FEEDER_CATTLE` tables at about 08:00–08:28, deleting and then
+  reloading them. A droplet run inside that window can read a half-loaded
+  table or race the reload. 8:45 starts after that window, but only by timing:
+  nothing locks across the two machines.
 - **3:00 PM Central, Mon–Fri** — `run_ftp_check.sh`: official CME files only,
   catches anything CME published since the morning (mid-afternoon is their
   typical publish time)

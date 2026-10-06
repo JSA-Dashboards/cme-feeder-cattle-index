@@ -36,7 +36,7 @@ def _base(**over):
         "window": [("2026-10-02", 7050, 816.0, 333.73)],
         "cme_date": "2026-10-01", "cme_value": 336.84, "cme_head": 21854,
         "scored_call": 337.15, "scored_head": 21854, "peers": [],
-        "live_peers": [("CIH", 337.76)], "prior_call": None, "late_published": [], "barn_lines": ["Barn report -- 2 of 2 expected barns reported"],
+        "live_peers": [("CIH", 337.76)], "prior_call": None, "late_published": [], "coverage": [], "barn_lines": ["Barn report -- 2 of 2 expected barns reported"],
         "ingest_warnings": [],
     }
     d.update(over)
@@ -348,3 +348,40 @@ def test_an_unexplained_move_gets_no_excuse():
                              late_published=[]), slot="pm")[1])
     assert "Moved since" in t
     assert "Why:" not in t, "an unexplained move must stay unexplained"
+
+
+# ---------------------------------------------------------------------------
+# Head CME published and we do not hold.
+# ---------------------------------------------------------------------------
+
+BILLINGS = [{"date": "2026-10-02", "our_head": 7050, "cme_head": 7082,
+             "short": 32}]
+
+
+def test_a_coverage_shortfall_reaches_the_body():
+    """
+    2026-10-02: AMS runs four cattle auctions in Billings and the roster carried
+    two, so CME printed 7,082 head and we held 7,050. Nothing else could see it
+    -- mars_census only asks about roster slugs, and the roster test compares
+    names, which 1774 kept reachable while its Friday sibling was missing.
+    """
+    t = _text(ne.build(_base(coverage=BILLINGS))[1])
+    assert "CME has published and we do not hold" in t
+    assert "32" in t and "2026-10-02" in t
+
+
+def test_it_says_this_is_not_a_timing_lag():
+    """
+    The distinction that decides what to do about it. A barn that has not
+    reported yet will arrive; head in a date CME has ALREADY printed will not.
+    Reading the second as the first is how a roster gap survives for weeks.
+    """
+    t = _text(ne.build(_base(coverage=BILLINGS))[1])
+    assert "Not a timing lag" in t
+    assert "already printed" in t
+
+
+def test_a_clean_run_shows_no_coverage_block():
+    t = _text(ne.build(_base(coverage=[]))[1])
+    assert "CME has published and we do not hold" not in t, \
+        "a block that renders every day is a block nobody reads"

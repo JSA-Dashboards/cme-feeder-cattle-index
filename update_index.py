@@ -913,6 +913,53 @@ def write_census(payloads, since, until, locations, roster):
         print(line)
 
 
+def print_coverage_check(conn):
+    """
+    Head CME published that we do not hold, from cme_coverage.
+
+    RUNS BESIDE THE BARN REPORT, AFTER THE CME PULL, AND FOR THE SAME REASON:
+    it compares fci_daily against cme_ftp_daily, so inside run_update() it would
+    read a cme_ftp_daily one print stale and silently skip the newest date --
+    the one most likely to be short. print_barn_report's docstring records what
+    that cost when it happened there.
+
+    THIS IS THE CHECK NOTHING ELSE MAKES. mars_census compares against AMS but
+    can only ask about slugs ON THE ROSTER, so a missing slug is a question
+    nobody asks; the roster test compares NAMES, so a second report in a city
+    the roster already names is invisible. CME's file is built from the whole
+    sample. On 2026-10-02 that was 32 head of Billings -- AMS runs four cattle
+    auctions in that city and the roster carried two.
+
+    Empty on an ordinary day: over the 25 dates since 2026-08-28 it found three,
+    two of them a single head.
+    """
+    try:
+        import cme_coverage
+        short = cme_coverage.daily_shortfalls(conn)
+    except Exception as e:                      # noqa: BLE001 -- diagnostic only
+        print(f"  [!] coverage check skipped: {type(e).__name__}: {e}")
+        return
+    if not short:
+        print("  Coverage: every CME print since "
+              f"{cme_coverage.DIRECT_TRADE_FROM} is matched head for head.")
+        return
+    total = sum(r["short"] for r in short)
+    print(f"  *** COVERAGE: CME published {total:,} head on {len(short)} date(s) "
+          f"that we do not hold. These are cattle IN the published index and "
+          f"absent from ours:")
+    for r in short:
+        line = (f"        {r['date']}  ours {r['our_head']:,}  "
+                f"CME {r['cme_head']:,}  short {r['short']:,}")
+        try:
+            where = cme_coverage.locate(conn, r["date"])
+        except Exception:                       # noqa: BLE001
+            where = []
+        if where:
+            line += "  -- " + ", ".join(
+                f"{w['cme_location']} {w['short']:,}" for w in where[:3])
+        print(line)
+
+
 def print_barn_report(conn):
     """
     Which barns the index date is still waiting on, and how big they are.
@@ -962,7 +1009,8 @@ if __name__ == "__main__":
                          help="ISO date to pull from (default: continue from last stored date, "
                               "or 2026-01-24 on first run)")
     parser.add_argument("--barn-report-only", action="store_true",
-                         help="print the missing-barn report and exit, fetching and "
+                         help="print the missing-barn report and the CME coverage "
+                              "check, then exit, fetching and "
                               "computing nothing. The daily job runs this AFTER the CME "
                               "pull, because the report names the index date derived from "
                               "MAX(cme_ftp_daily) and inside the ingest that value is one "
@@ -973,6 +1021,9 @@ if __name__ == "__main__":
         conn = db.get_conn()
         try:
             print_barn_report(conn)
+            # Same slot, same reason: both read cme_ftp_daily and both are
+            # wrong inside the ingest, where that table is one print stale.
+            print_coverage_check(conn)
         finally:
             conn.close()
         raise SystemExit(0)

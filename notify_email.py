@@ -197,6 +197,16 @@ def gather(index_date=None):
     except Exception as e:                     # noqa: BLE001 -- diagnostics only
         d["barn_lines"] = ["Barn report unavailable: %s" % e]
 
+    # Head CME published and we do not hold. The one check that can see a barn
+    # the roster has never heard of -- mars_census only asks about roster slugs,
+    # and the roster test compares names. 32 head of Billings on 2026-10-02.
+    try:
+        import cme_coverage
+        d["coverage"] = cme_coverage.daily_shortfalls(conn)
+    except Exception as e:                     # noqa: BLE001 -- diagnostic only
+        print("  [warn] coverage check unavailable: %s: %s" % (type(e).__name__, e))
+        d["coverage"] = []
+
     conn.close()
     d["ingest_warnings"] = _ingest_warnings()
     return d
@@ -341,6 +351,23 @@ def build(d, slot="am", failed=None):
                 f'<code>python add_peer_estimate.py --date {d["index_date"]} '
                 f'--source CIH --value &lt;x&gt;</code></p>')
 
+    # --- Head CME has and we do not ------------------------------------------
+    cov = ""
+    short = d.get("coverage") or []
+    if short:
+        tot = sum(r["short"] for r in short)
+        li = "".join(
+            f'<li>{r["date"]}: ours {r["our_head"]:,}, CME {r["cme_head"]:,} '
+            f'&mdash; <b>short {r["short"]:,}</b></li>' for r in short)
+        cov = (f'<p style="margin:18px 0 6px;color:{RED};font-weight:600">'
+               f'{tot:,} head CME has published and we do not hold</p>'
+               f'<p style="margin:0 0 4px;font:13px system-ui,Segoe UI,Arial;'
+               f'color:{MUTED}">Not a timing lag: CME has already printed these '
+               f'dates. Our estimate for any window containing them is short by '
+               f'this much until the roster or the ingest is fixed.</p>'
+               f'<ul style="margin:0 0 0 18px;padding:0;font:13px system-ui,'
+               f'Segoe UI,Arial">{li}</ul>')
+
     # --- Is the sample whole? ------------------------------------------------
     barn = ""
     if d.get("barn_lines"):
@@ -420,6 +447,7 @@ text-transform:uppercase">JSA FCI Estimate · {label}</p>
 {daily}
 {moved}
 {warn}
+{cov}
 {peercheck}
 {barn}
 <p style="margin:18px 0 6px;font-weight:600">7-day window</p>

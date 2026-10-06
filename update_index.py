@@ -249,7 +249,29 @@ def fetch_slug(slug_id, since_str, until_str, auth):
 def qualifying_rows(rows):
     """
     CME Rule 10203.A.1's sample: 700-899 lb Medium and Large Frame #1 and #1-2
-    feeder STEERS, from a final (not preliminary) report.
+    feeder STEERS.
+
+    PRELIMINARY REPORTS ARE INCLUDED as of 2026-10-06. They were excluded until
+    then, and the cost was a standing lag at one barn: Oklahoma National
+    Stockyards (slug 1280, "Oklahoma City") files Preliminary on the sale day
+    and Finals later, so its ~1,100 Monday head reached the index only after the
+    morning call. It was late on 09-14, 09-21, 09-28 and 10-05 -- four Mondays
+    running, each time about 24% of a typical Monday's pounds.
+
+    On 2026-10-05 it was the ONLY barn in the 89-slug roster held back by the
+    flag: every other barn with AMS data that day was Final and already held,
+    head for head. So accepting Preliminary generally rather than allow-listing
+    one slug changes nothing today, and avoids a special case that would have to
+    be maintained and would be wrong the first time a second barn did this.
+
+    THE PRICE OF ADMITTING THEM is that a preliminary row is the one most likely
+    to be revised, and mars_sales was written insert-if-absent with avg_price
+    and head_count IN the key -- so a revision used to land as a SECOND row with
+    the first still there. That is not hypothetical: McAlester OK published 15
+    head at $328.32, corrected to 14 at $330.29, and we held both. See
+    store_slug_rows(), which now replaces a slug's rows for a date instead of
+    accumulating them. Admitting preliminary without that change would have
+    traded a half-day lag for a silent double count.
 
     DO NOT ADD A lot_desc EXCLUSION HERE. Cattle reported as fancy, thin,
     fleshy, gaunt or full USED to be excluded, and CME's own explainer PDF
@@ -284,10 +306,61 @@ def qualifying_rows(rows):
                 and r.get("frame") == "Medium and Large"
                 and r.get("muscle_grade") in TARGET_GRADES
                 and r.get("weight_break_low") in TARGET_BRACKETS
-                and r.get("final_ind") == "Final"
+                and r.get("final_ind") in ("Final", "Preliminary")
                 and r.get("head_count") and r.get("avg_weight") and r.get("avg_price")):
             out.append(r)
     return out
+
+
+def store_slug_rows(conn, slug_id, loc, qrows):
+    """
+    Make mars_sales match what AMS serves for this slug's dates: REPLACE the
+    slug's rows for every date in qrows, then insert the current set.
+
+    WHY NOT merge_ignore, WHICH THIS REPLACES. That inserted if absent and never
+    updated, with avg_price and head_count inside the key -- so a revised lot
+    arrived as a NEW row and the old one stayed. It happened twice. McAlester OK
+    published 15 head at $328.32, corrected to 14 at $330.29, and we held five
+    lots where AMS served four; Mitchell SD withdrew a 6-head lot at $275.00 and
+    we published it for five days. Both were found by mars_census, long after
+    they had moved the index.
+
+    That was survivable while every row came from a FINAL report. Preliminary
+    rows are exactly the ones AMS revises, so admitting them without this would
+    have made the double count routine rather than rare.
+
+    AN EMPTY FETCH DELETES NOTHING, and that is STRUCTURAL rather than guarded:
+    the deletes are driven off by_date, which is built from qrows, so no rows
+    means no dates means no DELETE runs. The early return below states the
+    intent and is redundant -- removing it changes no behaviour, which I
+    confirmed by removing it and watching every test still pass.
+
+    What the tests DO catch is the real hazard: a blanket
+    "DELETE ... WHERE slug_id = ?" outside the loop. Add one and
+    test_an_empty_fetch_deletes_nothing and
+    test_the_replace_is_scoped_to_one_slug_and_one_date both fail. The replace
+    is scoped to the dates the fetch actually returned, for that one slug.
+    """
+    if not qrows:
+        return
+    cols = ["report_date", "raw_date", "slug_id", "location", "state",
+            "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
+    by_date = {}
+    for r in qrows:
+        iso_date, raw_iso = derived_dates(r)
+        by_date.setdefault(iso_date, []).append((r, raw_iso))
+    ph = db.placeholders(2).split(",")
+    for iso_date, items in by_date.items():
+        conn.cursor().execute(
+            "DELETE FROM mars_sales WHERE report_date = {} AND slug_id = {}".format(
+                ph[0].strip(), ph[1].strip()), (iso_date, slug_id))
+        for r, raw_iso in items:
+            values = (iso_date, raw_iso, slug_id, loc["city"] or loc["title"],
+                      loc["state"], r["weight_break_low"], r["muscle_grade"],
+                      r["head_count"], r["avg_weight"], r["avg_price"])
+            db.merge_replace(conn, "mars_sales", cols, values,
+                             ["report_date", "slug_id", "weight_low",
+                              "muscle_grade", "avg_price", "head_count"])
 
 
 def mdY(d: date) -> str:
@@ -545,19 +618,13 @@ def run_update(since: date, verbose=True):
         rows = payload.get("results", [])
         census_payloads[slug_id] = payload
         qrows = qualifying_rows(rows)
-        for r in qrows:
-            # One derivation for the insert path and the census both -- see
-            # derived_dates() for why a second copy would be a false-positive
-            # generator rather than a tidy-up.
-            iso_date, raw_iso = derived_dates(r)
-            cols = ["report_date", "raw_date", "slug_id", "location", "state",
-                    "weight_low", "muscle_grade", "head_count", "avg_weight", "avg_price"]
-            values = (iso_date, raw_iso, slug_id, loc["city"] or loc["title"], loc["state"],
-                      r["weight_break_low"], r["muscle_grade"],
-                      r["head_count"], r["avg_weight"], r["avg_price"])
-            db.merge_ignore(conn, "mars_sales", cols, values,
-                             ["report_date", "slug_id", "weight_low", "muscle_grade", "avg_price", "head_count"])
+        store_slug_rows(conn, slug_id, loc, qrows)
         total_inserted += len(qrows)
+        prelim = [r for r in qrows if r.get("final_ind") == "Preliminary"]
+        if prelim and verbose:
+            print(f"    [preliminary] {loc['city'] or loc['title']}: "
+                  f"{sum(int(r['head_count']) for r in prelim):,} head in "
+                  f"{len(prelim)} row(s) -- AMS has not finalised these yet")
         if verbose and qrows:
             print(f"  {loc['state']:>2} {loc['city'] or loc['title']:<28} +{len(qrows)} rows")
 

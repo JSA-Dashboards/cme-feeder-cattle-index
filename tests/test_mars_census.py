@@ -1642,8 +1642,38 @@ def _run_update_body():
     raise AssertionError("run_update() not found in update_index.py")
 
 
-def _calls_in(node):
-    return [ast.unparse(n.func) for n in ast.walk(node) if isinstance(n, ast.Call)]
+def _insert_path_bodies():
+    """
+    run_update() AND the helpers it delegates the row insert to.
+
+    The auction insert moved into store_slug_rows() on 2026-10-06, when the
+    merge became a replace-the-slug-day so a revised preliminary lot could not
+    land beside the row it replaced. Scanning run_update alone then reported
+    "derived_dates is gone" about a refactor that still calls it -- the check
+    was anchored on where the code lived rather than on what it does.
+
+    Deliberately NOT folded into _run_update_body(): the two tests below this
+    one are about run_update's own structure -- where the census call sits
+    relative to the merge loop -- and widening their scope would quietly stop
+    them testing ordering at all.
+    """
+    src = (REPO / "update_index.py").read_text(encoding="utf-8")
+    wanted = {"run_update", "store_slug_rows"}
+    found = [n for n in ast.parse(src).body
+             if isinstance(n, ast.FunctionDef) and n.name in wanted]
+    missing = wanted - {n.name for n in found}
+    assert not missing, (
+        "%s not found in update_index.py -- if the insert path moved again, "
+        "add its new home here rather than deleting the assertion"
+        % ", ".join(sorted(missing)))
+    return found
+
+
+def _calls_in(nodes):
+    if isinstance(nodes, ast.AST):
+        nodes = [nodes]
+    return [ast.unparse(n.func) for node in nodes
+            for n in ast.walk(node) if isinstance(n, ast.Call)]
 
 
 def test_the_insert_path_calls_the_shared_derivation():
@@ -1652,7 +1682,7 @@ def test_the_insert_path_calls_the_shared_derivation():
     docstring cannot satisfy it. Two copies of this derivation would agree on
     the day they were written and drift the first time either rule moved.
     """
-    calls = _calls_in(_run_update_body())
+    calls = _calls_in(_insert_path_bodies())
     assert "derived_dates" in calls, \
         "run_update() no longer calls derived_dates()"
     for banned in ("detect_final_sale_day", "shift_weekend_to_monday"):

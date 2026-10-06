@@ -205,11 +205,27 @@ in `America/Chicago`, and put the ping URLs in `.env` as `HEALTHCHECK_URL_AM`
 and `HEALTHCHECK_URL_PM`. A single `HEALTHCHECK_URL` is still honoured for both
 slots as a fallback.
 
-**That cron lives on Healthchecks.io, outside this repo, and nothing here can
-read it back.** Move the Task Scheduler trigger without editing the check and the
-monitor goes on expecting the old time, alerting every morning while the pipeline
-is perfectly healthy. Moving the trigger is therefore a two-place change, and the
-second place is one no test, no grep and no reviewer in this repo can see.
+**That cron lives on Healthchecks.io, outside this repo.** Move the Task
+Scheduler trigger without editing the check and the monitor goes on expecting the
+old time, alerting every morning while the pipeline is perfectly healthy. Moving
+the trigger is therefore a two-place change, and for most of this repo's life the
+second place was one no test, no grep and no reviewer could see.
+
+**`healthcheck_schedule.py` now reads it back.** The table above is no longer
+documentation *about* the configuration — it is parsed, and compared field by
+field against what the Healthchecks.io management API reports, so a divergence
+fails `tests/test_healthcheck_schedule.py` instead of waiting for a morning that
+goes wrong. It needs `HEALTHCHECK_API_KEY` in `.env` (step 4 below); without one
+the live half is skipped and says so, while the repo-side half — this table
+against `check_run.ps1`'s `$trigH`/`$trigM`, and each row against its own alert
+column — still runs on every clone.
+
+That closes the two-place problem in one direction only, and the limit is worth
+stating: the guard binds this table to Healthchecks.io, and this table to
+`check_run.ps1`. It does **not** read Windows Task Scheduler. Move the task and
+edit neither file and everything here is green while the monitor is wrong. It
+turns a three-way silent divergence into a two-way loud one; the third leg is
+still a human reading section 1 of `check_run.ps1`.
 
 The record so far is one for one:
 
@@ -218,6 +234,11 @@ The record so far is one for one:
 - **2026-10-01 — HALF DONE, and still open at the time of writing.** The task
   moved to 07:45 and `check_run.ps1`'s deadline moved with it, to 08:30. The
   Healthchecks.io cron was NOT moved and still reads `0 8 * * *`.
+
+  This is the incident `healthcheck_schedule.py` was written for, and it is the
+  reason the guard reads the cron rather than trusting the ping. Expect the
+  first run with `HEALTHCHECK_API_KEY` configured to be RED, naming this exact
+  edit. That is the guard earning its place, not a bug in it.
 
   This one does not go red, and the reason is worth understanding rather than
   filing as luck. 09-30 moved the trigger LATER than the check expected, so the
@@ -329,8 +350,9 @@ It is inert until configured. To turn it on:
    the two again judge the same instant. The 13:00 run's extra ping is
    harmless.
 
-   **The cron lives on Healthchecks.io, outside this repo, and nothing here can
-   read it back.** Moving the Task Scheduler trigger without editing the check
+   **The cron lives on Healthchecks.io, outside this repo** — but since
+   `healthcheck_schedule.py`, it is read back and asserted (step 4). Moving the
+   Task Scheduler trigger without editing the check
    produces a silent daily false alarm — which is exactly what happened on
    2026-09-30, when the trigger had moved to 08:00 and the check still expected
    07:30. On 2026-10-01 the trigger moved again, to 07:45, and `check_run.ps1`
@@ -344,10 +366,46 @@ It is inert until configured. To turn it on:
    HEALTHCHECK_URL=https://hc-ping.com/<your-uuid>
    ```
 
-`.env` is gitignored — the URL is a capability, so treat it as a secret. With
-no `HEALTHCHECK_URL` set the script logs `monitoring inert` and carries on; a
-monitoring outage is caught and logged as a warning and can never fail the
-pipeline.
+4. **Let the repo check step 2 for you.** Create a project API key at
+   healthchecks.io > project Settings > API Access and add it to `.env`:
+
+   ```
+   HEALTHCHECK_API_KEY=<project api key, READ-WRITE>
+   ```
+
+   `tests/test_healthcheck_schedule.py` then reads the live cron, grace and
+   timezone back and asserts they match the table above, so moving the trigger
+   and forgetting the console fails the suite. `scripts/check_run.ps1` section 5
+   prints the same verdict by hand.
+
+   **It has to be a read-write key, and that is a real cost — read it before
+   agreeing.** A read-only key omits `ping_url` and `uuid` from the listing and
+   returns a `unique_key` whose derivation is undocumented, so no row can be tied
+   to the URL the pipeline actually pings. The only identifiers left would be the
+   check's name or slug, and matching on those proves merely that *some* check is
+   configured correctly — audit a correct check that nothing pings and the guard
+   is green and lying, which is the exact failure it exists to remove. Matching
+   `ping_url` is a proof; matching a name is an assertion.
+
+   The cost is that a read-write key can pause, reschedule and delete every check
+   in its project, and this account also carries the droplet's `cron-alert`
+   checks. **Healthchecks.io API keys are per-project**, so putting the two FCI
+   checks in their own project bounds the blast radius to exactly what the guard
+   audits. Worth doing before creating the key rather than after.
+
+`.env` is gitignored — the ping URL and the API key are both capabilities, so
+treat them as secrets. With no `HEALTHCHECK_URL` set the script logs
+`monitoring inert` and carries on; a monitoring outage is caught and logged as a
+warning and can never fail the pipeline. With no `HEALTHCHECK_API_KEY` the live
+comparison is skipped, and `582 passed` becoming `581 passed, 1 skipped` is the
+difference between "the monitor is watching the right time" and "nobody checked";
+`pytest -rs` prints which.
+
+**Nothing in this repo ever requests a ping URL.** A GET on `hc-ping.com/<uuid>`
+registers a SUCCESS — it would tell the monitor the job ran when it did not,
+which is worse than the drift the guard catches. `healthcheck_schedule.py`
+refuses any URL outside the management API before the HTTP library is imported,
+and the tests prove that behaviourally rather than by grepping for a string.
 
 If you would rather not use a third party: Snowflake's `SYSTEM$SEND_EMAIL`
 needs a notification integration, and creating one requires ACCOUNTADMIN, which

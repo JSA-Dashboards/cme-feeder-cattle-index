@@ -5,8 +5,9 @@
 #
 # Answers, in order: did the task FIRE on schedule (rather than at boot or by
 # hand), did WakeToRun actually wake the machine, did the pipeline finish and
-# with what exit codes, did it freeze a morning call, and has CME printed the
-# date it was estimating. Reads only -- changes nothing.
+# with what exit codes, did it freeze a morning call, has CME printed the date
+# it was estimating, and is the dead-man's switch itself still set to the
+# trigger below. Reads only -- changes nothing.
 param([string]$Date = (Get-Date -Format 'yyyy-MM-dd'))
 
 $repo = Split-Path -Parent $PSScriptRoot
@@ -203,6 +204,27 @@ if (-not (Test-Path $log)) {
 Head "4. the data: frozen call, freshness, and CME's verdict"
 if (Test-Path $py) {
     & $py (Join-Path $PSScriptRoot 'check_run.py') $Date
+} else {
+    "   venv python missing at $py"
+}
+
+Head "5. is the monitor still watching the right time?"
+# Everything above judges the run against $trigH/$trigM. This judges the
+# DEAD-MAN'S SWITCH against them -- the one copy of the schedule that lives
+# outside this repo, where no test, no grep and no reviewer can see it.
+#
+# Two incidents say it belongs here. On 2026-09-30 the trigger moved to 08:00
+# and the Healthchecks.io cron did not, so the monitor went red every morning on
+# a healthy pipeline. On 2026-10-01 it moved to 07:45 and the cron did not, and
+# that one produced NO symptom at all -- moving a job earlier cannot trip a
+# stale cron, it just leaves the alert sitting later than the deadline above.
+# That is the case this section exists for, because it is the case the monitor
+# is structurally unable to report about itself.
+#
+# Needs HEALTHCHECK_API_KEY in .env; without it this prints NOT VERIFIED rather
+# than nothing, so a missing key and a clean monitor never look alike.
+if (Test-Path $py) {
+    & $py (Join-Path $repo 'healthcheck_schedule.py')
 } else {
     "   venv python missing at $py"
 }

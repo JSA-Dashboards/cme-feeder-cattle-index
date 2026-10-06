@@ -8,21 +8,42 @@ cron jobs instead — same droplet already running basis-tracker + river-fob-por
 update scripts and writes to the shared Snowflake DB (`JSA.CME_FEEDER_CATTLE`)
 those apps read.
 
-## 1. Deploy the code (no `.git` on the box — archive, don't clone)
+## 1. Deploy the code: push to GitHub, then pull on the box
 
-This repo is private, so `git clone` on the box would need a deploy key/PAT.
-Instead, archive from your local checkout and pipe it over SSH (same method as
-basis-tracker):
+Since 2026-10-04 `/opt/cme-feeder-cattle-index` is a **git clone** of
+`JSA-Dashboards/cme-feeder-cattle-index`, branch `master`. The repo is public,
+so the box pulls over HTTPS with no deploy key or PAT. To deploy, push first,
+then:
 
 ```bash
-# from your local machine, inside the repo:
-ssh root@137.184.195.51 "mkdir -p /opt/cme-feeder-cattle-index/deploy /opt/cme-feeder-cattle-index/logs"
-git archive HEAD | ssh root@137.184.195.51 "tar -x -C /opt/cme-feeder-cattle-index"
+ssh root@137.184.195.51 "git -C /opt/cme-feeder-cattle-index pull --ff-only"
 ```
 
-To update later (code changes only — this data pipeline never needs a
-propagation step, see below): re-run the same `git archive` command, it
-overwrites in place.
+**Do not `git archive HEAD | ssh ... tar -x` into it any more** (that was the
+method before 2026-10-04). tar writes files behind git's back:
+
+- the checkout goes dirty;
+- new files land as untracked;
+- files deleted from the repo stay on the box;
+- the next `git pull` refuses with "local changes would be overwritten".
+
+If a pull ever refuses, run `git -C /opt/cme-feeder-cattle-index status` and
+read what changed before discarding anything.
+
+A pull also replaces the box's `data/mars_history.db` with the committed one.
+That is harmless: the droplet runs `USE_SNOWFLAKE=1` and never opens the file.
+Checked 2026-10-05: no cron run had modified it.
+
+Modes come from the repo, so every script cron runs must be **100755 in git**.
+Git on Windows does not track the exec bit, so set it with
+`git update-index --chmod=+x deploy/<script>.sh`. A 100644 script fails under
+cron with exit 126, before it writes a log.
+
+First-time setup on a fresh box:
+
+```bash
+ssh root@137.184.195.51 "git clone https://github.com/JSA-Dashboards/cme-feeder-cattle-index.git /opt/cme-feeder-cattle-index && mkdir -p /opt/cme-feeder-cattle-index/logs"
+```
 
 ## 2. Virtualenv + dependencies
 

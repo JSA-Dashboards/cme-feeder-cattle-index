@@ -105,10 +105,16 @@ if ($code -ne 0) {
 }
 
 # Push only the three tables this job can have changed. A bare run pushes all
-# TWENTY (7 CRITICAL + 13 OPTIONAL in 02_migrate_data.py -- this comment said
-# "thirteen", which is the optional count alone), taking a minute to land two
-# tables' worth of new rows, and would also republish the border and
-# replacement data mid-morning for no reason.
+# TWENTY-ONE (8 CRITICAL + 13 OPTIONAL in 02_migrate_data.py -- this comment
+# said "thirteen", which is the optional count alone, and then "twenty" before
+# pipeline_stamp joined CRITICAL), taking a minute to land two tables' worth of
+# new rows, and would also republish the border and replacement data
+# mid-morning for no reason.
+#
+# NOTE pipeline_stamp is deliberately NOT in the --tables list below. It is the
+# dashboard's "last refreshed" marker, and this job changes no index numbers --
+# stamping it here would advance the freshness clock without the reconstruction
+# having run, which is the one lie that check exists to prevent.
 $pushCode = 0
 $po = Join-Path $env:TEMP ('cme_po_{0}.txt' -f $PID)
 $pe = Join-Path $env:TEMP ('cme_pe_{0}.txt' -f $PID)

@@ -40,7 +40,15 @@ DB_PATH = HERE / "data" / "mars_history.db"
 # the dashboard is serving stale numbers and somebody needs to know tonight.
 CRITICAL_TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily",
                    "cme_ftp_locations", "cme_ftp_brackets", "peer_estimates",
-                   "fci_snapshots"]
+                   "fci_snapshots",
+                   # LAST ON PURPOSE. app.py reads this one row to say when the
+                   # page was last refreshed, so its position IS the guarantee:
+                   # if the stamp is current on the backend, every table above
+                   # it landed first. Move it up the list and a push that dies
+                   # halfway can leave a fresh stamp sitting on stale numbers,
+                   # which is the exact failure the freshness check exists to
+                   # catch.
+                   "pipeline_stamp"]
 
 # OPTIONAL feeds the supply-side dashboards. A failure here means one tab is
 # stale; it must NOT be reported as an index failure. Before this split, any

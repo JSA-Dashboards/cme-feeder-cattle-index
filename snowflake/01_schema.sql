@@ -47,6 +47,26 @@ CREATE TABLE IF NOT EXISTS peer_estimates (
     PRIMARY KEY (index_date, source)
 );
 
+-- ONE ROW. When the pipeline last wrote, which app.py reads for the dashboard's
+-- "Last refreshed" line. NOT the same question as fci_snapshots.captured_at:
+-- snapshots are INSERT-OR-IGNORE per (index_date, run_date, run_slot), so that
+-- column records the FIRST run of a slot and deliberately never moves again.
+-- Reading freshness off it meant a mid-day correction did not advance the
+-- stamp -- on 2026-10-07 the page said "Last refreshed 8:05 AM (1.6h ago)"
+-- about data five minutes old.
+--
+-- written_at is VARCHAR, matching captured_at above: both are naive local
+-- Central strings written by the pipeline machine, and app.py compares them
+-- against Central. A TIMESTAMP column would invite the UTC conversion that
+-- makes every run read five hours fresher than it is.
+CREATE TABLE IF NOT EXISTS pipeline_stamp (
+    id NUMBER NOT NULL,
+    written_at VARCHAR NOT NULL,
+    run_date DATE NOT NULL,
+    run_slot VARCHAR NOT NULL,
+    PRIMARY KEY (id)
+);
+
 CREATE TABLE IF NOT EXISTS mars_sales (
     report_date DATE NOT NULL,
     raw_date DATE NOT NULL,

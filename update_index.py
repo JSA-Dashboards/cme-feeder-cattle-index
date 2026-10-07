@@ -41,7 +41,7 @@ import os
 import re
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -205,6 +205,33 @@ def init_db(conn):
             total_head INTEGER,
             n_locations INTEGER,
             PRIMARY KEY (index_date, run_date, run_slot)
+        )
+    """)
+    # WHEN THE PIPELINE LAST WROTE, which is a different question from what
+    # fci_snapshots answers and must not be read off it.
+    #
+    # fci_snapshots is INSERT-OR-IGNORE on (index_date, run_date, run_slot), so
+    # captured_at records the FIRST run of a slot and deliberately never moves
+    # again -- that immutability is the whole point, because it is what keeps
+    # the head-to-head against CME honest. The dashboard's freshness stamp was
+    # reading MAX(captured_at) for want of anything better, which gives the
+    # right answer every ordinary day and the wrong one the moment a run
+    # repeats inside a slot. On 2026-10-07 a mid-day correction took 10-06 from
+    # 337.9470 to 337.8693 and the page went on saying "Last refreshed 8:05 AM
+    # (1.6h ago)" -- understating freshness, which is the safe direction, but
+    # blind in exactly the situation where somebody is checking whether their
+    # fix landed.
+    #
+    # ONE ROW, UPSERTED, so it advances on every run rather than once a slot.
+    # It is pushed LAST in CRITICAL_TABLES: if this row is current on the
+    # backend then every table before it landed too, which is the property that
+    # lets the stamp detect a push that failed after a successful recompute.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pipeline_stamp (
+            id INTEGER PRIMARY KEY,
+            written_at TEXT NOT NULL,
+            run_date TEXT NOT NULL,
+            run_slot TEXT NOT NULL
         )
     """)
     conn.execute("""
@@ -492,6 +519,39 @@ def _record_ingest_warnings(items, append=False):
         INGEST_WARNINGS.write_text(json.dumps(payload, indent=1), encoding="utf-8")
     except Exception as e:                     # noqa: BLE001 -- never fail a run
         print("  [warn] could not record ingest warnings: %s" % e)
+
+
+def stamp_pipeline_run(conn, now=None):
+    """
+    Record that the pipeline wrote, as ONE row that always advances.
+
+    Returns the timestamp written, so a caller can report it.
+
+    NAIVE LOCAL TIME, matching fci_snapshots.captured_at: this job runs on a
+    Central-time machine and app.py compares the stamp against Central, not
+    against the server clock -- Streamlit Cloud runs in UTC and would otherwise
+    read every run as five hours fresher than it is.
+
+    merge_replace, not merge_ignore. The whole defect this fixes was a column
+    that refused to move on a repeat run; a stamp that ignored the second write
+    of a slot would reproduce it exactly.
+    """
+    from snapshots import run_slot
+    now = now or datetime.now()
+    db.merge_replace(
+        conn, "pipeline_stamp",
+        ["id", "written_at", "run_date", "run_slot"],
+        (1, now.isoformat(timespec="seconds"), now.date().isoformat(),
+         run_slot(now)),
+        ["id"])
+    # COMMIT. db.merge_replace does not, and capture_snapshots above commits
+    # once after its whole loop -- so the first version of this function wrote
+    # the row, returned, and lost it when the connection closed. The run
+    # reported success and pipeline_stamp was empty afterwards. The tests did
+    # not catch it because sqlite3 shows uncommitted writes back on the same
+    # connection, which is exactly the shape of a test that cannot fail.
+    conn.commit()
+    return now
 
 
 def recompute_fci_daily(conn):
@@ -787,6 +847,11 @@ def run_update(since: date, verbose=True):
     # after the recompute and before the process exits, or the morning call is
     # lost for good -- fci_daily is overwritten wholesale by the next run.
     n_frozen = capture_snapshots(conn)
+
+    # AFTER the recompute and after the freeze, so the stamp cannot claim data
+    # that was never written. It is the last thing the run records and the last
+    # table the push sends.
+    stamp_pipeline_run(conn)
 
     if verbose:
         print(f"\nInserted/kept {total_inserted} sale rows: {total_inserted - direct_inserted - video_inserted} "

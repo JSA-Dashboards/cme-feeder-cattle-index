@@ -586,17 +586,44 @@ def _load_last_refresh():
     quietly serves yesterday's numbers. A check against the local file would
     report "healthy" in exactly that case.
 
-    fci_snapshots.captured_at is written by the job as a naive local timestamp
-    on the Central-time machine that runs it, so it is compared against Central
-    time below, NOT against the server clock -- Streamlit Cloud runs in UTC and
-    would otherwise read every run as five hours fresher than it is.
+    READS pipeline_stamp, NOT fci_snapshots.captured_at. Those answer different
+    questions and only coincide on an ordinary day. fci_snapshots is
+    INSERT-OR-IGNORE on (index_date, run_date, run_slot), so captured_at records
+    the FIRST run of a slot and never moves again -- that immutability is the
+    point of snapshots, because it is what keeps the head-to-head against CME
+    honest. Reading it here meant a repeat run inside a slot did not advance the
+    stamp: on 2026-10-07 a mid-day correction took 10-06 from 337.9470 to
+    337.8693 and this line went on reporting "Last refreshed 8:05 AM (1.6h
+    ago)". Understating freshness is the safe direction -- the 20h/30h
+    thresholds can only fire early -- but it is blind in the one situation where
+    somebody is looking at it to check whether their fix landed.
+
+    pipeline_stamp is one row, upserted on every run, and pushed LAST in
+    CRITICAL_TABLES, so a current stamp means every table before it landed too.
+
+    FALLS BACK to fci_snapshots when pipeline_stamp is absent or empty, which is
+    the state of any backend that has not taken a push since this was added. The
+    fallback is strictly older, never newer, so it cannot manufacture
+    freshness.
+
+    Both are written by the job as a naive local timestamp on the Central-time
+    machine that runs it, so they are compared against Central time below, NOT
+    against the server clock -- Streamlit Cloud runs in UTC and would otherwise
+    read every run as five hours fresher than it is.
     """
     if not db.use_snowflake() and not MARS_DB_PATH.exists():
         return None
     conn = db.get_conn()
     try:
-        row = conn.cursor().execute(
-            "SELECT MAX(captured_at) FROM fci_snapshots").fetchone()
+        row = None
+        try:
+            row = conn.cursor().execute(
+                "SELECT MAX(written_at) FROM pipeline_stamp").fetchone()
+        except Exception:
+            row = None          # table not pushed to this backend yet
+        if not row or not row[0]:
+            row = conn.cursor().execute(
+                "SELECT MAX(captured_at) FROM fci_snapshots").fetchone()
     except Exception:
         return None          # table absent on this backend yet
     finally:

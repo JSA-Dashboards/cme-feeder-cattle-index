@@ -50,9 +50,15 @@ committing, not after.
     app.py              the dashboard (see "two copies" below)
 
 `scripts/daily_update.ps1` runs at **07:45 and 13:00** (Task Scheduler), plus
-`scripts/cme_pull.ps1` at **10:15** for CME's print alone. Two runs because
+`scripts/cme_pull.ps1` at **14:15** for CME's print alone. Two runs because
 85% of a sale day's head is fetchable by 07:30 but 95.8% by noon — El Reno
 publishes its previous-day sale at a median +1 day 11:13.
+
+The CME pull was at **10:15 until 2026-10-07 and never once caught a print**:
+CME's files become fetchable 13:04–14:04 Central, not 08:35–10:05 as
+`README-schedule.md` claimed. The FTP `MDTM` timestamp is already Central and
+had been read as UTC, so every derived time was five hours early. See
+"The 14:15 CME print pull" there.
 
 **Step order in the daily job is load-bearing.** Index first, then optional
 ingests, then their push:

@@ -1,34 +1,37 @@
 # CME print pull. Registered in Task Scheduler as "JSA FCI CME print pull",
-# 10:15 local, daily. Appends to the same logs/update_<date>.log as the main job.
+# 14:15 local, daily. Appends to the same logs/update_<date>.log as the main job.
 #
-# WHY 10:15, AND WHY A THIRD RUN AT ALL.
+# WHY 14:15, AND WHY A THIRD RUN AT ALL.
 #
 # CME publishes each index date's file on the NEXT business day. Measured from
-# their own FTP MDTM timestamps over the last 14 files:
+# their own FTP MDTM timestamps:
 #
-#     earliest 08:35    median 09:05    latest 10:05    (all Central)
+#     earliest 13:04    latest 14:04    (all Central)
 #
-# The main pipeline runs at 07:45 and 13:00. 07:45 is well ahead of the median
-# print (09:05) and of the latest ever observed (10:05), so the morning run
-# cannot be relied on to carry yesterday's official number. The 13:00 run is
-# the first poll that reliably sees it. That left the dashboard's "Last CME
-# Print" tile and the whole forecast scorecard running about four hours behind
-# CME every morning: a 09:05 print did not reach the page until 13:05.
+# THIS SAID 08:35 / 09:05 / 10:05 UNTIL 2026-10-07 AND WAS WRONG BY FIVE HOURS.
+# Raw MDTM reads like 20261007133437; the original measurement took that for UTC
+# and subtracted five. The server already returns Central. So the trigger was set
+# to 10:15 to "clear the 10:05 worst case", against a worst case of 14:04 -- and
+# the job NEVER ONCE caught a print in its entire logged history. It exited 0 and
+# logged "not yet published" every day, which reads as CME being slow rather than
+# as the job looking three hours too early.
 #
-# NOTE, since the morning run moved 07:30 -> 08:00 on 2026-09-29 and then
-# 08:00 -> 07:45 on 2026-10-01: this used to read "07:30 is ALWAYS before CME
-# publishes", and that absolute stopped being safe to assert at 08:00. The
-# wider n=17 sample in scripts/README-schedule.md puts the EARLIEST print at
-# 08:05 Central, and the morning run does not reach its own CME step until
-# several minutes in, so on a rare early day it may catch the file. How many
-# minutes in is NOT measured -- the log stamps only the run's start and finish,
-# not the CME step -- so this stays "may", not a number. What is certain is the
-# direction: starting 15 minutes earlier moves that step 15 minutes earlier
-# too, so an early catch is rarer at 07:45 than it was at 08:00, never more
-# likely. Either way it is a bonus, not a guarantee, and not a reason to drop
-# this job -- on a median day the file still does not exist for another hour.
+# Confirmed 2026-10-07 for index date 10-06: MDTM 20261007133437, so the file
+# appeared at 13:34:37, while the 13:00 run had already FINISHED at 13:22:04.
+# The print therefore only ever landed on the next morning's run.
 #
-# 10:15 clears the 10:05 worst case with ten minutes to spare.
+# The main pipeline runs at 07:45 and 13:00. Both are before the earliest
+# observed print (13:04), so neither can be relied on to carry yesterday's
+# official number -- the 13:00 run loses the race by minutes rather than hours,
+# but it loses it. That left the dashboard's "Last CME Print" tile and the whole
+# forecast scorecard running a full business day behind CME.
+#
+# 14:15 clears the 14:04 worst case with eleven minutes to spare.
+#
+# If this band is ever re-measured, read MDTM off the server and treat it as
+# CENTRAL, and do not re-derive it from our own ingest logs -- those record when
+# we looked, not when CME published, which is how the five-hour error survived
+# from the first measurement to the fourth trigger change.
 #
 # This job deliberately does NOT recompute anything. CME's published value does
 # not feed our estimate -- it is what the estimate is SCORED AGAINST -- so the

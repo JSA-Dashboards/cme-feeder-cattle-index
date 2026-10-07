@@ -6,30 +6,55 @@ Scheduler as **`JSA FCI daily update`**.
 
 ## Three triggers, two scripts
 
-`daily_update.ps1` at 07:45 and 13:00 (below), plus `cme_pull.ps1` at 10:15.
+`daily_update.ps1` at 07:45 and 13:00 (below), plus `cme_pull.ps1` at 14:15.
 
-### The 10:15 CME print pull
+### The 14:15 CME print pull
 
 CME publishes each index date's file the NEXT business day. Measured from their
-own FTP `MDTM` timestamps over 14 consecutive files:
+own FTP `MDTM` timestamps:
 
-    earliest 08:35    median 09:05    latest 10:05    (Central)
+    earliest 13:04    latest 14:04    (Central)
 
-So **07:30 was always too early** -- that run could never carry yesterday's
-official number -- and 13:00 was the first poll that saw it. At the 07:45
-trigger it is still too early on any ordinary day, though no longer
-*structurally* so the way 07:30 was: CME's earliest file in the sample below
-lands 08:05, and the morning run does not reach its own CME step the instant it
-starts, so a rare early file can still be caught. Nothing in the logs times that
-step -- only the run's start and finish are stamped -- so this is "can", not a
-rate. The published print and the whole forecast scorecard therefore ran about
-four hours behind CME every morning: a 09:05 print did not reach the dashboard
-until 13:05.
+**THIS SAID 08:35 / 09:05 / 10:05 UNTIL 2026-10-07, AND IT WAS WRONG BY FIVE
+HOURS.** The raw `MDTM` for a file reads like `20261007133437`, and the original
+measurement treated that as UTC and subtracted five to get 08:34 Central. The
+server returns it in Central already. Everything downstream inherited the error:
+the pull was scheduled for 10:15 to "clear the 10:05 worst case by ten minutes",
+against a worst case that is really 14:04.
 
-10:15 clears the 10:05 worst case by ten minutes. The job fetches, stores, and
+**The 10:15 job therefore never once caught a print.** Not an occasional miss --
+zero, across every run in the logs. After each 10:15 pull the newest CME date
+held was always TWO business days back, never one:
+
+    10-06 pull -> max 10-02        10-02 pull -> max 09-30
+    10-05 pull -> max 10-01        10-01 pull -> max 09-29
+
+It exited 0 and logged "not yet published" every time, which reads as CME being
+slow rather than as the job being pointed at the wrong hour. It was doing
+exactly what this file says 07:30 used to do -- "that run could never carry
+yesterday's official number" -- and the sentence was sitting three paragraphs
+above the schedule that repeated the mistake.
+
+The 13:00 run loses the same race, by less. Confirmed on 2026-10-07 for index
+date 10-06: `MDTM 20261007133437`, i.e. the file appeared at **13:34:37**, while
+the 13:00 run had started 13:00:02 and *finished* 13:22:04 -- twelve minutes
+before the file existed. So the print only ever arrived on the NEXT morning's
+run, and the scorecard ran a full business day staler than it needed to.
+
+**How it was caught**, because the method matters more than the number: not by
+reading code, but by asking why 10-05's print was missing at 13:00 and then
+comparing CME's own `MDTM` against our own logs. Two independently derived
+numbers that disagreed. A clock that is wrong by exactly five hours looks
+perfectly plausible on its own.
+
+14:15 clears the 14:04 worst case by eleven minutes. The job fetches, stores, and
 pushes only `cme_ftp_daily`, `cme_ftp_locations` and `cme_ftp_brackets` -- about
 25 seconds, against the main pipeline's 12 minutes. It recomputes nothing: CME's
 value does not feed the estimate, it is what the estimate is scored against.
+
+If the band ever needs re-measuring, read `MDTM` off the server and treat it as
+Central. Do not re-derive it from our own ingest logs: those record when we
+looked, not when CME published, which is how the original error survived.
 
 It has **no healthcheck ping on purpose**. It is an accelerator, not a
 guarantee: if it fails, the 13:00 run pulls the same file with a wider lookback

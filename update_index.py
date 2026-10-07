@@ -40,6 +40,7 @@ import json
 import os
 import re
 import threading
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -61,6 +62,11 @@ ROSTER_PATH = DATA_DIR / "mars_roster.json"
 DB_PATH = DATA_DIR / "mars_history.db"
 
 MARS_BASE = "https://marsapi.ams.usda.gov/services/v1.2"
+
+# Backoff between retried MARS fetches, multiplied by the attempt number. Short
+# on purpose: 91 slugs are fetched serially, so a long pause on a bad morning
+# would push the run past the window the whole schedule is sized against.
+RETRY_PAUSE_S = 0.6
 
 # How far back of already-stored dates each run re-asks USDA for. Every run
 # re-fetches this window in full and upserts, so a report that USDA publishes
@@ -215,10 +221,25 @@ def init_db(conn):
     conn.commit()
 
 
-def fetch_slug_payload(slug_id, since_str, until_str, auth):
+def fetch_slug_payload(slug_id, since_str, until_str, auth, attempts=3):
     """
     The WHOLE response for one slug -- `results` AND the `stats` block beside
     it.
+
+    RETRIES, because a single dropped read used to cost a whole barn for the
+    day. On 2026-10-07 slugs 1249 (West Plains) and 1773 (Miles City) both died
+    mid-response with IncompleteRead; the roster loop logged [skip] and carried
+    on, 236 head never reached mars_sales, and 10-06 printed 7.8 cents high
+    against both competing desks. 91 slugs are fetched serially every run, so
+    two failures in one morning is a rate, not bad luck. cme_ftp.py has retried
+    its FTP fetch for exactly this reason since it was written; this path never
+    learned it.
+
+    TRANSIENT FAILURES ONLY. A 4xx is AMS telling us something true -- that a
+    slug is gone, or that the credentials are wrong -- and asking three times
+    only gets us told three times. Those re-raise on the first attempt, so a
+    genuine disappearance still surfaces immediately rather than three seconds
+    later.
 
     stats carries returnedRows / totalRows (observed on slug 1827 today:
     {"returnedRows": 178, "userAllowedRows": 100000, "totalRows": 178}), and
@@ -227,14 +248,29 @@ def fetch_slug_payload(slug_id, since_str, until_str, auth):
     the report holds is indistinguishable from a withdrawal, and would present
     as an entire sale day going phantom. Nothing else in the ingest reads it.
     """
-    resp = requests.get(
-        f"{MARS_BASE}/reports/{slug_id}",
-        auth=auth,
-        params={"q": f"report_begin_date={since_str}:{until_str}"},
-        timeout=(5, 60),
-    )
-    resp.raise_for_status()
-    return resp.json()
+    last = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(
+                f"{MARS_BASE}/reports/{slug_id}",
+                auth=auth,
+                params={"q": f"report_begin_date={since_str}:{until_str}"},
+                timeout=(5, 60),
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as exc:
+            code = getattr(exc.response, "status_code", None)
+            if code is not None and code < 500:
+                raise          # AMS telling us something true; asking again
+            last = exc         # three times just gets told three times
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            # ValueError covers .json() on a body that arrived truncated, which
+            # is the same transient failure wearing a different exception.
+            last = exc
+        if attempt < attempts:
+            time.sleep(RETRY_PAUSE_S * attempt)
+    raise last
 
 
 def fetch_slug(slug_id, since_str, until_str, auth):

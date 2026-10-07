@@ -955,3 +955,80 @@ def test_the_filed_count_appears_only_when_it_adds_something():
 
     plain = br.report_lines(make_conn(rows, published="2026-09-18"))[0]
     assert "filed)" not in plain, "no extra filers means no parenthetical"
+
+
+# ---------------------------------------------------------------------------
+# A slug whose FETCH RAISED is not a slug that filed.
+#
+# 2026-10-07: slugs 1249 (West Plains) and 1773 (Miles City) both died
+# mid-response with IncompleteRead. The roster loop logged [skip], so nothing
+# reached mars_sales -- but calf_sales is a SEPARATE request made later in the
+# run, and it succeeded. reported_without_qualifying() then saw them present in
+# calf_sales, absent from mars_sales, and promoted a 236-head data loss to
+# "filed and did not qualify", i.e. the day is complete. It was 7.8 cents high
+# against both competing desks.
+#
+# The old docstring anticipated calf_sales LAGGING and called that the safe
+# direction. It is. What it did not anticipate was the two ingests DISAGREEING,
+# which resolves the other way: ask before the optional ingests and the barn
+# reads "missing", ask after and it reads "complete".
+# ---------------------------------------------------------------------------
+
+def _with_census(conn, withheld=()):
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS mars_census ("
+        "kind TEXT, slug_id INTEGER, location TEXT, raw_date TEXT, "
+        "report_date TEXT, index_date TEXT, weight_low INTEGER, "
+        "muscle_grade TEXT, head_count INTEGER, avg_weight REAL, "
+        "avg_price REAL, detail TEXT)")
+    conn.executemany(
+        "INSERT INTO mars_census (kind, slug_id, location, detail) "
+        "VALUES ('withheld',?,?,'the fetch raised')",
+        [(s, c) for s, c in withheld])
+    conn.commit()
+    return conn
+
+
+def test_a_withheld_slug_is_not_reported_as_having_filed():
+    """
+    THE 2026-10-07 FAILURE. Without this, a dropped fetch reads as a clean day.
+    """
+    conn = make_conn(_roster_pair())
+    with_calf_rows(conn, [(MONDAY.isoformat(), 1, "Big")])
+    assert 1 in br.reported_without_qualifying(conn, MONDAY), \
+        "baseline: in calf_sales and not in the index means it filed"
+    _with_census(conn, withheld=[(1, "Big")])
+    assert 1 not in br.reported_without_qualifying(conn, MONDAY), \
+        "a slug whose fetch raised must never read as having filed"
+
+
+def test_the_baseline_still_works_when_nothing_was_withheld():
+    """
+    The other half. Without it, a withheld_slugs() that returned every slug
+    would satisfy the test above and silently disable the Belen fix.
+    """
+    conn = make_conn(_roster_pair())
+    with_calf_rows(conn, [(MONDAY.isoformat(), 1, "Big")])
+    _with_census(conn, withheld=[])
+    assert 1 in br.reported_without_qualifying(conn, MONDAY)
+
+
+def test_a_withheld_slug_falls_back_to_missing_not_to_silence():
+    """
+    Excluding it must return the barn to the OLD wording, not drop it from the
+    report. "Missing" is the honest answer -- we did not get the report -- and
+    it is the line that prompts a human to look.
+    """
+    conn = make_conn(_roster_pair())
+    with_calf_rows(conn, [(MONDAY.isoformat(), 1, "Big")])
+    _with_census(conn, withheld=[(1, "Big")])
+    lines = br.report_lines(conn)
+    assert any("missing" in ln and "Big" in ln for ln in lines), lines
+
+
+def test_an_absent_census_table_degrades_to_the_old_behaviour():
+    """calf_sales present, mars_census absent -- every clone and every test
+    that predates this one."""
+    conn = make_conn(_roster_pair())
+    with_calf_rows(conn, [(MONDAY.isoformat(), 1, "Big")])
+    assert 1 in br.reported_without_qualifying(conn, MONDAY)

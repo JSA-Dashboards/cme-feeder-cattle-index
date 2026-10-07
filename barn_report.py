@@ -180,7 +180,44 @@ def reported_without_qualifying(conn, index_date):
     for report_date, location, slug_id in rows:
         if shifted_bucket_date(location, report_date) == want:
             seen.add(slug_id)
-    return seen
+    return seen - withheld_slugs(conn)
+
+
+def withheld_slugs(conn):
+    """
+    Slugs the AMS census could not judge this run: the fetch RAISED, the roster
+    loop skipped them, and nothing is known about what they hold.
+
+    THEY MUST NEVER BE REPORTED AS "FILED AND DID NOT QUALIFY". That claim needs
+    evidence the barn reported and had nothing in the bracket; a fetch that
+    raised is the absence of evidence, not evidence of absence.
+
+    This is not hypothetical. On 2026-10-07 slugs 1249 (West Plains) and 1773
+    (Miles City) both died mid-response with IncompleteRead. Their calf_sales
+    ingest is a SEPARATE request made later in the run, and it succeeded -- so
+    the query above saw them present in calf_sales, absent from mars_sales, and
+    concluded the day was complete. It was 236 head short and the index printed
+    7.8 cents high.
+
+    The docstring above anticipated calf_sales LAGGING, and called that the safe
+    direction, which it is. What it did not anticipate was the two ingests
+    DISAGREEING. A lag resolves; a disagreement does not, and it resolves in the
+    dangerous direction -- the same question answered before the optional
+    ingests says "missing" and after them says "complete".
+
+    Excluding them here drops the barn back to "missing", which is the honest
+    answer: we did not get the report. The census prints the reason separately.
+    """
+    try:
+        rows = conn.cursor().execute(
+            "SELECT slug_id FROM mars_census WHERE kind = 'withheld'").fetchall()
+    except Exception as e:                     # noqa: BLE001 -- table absent
+        # Same rule as above: say so. A silent empty set here restores exactly
+        # the false all-clear this function exists to prevent.
+        print("  [warn] barn report could not read mars_census: {}: {}".format(
+            type(e).__name__, e))
+        return set()
+    return {r[0] for r in rows if r[0] is not None}
 
 
 def _names(conn):

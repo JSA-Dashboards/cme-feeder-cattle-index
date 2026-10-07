@@ -39,6 +39,12 @@ DASHBOARD = "https://jsa-livestock.streamlit.app/cme-feeder-cattle-index"
 
 BLUE, MUTED, GREEN, RED = "#1f6feb", "#6b7280", "#15803d", "#b91c1c"
 
+# The peer-gap threshold, in dollars/cwt. The project's bar is "matches CME to
+# the cent" and measured agreement with CME since 2026-08-28 is inside half a
+# cent, so a nickel is well outside anything routine. Named rather than inlined
+# because the row colour and the alarm must not drift apart.
+PEER_NICKEL = 0.05
+
 
 def _money(v):
     return f"${v:,.2f}" if v is not None else "—"
@@ -317,25 +323,45 @@ def build(d, slot="am", failed=None):
     if d["value"] is not None:
         if d.get("live_peers"):
             prow = ""
-            worst = 0.0
+            gaps = []
             for src, val in d["live_peers"]:
                 gap = d["value"] - val
-                worst = max(worst, abs(gap))
+                gaps.append(abs(gap))
                 prow += (f'<tr><td style="padding:3px 12px 3px 0">'
                          f'{src if src == "CIH" else src.title()}</td>'
                          f'<td align="right">{_money(val)}</td>'
                          f'<td align="right" style="padding-left:12px;color:'
-                         f'{GREEN if abs(gap) < 0.05 else RED}">'
+                         f'{GREEN if abs(gap) < PEER_NICKEL else RED}">'
                          f'{gap:+.4f}</td></tr>')
-            # 5 cents: the project's own bar is "matches CME to the cent", and
-            # measured agreement with CME since 2026-08-28 is inside half a
-            # cent. Anything past a nickel against BOTH desks has meant a real
-            # defect every time it has happened.
-            flag = ("" if worst < 0.05 else
+            worst = max(gaps) if gaps else 0.0
+            # EVERY recorded desk must be past the threshold, not the worst one.
+            # This used to fire on max(gap) while the comment above it claimed
+            # "against BOTH desks" -- the code and the comment disagreed, and the
+            # code was the looser of the two. On 2026-09-08 Compass was 1.38 low
+            # and CIH matched CME exactly; firing on the worst single desk would
+            # have alarmed about a number that was six ten-thousandths from
+            # CME's print. Requiring all of them keeps the one case that
+            # mattered (2026-10-02, where BOTH desks had 337.76 against our
+            # 339.55) and drops that false alarm.
+            alarm = bool(gaps) and all(g >= PEER_NICKEL for g in gaps)
+            # WORDING MATTERS HERE, and the previous version got it backwards.
+            # It read "every time that has exceeded a nickel it has been our
+            # bug, not theirs". That is false: of the three gaps past a nickel
+            # on record, ONE was ours (the $1.79 on 2026-10-02) and TWO were
+            # theirs (Compass by 1.38 on 09-08, both desks by 0.21 on 09-23).
+            # The claim survived only because the $1.79 was repaired out of the
+            # data it was supposedly drawn from. On 09-23 it would have told
+            # Ross to doubt a number that was two hundredths of a cent from
+            # CME's print, which is the opposite of the action he should take.
+            flag = ("" if not alarm else
                     f'<p style="margin:4px 0 0;color:{RED};font-weight:600">'
-                    f'We are {worst:,.2f} from a published peer. Every time that '
-                    f'has exceeded a nickel it has been our bug, not theirs — '
-                    f'check the ingest before sending this out.</p>')
+                    f'We are {worst:,.2f} from every desk recorded. That is a '
+                    f'reason to check, not a verdict: past a nickel has happened '
+                    f'three times and only once was it ours (the $1.79 on '
+                    f'2026-10-02) — twice it was theirs (Compass by 1.38 on '
+                    f'09-08, both desks by 0.21 on 09-23). Check our head '
+                    f'against CME before sending. Do not move our number '
+                    f'toward theirs.</p>')
             peercheck = (
                 f'<p style="margin:18px 0 6px;font-weight:600">Against the desks, '
                 f'same index date</p><table style="font:13px system-ui,Segoe UI,'

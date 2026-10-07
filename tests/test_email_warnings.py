@@ -47,30 +47,72 @@ def _base(**over):
 # The peer check: the line that would have caught 2026-10-05.
 # ---------------------------------------------------------------------------
 
+ALARM = "from every desk recorded"
+
+
 def test_a_peer_gap_inside_a_nickel_is_reported_without_alarm():
     t = _text(ne.build(_base(value=337.7363, live_peers=[("CIH", 337.76)]))[1])
     assert "Against the desks" in t
     assert "CIH" in t and "337.76" in t
-    assert "from a published peer" not in t, \
+    assert ALARM not in t, \
         "two cents is ordinary agreement and must not cry wolf"
 
 
 def test_a_peer_gap_past_a_nickel_raises_the_alarm():
     """
-    The 2026-10-05 magnitude. If this ever stops firing, the one check that
-    actually caught that morning -- a human reading CIH -- is all that is left.
+    The 2026-10-05 magnitude, and the shape that mattered: BOTH desks at 337.76
+    against our 339.55. If this ever stops firing, the one check that actually
+    caught that morning -- a human reading CIH -- is all that is left.
     """
     t = _text(ne.build(_base(value=339.5514,
                              live_peers=[("CIH", 337.76), ("COMPASS", 337.76)]))[1])
-    assert "from a published peer" in t
+    assert ALARM in t
     assert "1.79" in t
-    assert "check the ingest before sending this out" in t
+    assert "Check our head against CME before sending" in t
+
+
+def test_one_desk_off_and_one_AGREEING_does_not_alarm():
+    """
+    2026-09-08 as it happened: Compass printed 326.05, CIH printed 327.43, and
+    CME settled 327.43. We were six ten-thousandths out.
+
+    The old rule fired on max(gap) across the desks, so Compass alone would have
+    raised a 1.38 alarm about a number that was very nearly exact -- while the
+    comment above that code claimed it required BOTH desks. Code and comment
+    disagreed and the code was the looser. One desk disagreeing while the other
+    agrees with us is evidence about THAT DESK.
+    """
+    t = _text(ne.build(_base(value=327.4306,
+                             live_peers=[("CIH", 327.43), ("COMPASS", 326.05)]))[1])
+    assert ALARM not in t, "one desk off while the other agrees is not our alarm"
+    assert "326.05" in t, "but it must still be shown, not hidden"
 
 
 def test_the_alarm_is_symmetric():
     """Being well BELOW the desks is just as wrong as being above."""
     t = _text(ne.build(_base(value=335.90, live_peers=[("CIH", 337.76)]))[1])
-    assert "from a published peer" in t, "a negative gap must alarm too"
+    assert ALARM in t, "a negative gap must alarm too"
+
+
+def test_the_alarm_does_not_claim_the_gap_is_always_our_fault():
+    """
+    The wording this replaced said "every time that has exceeded a nickel it has
+    been our bug, not theirs". That was false, and provably so: of the three
+    gaps past a nickel on record, ONE was ours (the $1.79 on 2026-10-02) and TWO
+    were theirs (Compass by 1.38 on 09-08, both desks by 0.21 on 09-23). The
+    claim survived only because the $1.79 was repaired out of the data it was
+    drawn from.
+
+    It is not a style point. On 09-23 that sentence would have told Ross to
+    doubt a number sitting two hundredths of a cent from CME's print, and the
+    corrective action -- moving our number toward theirs -- would have been
+    wrong on both of the days the desks were the ones in error.
+    """
+    t = _text(ne.build(_base(value=339.5514,
+                             live_peers=[("CIH", 337.76), ("COMPASS", 337.76)]))[1])
+    assert "our bug, not theirs" not in t
+    assert "reason to check, not a verdict" in t
+    assert "Do not move our number toward theirs" in t
 
 
 def test_no_recorded_peer_says_so_rather_than_staying_silent():
@@ -83,7 +125,7 @@ def test_no_recorded_peer_says_so_rather_than_staying_silent():
     t = _text(ne.build(_base(live_peers=[]))[1])
     assert "No CIH or Compass estimate recorded" in t
     assert "add_peer_estimate.py" in t
-    assert "from a published peer" not in t, "absence is not a discrepancy"
+    assert ALARM not in t, "absence is not a discrepancy"
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +210,7 @@ def test_the_email_would_have_stopped_2026_10_05():
                              live_peers=[("CIH", 337.76), ("COMPASS", 337.76)]),
                        slot="am")[1])
     assert "NOT ingested" in t and "2,162 head" in t
-    assert "from a published peer" in t and "1.79" in t
+    assert ALARM in t and "1.79" in t
     # and the subject still carries the (wrong) number, so nothing here hides it
     subj = ne.build(_base(value=339.5514), slot="am")[0]
     assert "339.55" in subj

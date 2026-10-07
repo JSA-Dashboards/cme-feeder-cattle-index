@@ -160,6 +160,12 @@ If you add a guard, prove it fails on bad input before trusting it.
 ## Rules
 
 - Never commit `.env`, `*.p8`/`*.pem`, or secrets.
-- `data/mars_history.db` is tracked and ~26 MB. Known wart; do not add more.
+- `data/mars_history.db` is tracked and **41.6 MB** (it was ~26 MB when this rule
+  was written; it grows with every ingest). Known wart. The rule is **do not add
+  another large binary** — not "avoid committing this one", because committing it
+  is how the working copy stays shareable. Measured 2026-10-07: 60 commits touch
+  it and `.git` is 183 MB, so git deltas the unchanged SQLite pages well and each
+  commit costs about 3 MB amortised rather than another 41. The only other
+  tracked file over 1 MB is `data/Feeder` at 6.4 MB.
 - The index is the product. When in doubt about a change, check it against
   `cme_ftp_daily` before committing.

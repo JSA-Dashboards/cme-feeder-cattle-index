@@ -116,6 +116,35 @@ def _since(_db, days):
             else f"date('now','-{int(days)} day')")
 
 
+# THEN-vs-NOW, mirroring cash_calves.py's columns on this tab's own quantity.
+#
+# NOT more WINDOWS entries, and here the distinction bites harder than it does
+# on the cash tab. WINDOWS already offers 180 and 365, but those AVERAGE basis
+# across the period: a barn that ran +$12 all spring and -$4 all autumn reads as
+# +$4 over the year, a basis it never actually traded at. These columns are the
+# same measure at a point in time instead, so "is Carthage wider than it was"
+# has an answer.
+#
+# 12 MONTHS IS THE COMPARISON THAT MEANS MOST HERE. Basis is strongly seasonal,
+# so the 365-day column lands in the same part of the calendar and is close to
+# like-for-like; the 182-day one lands in the opposite season and reads as a
+# seasonal swing as much as a barn's own change. Both are shown because the
+# six-month move is still what a trader feels, but the caption says which is
+# which rather than leaving the reader to assume they are equivalent.
+LOOKBACKS = [(182, "6 mo ago"), (365, "12 mo ago")]
+LOOKBACK_BAND_DAYS = 30
+
+
+def _band(_db, centre_days, width=LOOKBACK_BAND_DAYS):
+    """
+    "report_date within `width` days of `centre_days` ago", both backends.
+    Centred, not trailing: a trailing month ending 182 days back is really 6.5
+    months ago, which would make every column quietly older than its label.
+    """
+    older, newer = int(centre_days) + width // 2, int(centre_days) - width // 2
+    return f"cs.report_date BETWEEN {_since(_db, older)} AND {_since(_db, newer)}"
+
+
 def _fmt_date(iso):
     """ISO to 'Sep 14'. %-d is glibc-only and raises on Windows."""
     from datetime import date
@@ -252,6 +281,71 @@ def load_barns(weight_low: int, days: int = 90):
             conn.close()
         except Exception:
             pass
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_basis_lookbacks(weight_low: int):
+    """
+    {(barn, state): {centre_days: {"basis": x, "rel": y}}} -- each barn's basis
+    at each LOOKBACKS offset, both modes, over a centred band.
+
+    THE SAME JOIN AND THE SAME WEIGHTING AS load_barns, or the columns are not
+    comparable with the ones beside them: an inner join to fci_daily so every
+    sale is paired with the index on its OWN sale day, and HEAD-weighted, not
+    pound-weighted. (cash_calves.py is pound-weighted for its own good reasons;
+    copying that formula here would make a barn's history disagree with its
+    present by a few cents for no visible reason.)
+
+    The bracket basis for each band is re-aggregated from the barn rows, exactly
+    as load_barns does for the live window -- SUM(head*price)/SUM(head) with
+    price itself SUM(p*h)/SUM(h) collapses back to the global figure -- so "rel"
+    is measured against the bracket AS IT WAS THEN, not against today's. A barn
+    compared to the current bracket would read as having moved when the whole
+    market did.
+
+    A BARN ABSENT FROM A BAND IS ABSENT, never zero: zero basis is a real and
+    unremarkable reading, so a filled-in zero here is indistinguishable from a
+    barn that traded exactly at the index. Empty dict on any failure, same quiet
+    degradation as everywhere else on this tab.
+    """
+    out = {}
+    try:
+        _db, conn = _conn()
+    except Exception:
+        return out
+    try:
+        for centre, _label in LOOKBACKS:
+            rows = conn.cursor().execute(
+                "SELECT cs.location, cs.state, SUM(cs.head_count), "
+                "       SUM(cs.avg_price*cs.head_count)"
+                "         / NULLIF(SUM(cs.head_count),0), "
+                "       SUM(f.fci_value*cs.head_count)"
+                "         / NULLIF(SUM(cs.head_count),0) "
+                "FROM calf_sales cs "
+                "JOIN fci_daily f ON f.report_date = cs.report_date "
+                f"WHERE cs.weight_low = {int(weight_low)} "
+                f"  AND {_band(_db, centre)} "
+                "GROUP BY cs.location, cs.state").fetchall()
+            band = [{"barn": str(a), "state": str(b), "head": int(c or 0),
+                     "basis": float(d) - float(e)}
+                    for a, b, c, d, e in rows if d and e and c]
+            if not band:
+                continue
+            head = sum(r["head"] for r in band)
+            bracket_basis = sum(r["head"] * r["basis"] for r in band) / head
+            for r in band:
+                out.setdefault((r["barn"], r["state"]), {})[centre] = {
+                    "basis": r["basis"],
+                    "rel": r["basis"] - bracket_basis,
+                }
+    except Exception:
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
 
 
 def render(tile, muted="#6b7280", colors=None, watermark=None,
@@ -472,16 +566,46 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
     # Both basis columns show whichever mode is selected. The toggle drives the
     # tiles, the chart and the sort; seeing the two side by side is how a reader
     # learns what the toggle actually did.
-    st.dataframe(pd.DataFrame([
-        {"Sale barn": r["barn"], "State": r["state"], "Head": r["head"],
-         "Prints": r["prints"], "$/cwt": round(r["price"], 2),
-         "Avg wt": round(r["weight"]),
-         "Index on sale days": round(r["fci"], 2),
-         "vs FCI": round(r["basis"], 2),
-         "vs bracket": round(r["rel"], 2),
-         "Timing": round(r["timing"], 2),
-         "Last sale": _fmt_date(r["last"])}
-        for r in ranked]), use_container_width=True, hide_index=True)
+    # The lookback columns carry the ACTIVE metric only. Both basis columns are
+    # already shown side by side so the toggle's effect is visible; repeating
+    # that for two more offsets would be four extra columns on an eleven-column
+    # table, and the one a reader wants is the one they just selected. The
+    # header names the mode rather than saying a bare "6 mo ago", because on a
+    # table holding two different basis measures an unqualified column is a
+    # number whose meaning the reader has to guess.
+    back = load_basis_lookbacks(wt)
+    short = "vs FCI" if mode == MODE_FCI else "vs bracket"
+
+    def _row(r):
+        out = {"Sale barn": r["barn"], "State": r["state"], "Head": r["head"],
+               "Prints": r["prints"], "$/cwt": round(r["price"], 2),
+               "Avg wt": round(r["weight"]),
+               "Index on sale days": round(r["fci"], 2),
+               "vs FCI": round(r["basis"], 2),
+               "vs bracket": round(r["rel"], 2)}
+        prior = back.get((r["barn"], r["state"]), {})
+        for centre, label in LOOKBACKS:
+            # None, NOT 0.0. Zero basis is a real and ordinary reading here, so a
+            # filled-in zero would be indistinguishable from a barn that traded
+            # exactly at the index that month.
+            p = prior.get(centre)
+            out[f"{short} {label}"] = round(p[metric], 2) if p else None
+        out["Timing"] = round(r["timing"], 2)
+        out["Last sale"] = _fmt_date(r["last"])
+        return out
+
+    st.dataframe(pd.DataFrame([_row(r) for r in ranked]),
+                 use_container_width=True, hide_index=True)
+    st.caption(
+        f"**{short} {LOOKBACKS[0][1]}** and **{short} {LOOKBACKS[1][1]}** are "
+        f"the same measure at a point in time — that barn's basis over a "
+        f"{LOOKBACK_BAND_DAYS}-day band centred on the date, against the bracket "
+        f"as it stood *then* — not an average of the months in between. Basis is "
+        f"seasonal, so **{LOOKBACKS[1][1]}** is the closer comparison: it lands "
+        f"in the same part of the calendar, where **{LOOKBACKS[0][1]}** is the "
+        f"opposite season and moves with it. Blank means the barn had no "
+        f"qualifying sales in that band."
+    )
 
     st.caption(
         f"Steers only, muscle grade #1 and #1-2, {wt}-{wt + 49} lb, from the "

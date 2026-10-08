@@ -192,15 +192,50 @@ def test_a_missing_table_leaves_the_columns_empty_rather_than_breaking(monkeypat
 # The decision itself, guarded.
 # ---------------------------------------------------------------------------
 
-def test_the_long_lookbacks_are_NOT_in_the_window_list():
+def test_every_long_window_is_declared_long():
     """
-    The thing this feature deliberately did not do. Someone "simplifying" the
-    lookback into two more WINDOWS entries would reintroduce the blended
-    year-average in a tile that says it is the current price.
+    THIS TEST CHANGED SHAPE ON 2026-10-07, and the reason is worth keeping.
+
+    It used to assert the long windows did not exist at all -- the feature was
+    built as columns precisely to avoid a blended year-average sitting in a tile
+    that reads as the current price. Ross then asked for the long windows too,
+    so the risk did not go away, it moved: the mitigation is now LABELLING
+    rather than absence.
+
+    So the rule is no longer "they must not be offered". It is "any window long
+    enough to blend a moving market must be in LONG_WINDOWS", which is what
+    drives the tile wording and the warning. A window added to WINDOWS and
+    forgotten here would be offered with no warning at all, which is exactly the
+    state this whole feature was designed around.
     """
-    assert 180 not in cc.WINDOWS and 182 not in cc.WINDOWS
-    assert 365 not in cc.WINDOWS
-    assert cc.WINDOWS == [14, 30, 60, 90]
+    for d in cc.WINDOWS:
+        if d >= 180:
+            assert d in cc.LONG_WINDOWS, (
+                f"{d}-day window is long enough to blend a moving market but is "
+                f"not in LONG_WINDOWS, so it renders with no warning")
+    assert set(cc.LONG_WINDOWS) <= set(cc.WINDOWS), "a long window nobody can pick"
+
+
+def test_every_window_has_a_label():
+    """format_func indexes WINDOW_LABEL directly, so a missing entry is a
+    KeyError on the page rather than a fallback."""
+    for d in cc.WINDOWS:
+        assert d in cc.WINDOW_LABEL, d
+
+
+def test_the_lookback_columns_do_not_move_with_the_window():
+    """
+    The point of keeping them separate. The columns answer "what was it then"
+    and must read the same whichever averaging window is selected -- otherwise
+    they are just the window again, under a different heading.
+    """
+    import inspect
+    params = inspect.signature(cc.load_lookbacks).parameters
+    assert "days" not in params, (
+        "load_lookbacks must not take the window: the columns answer 'what was "
+        "it then' and have to read the same whichever averaging period is "
+        "selected, or they are just the window again under a new heading")
+    assert set(params) == {"weight_low", "state"}, params
 
 
 def test_the_offsets_are_roughly_six_and_twelve_months():

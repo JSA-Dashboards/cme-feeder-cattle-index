@@ -29,7 +29,28 @@ import streamlit as st
 
 ALL_STATES = "All states"
 CASH_BRACKETS = [400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900]
-WINDOWS = [14, 30, 60, 90]
+WINDOWS = [14, 30, 60, 90, 180, 365]
+# 180/365 match barn_basis.py's window lengths, which is the established
+# convention here for "6 months" and "a year" as an averaging period. The
+# LOOKBACKS centres below are 182/365 and deliberately not the same thing: one
+# is how long a period to average, the other is a point to stand at.
+WINDOW_LABEL = {14: "last 14 days", 30: "last 30 days", 60: "last 60 days",
+                90: "last 90 days", 180: "last 6 months", 365: "last 12 months"}
+
+# Windows long enough that the average stops describing the current market.
+#
+# These were deliberately absent until 2026-10-07, and the reason has not gone
+# away -- it is now LABELLED rather than avoided. The tiles and the table report
+# an average over the whole window, and over a year that blends a market that
+# moved: on 550-600 lb, monthly averages ran $396.75 in Aug 2026 to $479.99 in
+# Apr 2026, and the 12-month figure is $446.61 against a 30-day reading of
+# $411.47. A reader who takes $446.61 for today's price is $35 wrong.
+#
+# So on a long window the headline says what it is. Do not drop that wording to
+# tidy the tile: it is the whole reason these entries are safe to offer, and the
+# "6 mo ago"/"12 mo ago" COLUMNS remain the way to ask what a price actually was
+# at a point in time.
+LONG_WINDOWS = (180, 365)
 
 # THEN-vs-NOW, and deliberately NOT more entries in WINDOWS.
 #
@@ -210,7 +231,7 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
                           key=f"{key_prefix}_wt")
     with f3:
         days = st.selectbox("Window", WINDOWS, index=1,
-                            format_func=lambda d: f"last {d} days",
+                            format_func=lambda d: WINDOW_LABEL[d],
                             key=f"{key_prefix}_days")
     with f2:
         state = st.selectbox("State", [ALL_STATES] + load_states(days),
@@ -221,17 +242,24 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
         st.info(
             f"No {wt}-{wt + 49} lb steer sales reported in "
             f"{'any tracked state' if state == ALL_STATES else state} over the "
-            f"last {days} days. Light calves thin out badly in late summer and "
+            f"{WINDOW_LABEL[days]}. Light calves thin out badly in late summer and "
             f"the heaviest brackets only trade at a few barns — try a wider "
             f"window or a different weight."
         )
         return
 
     where = "All barns" if state == ALL_STATES else state
+    # On a long window the headline is a BLEND, and says so in the tile itself
+    # rather than only in a caption below the fold. See LONG_WINDOWS.
+    long_window = days in LONG_WINDOWS
+    avg_sub = ("$/cwt, pound-weighted — blended over the "
+               f"{WINDOW_LABEL[days].replace('last ', '')}, not today's price"
+               if long_window else "$/cwt, pound-weighted")
     k = st.columns(4)
     with k[0]:
-        st.markdown(tile(f"{where} average", f"${summ['price']:,.2f}",
-                         _sub("$/cwt, pound-weighted")), unsafe_allow_html=True)
+        st.markdown(tile(f"{where} average" + (f", {WINDOW_LABEL[days]}" if long_window else ""),
+                         f"${summ['price']:,.2f}",
+                         _sub(avg_sub)), unsafe_allow_html=True)
     with k[1]:
         st.markdown(tile("Per head",
                          f"${summ['price'] * summ['weight'] / 100:,.2f}",
@@ -244,7 +272,7 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
                     unsafe_allow_html=True)
     with k[3]:
         st.markdown(tile("Most recent", _fmt_date(summ["last"]),
-                         _sub(f"over the last {days} days")),
+                         _sub(f"over the {WINDOW_LABEL[days]}")),
                     unsafe_allow_html=True)
 
     # The spread is worth as much as the average. Measured 2026-09-15, the 600 lb
@@ -281,6 +309,18 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
 
     st.dataframe(pd.DataFrame([_row(r) for r in rows]),
                  use_container_width=True, hide_index=True)
+
+    if long_window:
+        st.warning(
+            f"**Every price above is an average over the "
+            f"{WINDOW_LABEL[days].replace('last ', '')}**, including the $/cwt "
+            f"column — not what cattle are bringing now. Over that span the "
+            f"market moves: on 550-600 lb calves the monthly average ran $396.75 "
+            f"in August against $479.99 in April. For the current market use a "
+            f"14- or 30-day window; for what a barn brought at a point in the "
+            f"past use the **{LOOKBACKS[0][1]}** and **{LOOKBACKS[1][1]}** "
+            f"columns, which are not affected by this setting."
+        )
 
     st.caption(
         f"Steers only, muscle grade #1 and #1-2, {wt}-{wt + 49} lb, from the "

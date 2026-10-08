@@ -59,12 +59,65 @@ BASELINE_YEARS = (2021, 2025)
 # built on the latest date would be noise dressed as a signal.
 CURRENT_WEEKS = 4
 
+# A BARN IS A SET OF SLUGS, NOT ONE SLUG, and this page was wrong about that
+# until 2026-10-07. Five of the twelve markets report their bred females under a
+# "Replacement Special" slug carrying NO slaughter side at all -- Salina 1893,
+# Billings 2257, Tina 3648, the Joplin special 1798, Palmyra 1816 -- between them
+# 179,481 of 354,109 bred head, 50.7%. retention_incentive() keyed on report_date
+# alone, so that bred head was divided by whatever OTHER barn happened to report
+# a cull price the same day. The page promises "sell her bred to a neighbour, or
+# ship her to the packer": one animal, one market. Pairing by barn restores it.
+BARN_OF_SLUG = {
+    1797: "Joplin, MO",         1798: "Joplin, MO",
+    1651: "West Plains, MO",
+    1788: "Springfield, MO",
+    1816: "Palmyra, MO",        1789: "Palmyra, MO",
+    3648: "Tina, MO",           3635: "Tina, MO",
+    1823: "Oklahoma City, OK",
+    1824: "Woodward, OK",
+    1825: "El Reno, OK",
+    1843: "Ada, OK",
+    2257: "Billings, MT",       1774: "Billings, MT",   1776: "Billings, MT",
+    1893: "Salina, KS",
+}
+
+# A REPLACEMENT SPECIAL IS NOT HELD ON SALE DAY, so "same barn, same date" would
+# throw the special away rather than fix it. Billings, Tina and the Joplin
+# special pair on the exact date ZERO times out of 90, and every one of them
+# within a week (median gap 2, 3 and 1 days); Palmyra is the only one that lands
+# on the day, 93% of the time. A cull cow's salvage value does not move
+# materially in two days -- pairing her against a different STATE does. So the
+# rule is the nearest salvage at the SAME barn, with the gap carried on the row
+# rather than hidden, the convention mx_prices.compare() already uses for the
+# border quote. 96% of paired observations still come out same-day.
+MAX_PAIR_GAP_DAYS = 7
+
+# Salina reports bred females and no slaughter cows, and its companion slug 1892
+# carries neither, so there is nothing at that market to pair against. It drops
+# out of the ratio entirely; the page names it rather than letting a reader
+# assume the panel is still twelve markets.
+UNPAIRABLE_BARNS = ("Salina, KS",)
+
+# THE CACHE SERVES SHAPE, NOT FRESHNESS. app.py's load_all() is
+# @st.cache_data, which keys on the DECORATED function's own code and its
+# arguments and never on the modules it calls -- so every change in this file
+# is invisible to it and the page goes on serving the previous dict with no
+# error and no stale marker. Bump this whenever retention_incentive(),
+# decompose() or annual_ratio() changes the SHAPE of what it returns, and pass
+# it into the cached call so it lands in the key. The same trap is recorded for
+# leverage.SCHEMA, am_cutout.SCHEMA, mx_prices.SCHEMA and wasde.SCHEMA.
+#
+# 2  same-barn pairing: rows gained `barn` and `gap_days`, decompose() gained
+#    n_dates/n_barns/n_base_dates/unpairable, annual_ratio() gained months and
+#    barns and now drops years under MIN_ANNUAL_MONTHS.
+SCHEMA = 2
+
 
 def _rows(conn, since_iso=None):
     where = f"WHERE report_date >= {db.placeholders(1)}" if since_iso else ""
     args = (since_iso,) if since_iso else ()
     return conn.cursor().execute(
-        f"SELECT report_date, commodity, class_desc, price_unit, head_count, "
+        f"SELECT report_date, slug_id, commodity, class_desc, price_unit, head_count, "
         f"avg_weight, avg_price, age, receipts, receipts_year_ago "
         f"FROM replacement_sales {where}", args).fetchall()
 
@@ -77,37 +130,59 @@ def latest_date(conn):
 
 def retention_incentive(conn, since_iso=None):
     """
-    Per report date: bred value per head, slaughter-cow salvage per head, and
-    the ratio between them.
+    One row per BARN per sale date: bred value per head, that same barn's
+    slaughter-cow salvage per head, and the ratio between them.
 
     Salvage is converted to a per-head basis (Per Cwt x weight / 100) because
     bred females trade per head and slaughter cows per hundredweight. Comparing
     them unconverted is the single easiest way to produce nonsense here.
+
+    BOTH SIDES COME FROM THE SAME MARKET -- see BARN_OF_SLUG, which this keyed
+    past until 2026-10-07, and MAX_PAIR_GAP_DAYS for why the pairing is nearest
+    rather than exact. Each row carries `barn` and `gap_days` so a caller can
+    see which market it came from and how far the two sides sit apart.
     """
-    per_date = {}
-    for (rd, commodity, cls, unit, head, wt, price, _age, _r, _ry) in _rows(conn, since_iso):
-        iso = str(db.iso(rd))
-        d = per_date.setdefault(iso, {"bred_head": 0, "bred_dollars": 0.0,
-                                      "salv_head": 0, "salv_dollars": 0.0})
+    bred, salv = {}, {}
+    for (rd, slug, commodity, cls, unit, head, wt, price,
+         _age, _r, _ry) in _rows(conn, since_iso):
+        barn = BARN_OF_SLUG.get(slug)
+        if not (barn and price and head):
+            continue
+        day = date.fromisoformat(str(db.iso(rd)))
         if (commodity == "Replacement Cattle" and cls in BRED_CLASSES
-                and unit in PER_HEAD_UNITS and price):
-            d["bred_head"] += head
-            d["bred_dollars"] += head * price
+                and unit in PER_HEAD_UNITS):
+            d = bred.setdefault((barn, day), [0, 0.0])
+            d[0] += head
+            d[1] += head * price
         elif (commodity == "Slaughter Cattle" and cls == "Cows"
-              and unit == "Per Cwt" and price and wt):
-            d["salv_head"] += head
-            d["salv_dollars"] += head * price * wt / 100.0
+              and unit == "Per Cwt" and wt):
+            d = salv.setdefault((barn, day), [0, 0.0])
+            d[0] += head
+            d[1] += head * price * wt / 100.0
+
+    salv_days = {}
+    for (barn, day) in salv:
+        salv_days.setdefault(barn, []).append(day)
+    for days in salv_days.values():
+        days.sort()
 
     out = []
-    for iso in sorted(per_date):
-        d = per_date[iso]
-        if not (d["bred_head"] and d["salv_head"]):
+    for (barn, day), (bh, bd) in bred.items():
+        days = salv_days.get(barn)
+        if not days:
             continue
-        bred = d["bred_dollars"] / d["bred_head"]
-        salv = d["salv_dollars"] / d["salv_head"]
-        out.append({"date": iso, "bred": bred, "salvage": salv,
-                    "premium": bred - salv, "ratio": bred / salv,
-                    "bred_head": d["bred_head"], "salvage_head": d["salv_head"]})
+        # Ties break to the EARLIER date: a cull price printed before the bred
+        # sale was information the buyer had; one printed after it was not.
+        near = min(days, key=lambda x: (abs((x - day).days), x))
+        gap = abs((near - day).days)
+        if gap > MAX_PAIR_GAP_DAYS:
+            continue
+        sh, sd = salv[(barn, near)]
+        b, s = bd / bh, sd / sh
+        out.append({"date": day.isoformat(), "barn": barn, "gap_days": gap,
+                    "bred": b, "salvage": s, "premium": b - s, "ratio": b / s,
+                    "bred_head": bh, "salvage_head": sh})
+    out.sort(key=lambda r: (r["date"], r["barn"]))
     return out
 
 
@@ -133,13 +208,20 @@ def decompose(conn):
     yr = [r for r in inc if r["date"][:4] == prior_year]
 
     med = lambda rows, k: median(r[k] for r in rows)
+    # An OBSERVATION is one barn on one sale date, so it is no longer the same
+    # thing as a sale date -- several barns sell on a Tuesday. Both counts are
+    # returned because the caption quotes dates and the median is over
+    # observations, and conflating them overstated the sample before.
     out = {
         "latest": latest, "weeks": CURRENT_WEEKS, "n_current": len(cur),
+        "n_dates": len({r["date"] for r in cur}),
+        "n_barns": len({r["barn"] for r in cur}),
         "bred": med(cur, "bred"), "salvage": med(cur, "salvage"),
         "premium": med(cur, "premium"), "ratio": med(cur, "ratio"),
         "base_ratio": med(base, "ratio"), "base_years": BASELINE_YEARS,
-        "n_base": len(base),
+        "n_base": len(base), "n_base_dates": len({r["date"] for r in base}),
         "bred_head": sum(r["bred_head"] for r in cur),
+        "unpairable": UNPAIRABLE_BARNS,
     }
     out["ratio_vs_base"] = out["ratio"] - out["base_ratio"]
     if yr:
@@ -163,14 +245,56 @@ def decompose(conn):
     return out
 
 
+# A year needs this many distinct months before it is drawn as a bar. The MARS
+# floor leaves 2018 with October-December at one barn -- 13 observations, which
+# median to 1.61 and would print as the highest year on the chart. A three-month
+# window is not a year, and a bar labelled 2018 says it is.
+MIN_ANNUAL_MONTHS = 6
+
+
 def annual_ratio(conn):
-    """[(year, median ratio, median bred, median salvage, n dates)] for charting."""
+    """
+    [(year, median ratio, median bred, median salvage, n obs, n months, n barns)].
+
+    The last three are coverage, and the chart needs them: n obs counts barn
+    sale-dates rather than sale dates, and a year short of twelve months is
+    labelled by its span rather than passed off as a full year. The ratio is
+    seasonal, so a part year is not comparable to a whole one -- the same reason
+    YTD_CUT exists for the heifer-share chart further down this file.
+
+    Years under MIN_ANNUAL_MONTHS are dropped rather than drawn small.
+    """
     inc = retention_incentive(conn)
     by = {}
     for r in inc:
         by.setdefault(r["date"][:4], []).append(r)
-    return [(y, median(x["ratio"] for x in v), median(x["bred"] for x in v),
-             median(x["salvage"] for x in v), len(v)) for y, v in sorted(by.items())]
+    out = []
+    for y, v in sorted(by.items()):
+        months = {x["date"][:7] for x in v}
+        if len(months) < MIN_ANNUAL_MONTHS:
+            continue
+        out.append((y, median(x["ratio"] for x in v), median(x["bred"] for x in v),
+                    median(x["salvage"] for x in v), len(v), len(months),
+                    len({x["barn"] for x in v})))
+    return out
+
+
+def annual_span(conn, year):
+    """
+    ("Jan", "Oct") for a part year, or None when it covers all twelve months.
+
+    The chart labels an incomplete year with its span instead of its number, so
+    a ten-month bar standing beside twelve-month bars says so on its own line.
+    """
+    months = sorted({r["date"][5:7] for r in retention_incentive(conn)
+                     if r["date"][:4] == str(year)})
+    if len(months) >= 12:
+        return None
+    if not months:
+        return None
+    name = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    return (name[int(months[0]) - 1], name[int(months[-1]) - 1])
 
 
 def monthly_ratio(conn):
@@ -198,7 +322,7 @@ def class_prices(conn, weeks=CURRENT_WEEKS):
     yr_lo = (end - timedelta(days=364) - timedelta(weeks=weeks)).isoformat()
 
     buckets = {}
-    for (rd, commodity, cls, unit, head, _wt, price, _age, _r, _ry) in _rows(conn):
+    for (rd, _slug, commodity, cls, unit, head, _wt, price, _age, _r, _ry) in _rows(conn):
         iso = str(db.iso(rd))
         if commodity != "Replacement Cattle" or not price or not head:
             continue

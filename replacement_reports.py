@@ -62,6 +62,22 @@ REPLACEMENT_SLUGS = {
     1893: "Farmers and Ranchers Replacement - Salina, KS",
     1816: "F and T Livestock Feeder/Replacement - Palmyra, MO",
     2257: "Public Auction Yards Replacement Special - Billings, MT",
+
+    # COMPANION SLAUGHTER SLUGS, added 2026-10-07. The five replacement slugs
+    # directly above carry bred females and NO slaughter side -- 179,481 of
+    # 354,109 bred head, 50.7% -- so herd.retention_incentive() was dividing
+    # them by some other barn's cull price. These are the same physical markets'
+    # regular cattle auctions, which is where that barn's slaughter cows are
+    # reported. They add no bred head the panel did not already have; they exist
+    # to give the specials a denominator at their own market.
+    #
+    # Salina has no companion: 1892 is the Farmers and Ranchers regular auction
+    # and carries neither slaughter cows nor bred females. It stays unpairable
+    # and herd.UNPAIRABLE_BARNS names it.
+    1774: "Public Auction Yards Cattle Auction - Billings, MT (salvage side)",
+    1776: "Public Auction Yards Cattle Auction - Billings, MT (salvage side)",
+    3635: "Tina Livestock Market Cattle Auction - Tina, MO (salvage side)",
+    1789: "F and T Livestock Market Slaughter Cattle - Palmyra, MO (salvage side)",
 }
 
 # Feeder Cattle rows in these reports duplicate ground the FCI already covers,
@@ -210,48 +226,29 @@ def ingest(conn, since: date, until: date, verbose=True):
 
 def retention_incentive(conn, since_iso=None):
     """
-    Bred-cow value against slaughter-cow salvage, per report date.
+    Bred-cow value against slaughter-cow salvage, per barn per sale date.
 
     This is the retention decision in one number. A cow is worth either what a
     neighbour will pay for her bred, or what the packer will pay for her by the
     pound. When the first far exceeds the second, keeping her pays and the herd
     grows; as the ratio compresses, selling wins.
 
-    Salvage is converted to a per-head basis (Per Cwt price x weight / 100) so
-    the two sides are comparable -- bred females trade Per Unit, slaughter cows
-    Per Cwt, and comparing them unconverted is meaningless.
+    THIS DELEGATES TO herd.py AND MUST KEEP DOING SO. It carried its own copy of
+    the arithmetic until 2026-10-07 -- the same shape, pooled on report_date --
+    which meant `--show` and the dashboard computed the same published figure
+    two different ways off one table. They agreed only for as long as nobody
+    changed either. That is the letter-versus-dashboard failure this project has
+    now recorded four times, and a second implementation of a number is how it
+    arrives every time. herd.py owns the arithmetic; this owns the printing.
+
+    Keys are remapped because the two had different names for the same values.
     """
-    where = f"WHERE report_date >= {db.placeholders(1)}" if since_iso else ""
-    args = (since_iso,) if since_iso else ()
-    rows = conn.cursor().execute(
-        f"SELECT report_date, commodity, class_desc, price_unit, head_count, "
-        f"avg_weight, avg_price FROM replacement_sales {where}", args).fetchall()
-
-    per_date = {}
-    for rd, commodity, cls, unit, head, wt, price in rows:
-        iso = str(db.iso(rd))
-        d = per_date.setdefault(iso, {"bred_head": 0, "bred_dollars": 0.0,
-                                      "salv_head": 0, "salv_dollars": 0.0})
-        if (commodity == "Replacement Cattle" and cls in ("Bred Cows", "Bred Heifers")
-                and unit in PER_HEAD_UNITS):
-            d["bred_head"] += head
-            d["bred_dollars"] += head * price
-        elif (commodity == "Slaughter Cattle" and cls == "Cows"
-              and unit == "Per Cwt" and wt):
-            d["salv_head"] += head
-            d["salv_dollars"] += head * price * wt / 100.0
-
-    out = []
-    for iso in sorted(per_date):
-        d = per_date[iso]
-        if not (d["bred_head"] and d["salv_head"]):
-            continue
-        bred = d["bred_dollars"] / d["bred_head"]
-        salv = d["salv_dollars"] / d["salv_head"]
-        out.append({"date": iso, "bred_per_head": bred, "salvage_per_head": salv,
-                    "premium": bred - salv, "ratio": bred / salv,
-                    "bred_head": d["bred_head"], "salvage_head": d["salv_head"]})
-    return out
+    import herd
+    return [{"date": r["date"], "barn": r["barn"], "gap_days": r["gap_days"],
+             "bred_per_head": r["bred"], "salvage_per_head": r["salvage"],
+             "premium": r["premium"], "ratio": r["ratio"],
+             "bred_head": r["bred_head"], "salvage_head": r["salvage_head"]}
+            for r in herd.retention_incentive(conn, since_iso)]
 
 
 def main():
@@ -275,12 +272,12 @@ def main():
 
     inc = retention_incentive(conn)
     if inc:
-        print(f"\n{'date':<12}{'bred $/hd':>11}{'salvage $/hd':>14}"
-              f"{'premium':>10}{'ratio':>8}{'bred hd':>9}")
+        print(f"\n{'date':<12}{'barn':<20}{'bred $/hd':>11}{'salvage $/hd':>14}"
+              f"{'premium':>10}{'ratio':>8}{'bred hd':>9}{'gap':>5}")
         for r in inc[-14:]:
-            print(f"{r['date']:<12}{r['bred_per_head']:>11,.0f}"
+            print(f"{r['date']:<12}{r['barn']:<20}{r['bred_per_head']:>11,.0f}"
                   f"{r['salvage_per_head']:>14,.0f}{r['premium']:>10,.0f}"
-                  f"{r['ratio']:>8.2f}{r['bred_head']:>9,}")
+                  f"{r['ratio']:>8.2f}{r['bred_head']:>9,}{r['gap_days']:>4}d")
     conn.close()
 
 

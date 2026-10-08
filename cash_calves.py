@@ -31,6 +31,24 @@ ALL_STATES = "All states"
 CASH_BRACKETS = [400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900]
 WINDOWS = [14, 30, 60, 90]
 
+# THEN-vs-NOW, and deliberately NOT more entries in WINDOWS.
+#
+# Window is an AVERAGING period, so "last 12 months" would be one number blended
+# across a year of a trending market -- not a price that was ever true. Measured
+# 2026-10-07 on the 550-600 lb bracket: monthly averages ran $396.75 (Aug 2026)
+# to $479.99 (Apr 2026), an $83 swing, and the 12-month average comes out
+# $446.61 against a 30-day reading of $411.47. Putting $446.61 in a tile
+# captioned "what cattle are worth" is the hay-units mistake in CLAUDE.md with a
+# different unit: a figure that is arithmetically correct and answers a question
+# nobody asked.
+#
+# So the lookback is a separate COLUMN, not a longer window. Each is a
+# pound-weighted average over a 30-day band CENTRED on that date -- the same
+# formula as the live reading, so the comparison is like for like, and wide
+# enough that a barn selling fortnightly still has prints in it.
+LOOKBACKS = [(182, "6 mo ago"), (365, "12 mo ago")]
+LOOKBACK_BAND_DAYS = 30
+
 
 def _conn():
     import snowflake_db as _db
@@ -40,6 +58,16 @@ def _conn():
 def _since(_db, days):
     return (f"DATEADD(day, -{int(days)}, CURRENT_DATE())" if _db.use_snowflake()
             else f"date('now','-{int(days)} day')")
+
+
+def _band(_db, centre_days, width=LOOKBACK_BAND_DAYS):
+    """
+    SQL for "report_date within `width` days of `centre_days` ago", on either
+    backend. Half the width each side, so the band is centred rather than
+    trailing -- a trailing month ending 182 days back is really 6.5 months ago.
+    """
+    older, newer = int(centre_days) + width // 2, int(centre_days) - width // 2
+    return f"report_date BETWEEN {_since(_db, older)} AND {_since(_db, newer)}"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -88,6 +116,48 @@ def load_rows(weight_low: int, state: str, days: int = 30):
             conn.close()
         except Exception:
             pass
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_lookbacks(weight_low: int, state: str):
+    """
+    {(barn, state): {centre_days: price}} -- what each barn's cattle brought at
+    each LOOKBACKS offset, pound-weighted over a centred band.
+
+    A BARN WITH NO PRINTS IN A BAND IS ABSENT, not zero and not carried forward.
+    Sale barns open, close, change sale days and skip seasons; the honest answer
+    for "what did Belen bring 12 months ago" when Belen did not sell is nothing
+    at all, and the table renders it blank. Filling it would invent a comparison.
+
+    Same ([], None)-style degradation as load_rows: a missing table leaves the
+    columns empty rather than breaking the page.
+    """
+    out = {}
+    try:
+        _db, conn = _conn()
+    except Exception:
+        return out
+    try:
+        for centre, _label in LOOKBACKS:
+            where = (f"weight_low = {int(weight_low)} AND {_band(_db, centre)}")
+            if state != ALL_STATES:
+                where += f" AND state = '{state}'"
+            for loc, stt, price in conn.cursor().execute(
+                    "SELECT location, state, "
+                    "       SUM(head_count*avg_weight*avg_price)"
+                    "         / NULLIF(SUM(head_count*avg_weight),0) "
+                    f"FROM calf_sales WHERE {where} "
+                    "GROUP BY location, state").fetchall():
+                if price:
+                    out.setdefault((str(loc), str(stt)), {})[centre] = float(price)
+    except Exception:
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -192,12 +262,25 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
             f"weight of cattle."
         )
 
-    st.dataframe(pd.DataFrame([
-        {"Sale barn": r["barn"], "State": r["state"], "Head": r["head"],
-         "Avg wt": round(r["weight"]), "$/cwt": round(r["price"], 2),
-         "$/head": round(r["price"] * r["weight"] / 100, 2),
-         "Prints": r["prints"], "Last sale": _fmt_date(r["last"])}
-        for r in rows]), use_container_width=True, hide_index=True)
+    back = load_lookbacks(wt, state)
+
+    def _row(r):
+        out = {"Sale barn": r["barn"], "State": r["state"], "Head": r["head"],
+               "Avg wt": round(r["weight"]), "$/cwt": round(r["price"], 2),
+               "$/head": round(r["price"] * r["weight"] / 100, 2)}
+        prior = back.get((r["barn"], r["state"]), {})
+        for centre, label in LOOKBACKS:
+            # None, NOT 0.0 and not the current price. pandas renders it blank
+            # and leaves the column numeric; a zero would sort to the bottom and
+            # read as a $427 collapse.
+            p = prior.get(centre)
+            out[label] = round(p, 2) if p is not None else None
+        out["Prints"] = r["prints"]
+        out["Last sale"] = _fmt_date(r["last"])
+        return out
+
+    st.dataframe(pd.DataFrame([_row(r) for r in rows]),
+                 use_container_width=True, hide_index=True)
 
     st.caption(
         f"Steers only, muscle grade #1 and #1-2, {wt}-{wt + 49} lb, from the "
@@ -206,4 +289,12 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
         f"pen. **Prints** is how many separate lots make up each row — a barn "
         f"showing one print is one lot, not a market. Dated by the auction's "
         f"own sale date."
+    )
+    st.caption(
+        f"**{LOOKBACKS[0][1]}** and **{LOOKBACKS[1][1]}** are that barn's own "
+        f"pound-weighted average over a {LOOKBACK_BAND_DAYS}-day band centred "
+        f"on the date, at the same weight — not a window average, so they are "
+        f"comparable to the $/cwt beside them. Blank means the barn had no "
+        f"qualifying prints then: barns open, close and move sale days, and an "
+        f"absent comparison is left absent rather than filled in."
     )

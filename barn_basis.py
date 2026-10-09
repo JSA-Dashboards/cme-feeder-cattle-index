@@ -83,7 +83,52 @@ WINDOW_LABEL = {90: "last 3 months", 180: "last 6 months", 365: "last year"}
 # old print floor (2,053 against 2,153) while removing every 31-head leader.
 MIN_HEAD = 100
 
-ALL_BARNS = "All barns"
+# How many barns the chart shows from each end of the ranking before pinned
+# barns are added. Named rather than written twice as a literal 10, because the
+# two slices have to stay the same number or the chart is lopsided.
+CHART_ENDS = 10
+
+
+def keep_selected(selected, options):
+    """
+    The selection, narrowed to the barns that still exist in the current
+    roster, in the roster's own order.
+
+    Split out of render() and given no Streamlit import on purpose, so the
+    churn case is testable without a browser. The roster really does churn --
+    18 of the barns clearing the floor at 700-749 over three months do not
+    clear it at 900-949 -- so a barn that was picked can be absent from
+    `options` after an ordinary change of weight class or window.
+
+    st.multiselect raises StreamlitAPIException when a default is not among the
+    options, so unlike the single selectbox this replaced, leaving it to
+    Streamlit's own widget-identity fallback is not safe to rely on: that path
+    ends in a traceback on the page rather than a reset box. Filtering here
+    makes the outcome the same in every Streamlit version -- the vanished barn
+    is dropped, the ones that survived stay picked -- and
+    tests/test_barn_basis_pins.py feeds it a vanished barn to prove it fires.
+    """
+    keep = set(selected or ())
+    return [o for o in options if o in keep]
+
+
+def pinned_rows(qual, selected, metric):
+    """
+    The rows the chart draws: the top and bottom `CHART_ENDS` by `metric`, plus
+    every selected barn regardless of where it ranked.
+
+    Deduped on the barn label so a roster under twenty barns is not listed
+    twice, and so a pinned barn already in one of the ends is not doubled.
+    Returned ascending by metric, because the strongest basis has to land at
+    the top of a horizontal bar chart.
+    """
+    ranked = sorted(qual, key=lambda r: r[metric], reverse=True)
+    ends = ranked[:CHART_ENDS] + ranked[-CHART_ENDS:]
+    keep = set(selected or ())
+    pins = [r for r in qual if _label(r) in keep]
+    show = list({_label(r): r for r in ends + pins}.values())
+    show.sort(key=lambda r: r[metric])
+    return show
 MODE_FCI = "vs FCI"
 # NOT "vs bracket average". What this mode computes is a barn's BASIS minus the
 # bracket's BASIS (see `rel` in load_barns), which is not the same thing as its
@@ -425,27 +470,47 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
         return
 
     with f2:
-        # This roster really does churn -- 18 of the barns clearing the floor at
-        # 700-749 over three months do not clear it at 900-949 -- so a selected
-        # barn can vanish from `options` on an ordinary change of weight class.
+        # MULTISELECT, not a single box. The chart's top-ten-and-bottom-ten is a
+        # leaderboard, and a reader who follows a particular set of barns is
+        # usually following several at once -- the mid-pack ones it hides are
+        # exactly the ones they came for. Carthage MO is the largest barn in the
+        # 700-749 bracket by head and ranked 36th of 54 over three months on
+        # 2026-10-09, so it never appeared; Kingdom City MO ranked 18th and
+        # never appeared either. Picking barns here PINS them onto the chart
+        # whatever they ranked, in addition to the two ends.
         #
-        # There is deliberately NO manual reset here. Measured on Streamlit 1.63
-        # (2026-09-18) by seeding the key with a barn in no roster and by
-        # picking one that drops out: the box falls back to its first option,
-        # session_state follows, and nothing raises -- `options` is part of the
-        # widget's identity, so changing it makes a new widget that takes its
-        # default. An explicit reset to ALL_BARNS was written first and removed
-        # after it was shown to change nothing either way, because a guard that
-        # cannot be made to fire is the shape of the three checks this project
-        # already had to go back and fix. ALL_BARNS must stay FIRST in this list
-        # for the fallback to land somewhere sensible.
-        labels = [ALL_BARNS] + [_label(r) for r in
-                                sorted(qual, key=lambda r: (r["barn"], r["state"]))]
-        barn = st.selectbox("Sale barn", labels, key=f"{key_prefix}_barn")
+        # Empty means all barns and no pins, which is the old ALL_BARNS sentinel
+        # without a sentinel: the constant was removed because an empty
+        # multiselect already says it, and a magic first option that means "not
+        # a barn" is a value every downstream lookup has to special-case.
+        #
+        # Alphabetical for findability. The chart and table rank by the active
+        # metric instead; both orderings are deliberate.
+        labels = [_label(r) for r in
+                  sorted(qual, key=lambda r: (r["barn"], r["state"]))]
+        # Narrowed BEFORE the widget is drawn -- see keep_selected. A barn that
+        # dropped out of the roster would otherwise be a default that is not in
+        # the options, which st.multiselect raises on.
+        prior = list(st.session_state.get(f"{key_prefix}_barns") or ())
+        kept = keep_selected(prior, labels)
+        # Reported under the chart, not swallowed. A barn vanishing from the
+        # picks on a change of window is the single most confusing thing this
+        # control can do, and the reason is nearly always the head floor rather
+        # than the barn having no sales -- Unionville MO sold 57 head at 700-749
+        # over the three months to 2026-10-09 and 184 over six, so it is absent
+        # on one window and present on the next.
+        dropped = [p for p in prior if p not in set(labels)]
+        picked = st.multiselect(
+            "Sale barns", labels, default=kept, key=f"{key_prefix}_barns",
+            placeholder="All barns — pick to pin onto the chart")
 
-    # Alphabetical in the dropdown for findability, ranked by the active metric
-    # in the chart and table. Both orderings are deliberate.
-    focus = next((r for r in qual if _label(r) == barn), None)
+    # The tiles stay a SINGLE barn's numbers. There is no honest way to tile a
+    # price and a basis for four barns at once: head-weighting them together
+    # would invent a composite barn nobody trades, and showing the first pick
+    # would be a tile whose label and value disagree with the chart beside it.
+    # So one pick reads as that barn, and two or more fall back to the bracket,
+    # which is the one aggregate on this page that is already defined.
+    focus = next((r for r in qual if _label(r) == picked[0]), None)         if len(picked) == 1 else None
     metric = "basis" if mode == MODE_FCI else "rel"
     metric_label = "basis vs FCI" if mode == MODE_FCI else "basis vs bracket"
     metric_title = "Basis vs FCI" if mode == MODE_FCI else "Basis vs bracket"
@@ -534,12 +599,9 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
                 tickfont=dict(color=C["muted"], size=11),
                 title_font=dict(color=C["muted"], size=11), zeroline=False)
     ranked = sorted(qual, key=lambda r: r[metric], reverse=True)
-    # Top ten and bottom ten, deduped so a roster under twenty barns is not
-    # listed twice -- the Index tab's leaderboard idiom, keyed on barn+state
-    # rather than location alone. Re-sorted ascending so the strongest basis
-    # lands at the top of a horizontal chart.
-    show = list({_label(r): r for r in ranked[:10] + ranked[-10:]}.values())
-    show.sort(key=lambda r: r[metric])
+    # The Index tab's leaderboard idiom -- both ends of the ranking, keyed on
+    # barn+state rather than location alone -- plus whatever was pinned above.
+    show = pinned_rows(qual, picked, metric)
     fig = go.Figure(go.Bar(
         x=[r[metric] for r in show], y=[_label(r) for r in show],
         orientation="h",
@@ -549,7 +611,7 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
         marker=dict(
             color=[C["pos"] if r[metric] >= 0 else C["neg"] for r in show],
             line=dict(color=[C["text"] for r in show],
-                      width=[2 if focus and _label(r) == _label(focus) else 0
+                      width=[2 if _label(r) in set(picked) else 0
                              for r in show])),
         hovertemplate="<b>%{y}</b>: %{x:+.2f} " + metric_label + "<extra></extra>"))
     fig.update_layout(
@@ -562,6 +624,22 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
     if watermark:
         watermark(fig, size=0.3, opacity=0.06)
     st.plotly_chart(fig, use_container_width=True)
+    if picked:
+        st.caption(
+            f"The chart shows the top and bottom {CHART_ENDS} barns by "
+            f"**{metric_label}**, plus the "
+            f"{'barn' if len(picked) == 1 else str(len(picked)) + ' barns'} you "
+            f"pinned — **{', '.join(picked)}** — wherever "
+            f"{'it' if len(picked) == 1 else 'they'} ranked. Pinned bars are "
+            f"outlined. The full ranking is in the table below."
+        )
+    if dropped:
+        st.caption(
+            f"**{', '.join(dropped)}** {'was' if len(dropped) == 1 else 'were'} "
+            f"dropped from the selection: no {wt}-{wt + 49} lb sales reaching "
+            f"{MIN_HEAD} head in the {WINDOW_LABEL[days]}. Widen the window or "
+            f"change the weight class and the same barns usually come back."
+        )
 
     # Both basis columns show whichever mode is selected. The toggle drives the
     # tiles, the chart and the sort; seeing the two side by side is how a reader

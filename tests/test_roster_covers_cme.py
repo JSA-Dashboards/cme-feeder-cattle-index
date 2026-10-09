@@ -180,10 +180,11 @@ def norm(name):
 # for. An unexplained token means not an aggregate, which is the direction
 # that keeps a real barn visible. "Ok Range Sales" opens with a state and is
 # still reported, because "range" and "sales" are not direct-report words.
-# "Browning Video Auction" is a video-shaped name with a brand we do not
-# ingest, so it is reported too -- it is only silenced by being written into
-# NOT_INGESTED by hand, which test_not_ingested_is_pinned_independently
-# guards.
+# A video-shaped name whose brand we do not ingest is reported too, and is only
+# silenced by being written into NOT_INGESTED by hand, which
+# test_not_ingested_is_pinned_independently guards. "Browning Video Auction" was
+# the standing example until 2026-10-09; it is now ingested instead, and what it
+# cost to have been filed there is recorded at NOT_INGESTED itself.
 
 # Spelled out and as the postal code, because CME uses both. NE and ND map to
 # WY: the Wyoming-Nebraska report is one report, filed under "WY" in
@@ -316,6 +317,10 @@ VIDEO_STEMS = {
     # "Car Jop Video (Sc)" kept printing either side of it (2026-04-06 and
     # 2026-07-02), so this is one day's alternate spelling of the same sale.
     "huss lexington": "HUSS_LEXINGTON",
+    "browning": "BROWNING",                 # "Browning Video Auction" 2026-03-18,
+    # "Browning Video (Sc)" 2026-10-07 -- two spellings of one sale, and the
+    # stem catches both. Added 2026-10-09 when the second one cost 0.068 on a
+    # published number; it was in NOT_INGESTED until then.
 }
 
 # CME's North Central / South Central tags, at every width the column has cut
@@ -372,9 +377,17 @@ def video_report(cme):
 # ("Greeley") fails that last rule, which is the edit this is here to refuse
 # -- see test_a_bare_barn_name_cannot_be_filed_as_not_ingested.
 NOT_INGESTED = frozenset({
-    "Browning Video Auction",       # 2026-03-18, 192 hd, region SC
     "New Video Auction Rep",        # 2026-01-15, 195 hd, region XX
 })
+# "Browning Video Auction" lived here until 2026-10-09 and has been REMOVED
+# because it is now ingested: video_reports.VIDEO_REPORT_SLUGS carries slug 3467
+# and VIDEO_STEMS carries its brand. It is worth knowing what filing it here
+# cost. The entry was written against the 2026-03-18 spelling; CME printed the
+# next one as "Browning Video (Sc)" on 2026-10-07, which this list did not match
+# and the roster check therefore reported -- but by then the 120 head were
+# already missing from a published index, worth 0.068 that day and 0.069 the
+# next. An exclusion list keyed on one spelling of a name is only as good as the
+# name staying put.
 _NOT_INGESTED_NORM = {norm(n) for n in NOT_INGESTED}
 
 # What a name has to read like before it may be filed under NOT_INGESTED.
@@ -890,8 +903,11 @@ def test_every_video_spelling_cme_has_used_resolves(printed, report):
     "Northern",
     "Greeley Superior Video",   # a stem in the MIDDLE is not a stem
     "Greeley Video",
-    "Browning Video Auction",   # video-shaped, but the brand is not ours
     "New Video Auction Rep",
+    # "Browning Video Auction" sat here until 2026-10-09, as a video-shaped name
+    # whose brand was not ours. It IS ours now (slug 3467), so the pattern is
+    # expected to match it, and it moved OUT of this list rather than being
+    # special-cased inside it.
     # REAL TOWNS THAT SHARE A FIRST LETTER WITH A MARKER. Dighton KS, Delta CO,
     # Dillon MT and Dodge City KS are all feeder-cattle towns, so "<state>
     # <town>" is a shape CME could print. Loosening DIRECT_TYPOS from the one
@@ -988,8 +1004,12 @@ def test_not_ingested_is_pinned_independently(conn):
     frozenset literal with a comprehension over the rest of this file -- the
     tautology CLAUDE.md records -- leaves all three standing.
     """
-    assert len(NOT_INGESTED) == 2, \
-        f"a third unsourced aggregate is a deliberate edit, not a shrug: {NOT_INGESTED}"
+    # Was 2 until 2026-10-09, when Browning became ingested rather than
+    # excluded. Pinned in BOTH directions on purpose: adding an unsourced
+    # aggregate and quietly dropping one are each a deliberate edit, and the
+    # second is the one that clears a red suite without anyone noticing.
+    assert len(NOT_INGESTED) == 1, \
+        f"adding or dropping an unsourced aggregate is a deliberate edit, not a shrug: {NOT_INGESTED}"
     printed = {r[0] for r in
                conn.execute("SELECT DISTINCT location FROM cme_ftp_locations")}
     assert NOT_INGESTED <= printed, \

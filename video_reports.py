@@ -99,6 +99,30 @@ VIDEO_REPORT_SLUGS = {
     "HUSS_LEXINGTON": 2938,  # Huss and Lexington Livestock - Kearney, NE (Monthly)
     "VALENTINE": 3418,       # Valentine Livestock - Valentine, NE (Seasonal - Thu)
     "LONESTAR": 3620,        # Lonestar Stockyards - Wildorado, TX (Tue)
+    "BROWNING": 3467,        # Browning Livestock Market Video/Internet - Lafayette, TN
+    # BASED IN TENNESSEE, WHICH IS NOT ONE OF THE 12 STATES, and included for
+    # the same reason as Cattle Drive (UT) and Western Video (CA): the HQ state
+    # is not the sale's state. Its PDF carries the same regional headers as the
+    # rest, and its South Central section (KS, MO, NM, OK, TX) is inside the
+    # region while the Southeast section -- which is where most of its volume
+    # sits -- is skipped by the existing region filter.
+    #
+    # ADDED 2026-10-09 AFTER IT COST US. On 2026-10-07 the South Central
+    # section carried 120 head at 880 lb and $327.00, CME counted them as
+    # "Browning Video (Sc)", and we published 336.7980 against CME's 336.7300.
+    # Heavy cattle $14 under that day's average: dropping them pushed the index
+    # UP, and adding them back accounts for 0.064 of the 0.068 miss. Because a
+    # miss sits in the 7-day window for a week, the same error was still worth
+    # 0.069 on 10-08.
+    #
+    # It prints rarely -- twice in the CME file we hold, 2026-03-18 (192 head)
+    # and 2026-10-07 (120 head) -- which is exactly why it went unnoticed: a
+    # report that is absent most weeks looks identical to a report nobody
+    # fetches. Found by cme_coverage.locate(), which names the CME location we
+    # hold no head for.
+    #
+    # Parses with parse_video_pdf() unchanged; verified against the live PDF
+    # before adding, which returned the 120/880/327.00 row and nothing else.
     # Deliberately NOT included:
     #   ams_3103 Superior Livestock Video (Website Catalog) -- dormant, its
     #     live edition is still 2023-08-17. CME dropped it too: its own

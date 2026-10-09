@@ -202,6 +202,64 @@ def load_states(days: int = 30):
             pass
 
 
+def _label(r):
+    """
+    'Carthage MO'. Matches barn_basis.py's label exactly, so the same barn reads
+    the same on both tabs and a reader can carry a name from one to the other.
+    """
+    return f"{r['barn']} {r['state']}"
+
+
+def keep_selected(selected, options):
+    """
+    The picked barns, narrowed to those still in the current roster, in the
+    roster's own order.
+
+    A DELIBERATE TWIN of barn_basis.keep_selected rather than an import. These
+    two modules are shared into different hosts -- cash_calves also serves the
+    Backgrounding Crush page, which has no reason to carry barn_basis -- and a
+    cross-import to save three lines would couple them for good. The behaviour
+    is identical and tested in both places.
+
+    It has to happen BEFORE the widget draws: st.multiselect raises on a default
+    that is not among its options, where a selectbox quietly reset. The roster
+    here churns on three controls at once -- weight class, state and window --
+    so a pick going stale is ordinary, not an edge case. Picking four Missouri
+    barns and then switching the State box to NE is the obvious way in.
+    """
+    keep = set(selected or ())
+    return [o for o in options if o in keep]
+
+
+def summarise(rows):
+    """
+    The tile summary over an arbitrary subset of barn rows.
+
+    POUND-WEIGHTED, and it must reproduce load_rows' own summary exactly, not
+    approximately -- otherwise filtering to every barn would move the headline
+    and the tab would disagree with itself. It collapses back cleanly because
+    each row's price is itself SUM(head*wt*p)/SUM(head*wt), so re-weighting by
+    head*wt recovers the global ratio. tests/test_cash_barn_filter.py asserts
+    that against load_rows rather than taking the algebra on trust.
+
+    Returns None on an empty subset, the same shape load_rows uses for "no
+    data", so render() has one empty case to handle rather than two.
+    """
+    if not rows:
+        return None
+    lb = sum(r["head"] * r["weight"] for r in rows)
+    head = sum(r["head"] for r in rows)
+    if not lb or not head:
+        return None
+    return {
+        "head": head,
+        "price": sum(r["head"] * r["weight"] * r["price"] for r in rows) / lb,
+        "weight": lb / head,
+        "barns": len(rows),
+        "last": max(r["last"] for r in rows),
+    }
+
+
 def _fmt_date(iso):
     """ISO to 'Sep 14'. %-d is glibc-only and raises on Windows."""
     from datetime import date
@@ -223,17 +281,25 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
         return (f'<div style="color:{muted};font-size:0.72rem;margin-top:5px">'
                 f'{t}</div>')
 
-    f1, f2, f3 = st.columns([1, 1, 1.4])
+    # Populated out of order -- f1, f3, f4, load, then f2 -- because the barn
+    # list depends on the bracket, the state AND the window, so the rows have to
+    # be in hand before that box can be drawn. barn_basis.py does the same.
+    # The barn box gets the widest share by a distance. It is the only control
+    # here that holds SEVERAL values at once, and Streamlit renders each as a
+    # chip inside the box -- at 1.6 against the others, four barn names
+    # truncated to "do..." and the control became unreadable at exactly the
+    # selection size it exists to serve.
+    f1, f2, f3, f4 = st.columns([1, 2.6, 1, 1.2])
     with f1:
         wt = st.selectbox("Weight class", CASH_BRACKETS,
                           index=CASH_BRACKETS.index(600),
                           format_func=lambda w: f"{w}-{w + 49} lb",
                           key=f"{key_prefix}_wt")
-    with f3:
+    with f4:
         days = st.selectbox("Window", WINDOWS, index=1,
                             format_func=lambda d: WINDOW_LABEL[d],
                             key=f"{key_prefix}_days")
-    with f2:
+    with f3:
         state = st.selectbox("State", [ALL_STATES] + load_states(days),
                              key=f"{key_prefix}_state")
 
@@ -248,7 +314,42 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
         )
         return
 
-    where = "All barns" if state == ALL_STATES else state
+    with f2:
+        # A FILTER, not a highlight. Unlike the Sale Barn Basis chart next door
+        # -- which hid most of the roster behind a top-ten-and-bottom-ten and
+        # needed picked barns PINNED back onto it -- this tab has no chart and
+        # its table already lists every barn. Nothing is hidden here, so the
+        # useful thing is the opposite operation: cut 79 rows down to the few
+        # barns someone actually follows, so they can be read against each other
+        # without scrolling past everyone else.
+        #
+        # Empty means every barn, which is the tab exactly as it was.
+        options = [_label(r) for r in
+                   sorted(rows, key=lambda r: (r["barn"], r["state"]))]
+        prior = list(st.session_state.get(f"{key_prefix}_barns") or ())
+        kept = keep_selected(prior, options)
+        # Named under the table rather than swallowed. Three controls can strand
+        # a pick here, and the State box is the loud one: picking Missouri barns
+        # and then switching State to NE empties the selection completely, which
+        # looks like a bug unless it says why.
+        dropped = [b for b in prior if b not in set(options)]
+        picked = st.multiselect(
+            "Sale barns", options, default=kept, key=f"{key_prefix}_barns",
+            placeholder="All barns — pick to compare a few")
+
+    # EVERYTHING below the filter reads the filtered rows, including the tiles
+    # and the spread. A headline labelled "4 barns average" showing the whole
+    # state's number would be the label-disagrees-with-value failure this
+    # project has already had to fix once on the basis toggle.
+    summ_all = summ
+    if picked:
+        rows = [r for r in rows if _label(r) in set(picked)]
+        summ = summarise(rows) or summ
+
+    if picked:
+        where = picked[0] if len(picked) == 1 else f"{len(picked)} barns"
+    else:
+        where = "All barns" if state == ALL_STATES else state
     # On a long window the headline is a BLEND, and says so in the tile itself
     # rather than only in a caption below the fold. See LONG_WINDOWS.
     long_window = days in LONG_WINDOWS
@@ -283,7 +384,8 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
         lo = min(rows, key=lambda r: r["price"])
         gap = hi["price"] - lo["price"]
         st.caption(
-            f"Spread across barns is **\\${gap:,.2f}/cwt** — {hi['barn']} "
+            f"Spread across {'the ' + str(len(rows)) + ' barns you picked' if picked else 'barns'}"
+            f" is **\\${gap:,.2f}/cwt** — {hi['barn']} "
             f"({hi['state']}) at **\\${hi['price']:,.2f}** down to {lo['barn']} "
             f"({lo['state']}) at **\\${lo['price']:,.2f}**, about "
             f"**\\${gap * summ['weight'] / 100:,.0f} a head** on the same "
@@ -309,6 +411,21 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
 
     st.dataframe(pd.DataFrame([_row(r) for r in rows]),
                  use_container_width=True, hide_index=True)
+    if picked:
+        st.caption(
+            f"Showing **{len(rows)} of {summ_all['barns']} barns** — the "
+            f"{'one' if len(picked) == 1 else 'ones'} you picked. The tiles, "
+            f"the spread and this table are over that selection only; clear "
+            f"the box to go back to every barn."
+        )
+    if dropped:
+        st.caption(
+            f"**{', '.join(dropped)}** {'was' if len(dropped) == 1 else 'were'} "
+            f"dropped from the selection: no {wt}-{wt + 49} lb steer prints "
+            f"{'in ' + state + ' ' if state != ALL_STATES else ''}in the "
+            f"{WINDOW_LABEL[days]}. Check the State box first — it narrows this "
+            f"list before the window does."
+        )
 
     if long_window:
         st.warning(

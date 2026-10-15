@@ -777,7 +777,14 @@ def test_removing_any_one_barn_names_exactly_that_barn(conn, tmp_path,
     # has to lose both before any of them is reported
     ([1901, 1903], {"La Junta", "La Junta Winter", "Lajunta",
                     "Lajunta Livestock", "Lajunta Winter"}),
-    ([2101, 2103], {"Torrington", "Torrington Livesto", "Torrington Livestock"}),
+    # THREE slugs since 2026-10-09, not two. The Special (2105) was added after
+    # CME printed 20 head of Torrington on 2026-10-12 that we held none of: the
+    # regular reports run Wednesdays and the special ran that Monday. Dropping
+    # 2101 and 2103 alone now leaves the name reachable through 2105, which is
+    # this parametrisation's own point made one slug larger -- a shared name
+    # hides a gap until EVERY slug behind it is gone.
+    ([2101, 2103, 2105],
+     {"Torrington", "Torrington Livesto", "Torrington Livestock"}),
 ])
 def test_losing_both_slugs_of_a_shared_name_reports_it(conn, tmp_path,
                                                        slug_ids, newly_reported):

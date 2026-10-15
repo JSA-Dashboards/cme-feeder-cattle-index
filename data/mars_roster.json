@@ -66,6 +66,12 @@
     "city": "Salina"
   },
   {
+    "slug_id": 1894,
+    "title": "Farmers and Ranchers Livestock Commission Co. Feeder Cattle Special - Salina, KS",
+    "state": "KS",
+    "city": "Salina"
+  },
+  {
     "slug_id": 3654,
     "title": "Mid Missouri Stockyards Cattle Auction - Phillipsburg, MO",
     "state": "MO",
@@ -392,6 +398,12 @@
   {
     "slug_id": 2103,
     "title": "Torrington Livestock Feeder Cattle Auction - Torrington, WY",
+    "state": "WY",
+    "city": "Torrington"
+  },
+  {
+    "slug_id": 2105,
+    "title": "Torrington Livestock Auction Special - Torrington, WY",
     "state": "WY",
     "city": "Torrington"
   },

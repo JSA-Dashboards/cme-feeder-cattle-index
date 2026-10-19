@@ -1,4 +1,8 @@
-streamlit>=1.35.0
+streamlit>=1.63.0  # stateful tabs: the 6 State tab guards its six MARS
+                   # requests behind `tab_six.open`, and passes
+                   # on_change="rerun" to st.tabs. 1.63 is the version it
+                   # was verified on, not a researched floor -- lower it
+                   # only against a version you have actually run.
 pandas>=2.0.0
 plotly>=5.18.0
 openpyxl>=3.1.0

@@ -118,6 +118,36 @@ Deployment is Streamlit **Community Cloud** at jsa-livestock.streamlit.app, not
 Streamlit in Snowflake. The webhook returns 200 and does nothing — Ross must
 reboot the app by hand for a change to go live.
 
+### The 6 State tab, and the one thing it changed about this process
+
+Ported from the portal 2026-10-19 at Ross's request, a week after it shipped
+there. `six_state.py` sits at this repo's root and is **byte-identical** to
+`livestock-portal/apps/cme_feeder_cattle/six_state.py`; the module, its test
+and the AMS fixture are all three in `SHARED` in `tests/test_no_drift.py`.
+The fixture is in that list on purpose — `test_six_state.py` pins eighteen
+cells against a real AMS payload, so two fixtures free to drift would be two
+suites quietly asserting different numbers about the same week, both green.
+
+Every rule the arithmetic follows is documented in the portal's CLAUDE.md
+under "The 6 State Weekly Feeder Cattle Prices tab", and each has an
+alternative that renders perfectly and prints a different number. Read it
+before touching `six_state.py`.
+
+`tests/test_six_state.py` is shared verbatim, so it probes for
+`apps/cme_feeder_cattle` then the repo root and sets `APP_DIR` to whichever
+answered. Its three page-level tests therefore read **this** repo's `app.py`
+and enforce this copy's own wiring: the schema passed at the call site, the
+`if tab_six.open:` guard, and `st.html` rather than `st.markdown`.
+
+**THIS TAB IS THE FIRST THING IN THE STREAMLIT PROCESS HERE TO READ
+`marsapi`.** The five modules that already use `MARS_API_KEY` —
+`border_reports`, `corn_bids`, `feeder_sex_mix`, `feed_bids`,
+`replacement_reports` — are ingest scripts the droplet runs, and `app.py`
+imports none of them. Locally `load_dotenv()` supplies the key from `.env`.
+**If this app is ever deployed, the key must be added to its own secrets
+console**; without it the tab prints one error naming the secret and the
+other three tabs are unaffected.
+
 ## Traps that have cost real time
 
 Every one of these failed **silently**. None raised.

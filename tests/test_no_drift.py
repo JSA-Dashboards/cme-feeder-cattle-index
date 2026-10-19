@@ -47,7 +47,14 @@ SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
           "composition.py", "volumes.py", "snapshots.py", "cash_calves.py",
           "barn_basis.py", "barn_report.py", "trimmings_qc.py",
           "test_trimmings_qc.py", "herd.py", "mars_census_view.py",
-          "daily_slaughter.py", "test_daily_slaughter.py"]
+          "daily_slaughter.py", "test_daily_slaughter.py",
+          # The 6 State Weekly Feeder Cattle Prices tab. The FIXTURE is here
+          # as well as the module and its test, and that is the point rather
+          # than tidiness: test_six_state.py pins eighteen cells against a
+          # real AMS payload, so two fixtures free to drift would be two
+          # suites quietly asserting different numbers about the same week --
+          # both green, and neither able to say the other had moved.
+          "six_state.py", "test_six_state.py", "six_state_ams.json"]
 
 # Every directory a shared module is allowed to live in. Explicit rather than a
 # recursive glob, because .venv/Lib/site-packages holds files with some of these
@@ -55,7 +62,9 @@ SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
 CODE_DIRS = [
     HERE,
     HERE / "tests",
+    HERE / "tests" / "fixtures",
     PORTAL_ROOT / "tests",
+    PORTAL_ROOT / "tests" / "fixtures",
     TRIMMINGS,
     TRIMMINGS / "tests",
     BEEF_WEIGHT,

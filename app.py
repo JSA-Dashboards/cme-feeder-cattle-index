@@ -196,6 +196,22 @@ def add_watermark(fig, size=0.32, opacity=0.06):
 MARS_KEY = os.environ.get("MARS_API_KEY", "").strip()
 
 
+def _six_esc(s) -> str:
+    """
+    Escape for st.html. Named `_six_esc` and not `_h` because this
+    module rebinds `_h` to an int in a plot loop long before the tab
+    runs ("for _w2, _h in _pts"), which turned every call here into
+    TypeError: 'int' object is not callable -- a page-level name
+    collision that py_compile and the whole suite pass.
+
+    Escape for st.html. These sentences are built from USDA figures, but the
+    table beside them is already raw HTML and the helper keeps that honest if
+    a state name ever carries a character that is markup.
+    """
+    import html as _html_mod
+    return _html_mod.escape(str(s or ""))
+
+
 @st.cache_data(ttl=3600, show_spinner="Loading the six state summaries…")
 def fetch_six_state(key: str, schema: int):
     """
@@ -2825,14 +2841,27 @@ with tab_six:
                         f'<td{_tip}>{six_state.wtd_average(_now)}</td>'
                         f'<td>{six_state.mom_change(r["mom"])}</td>')
 
+            def _six_band(i):
+                """
+                "six-band" on every other STATE, not every other row.
+
+                Each state owns one row per bracket, so the group size is
+                len(BRACKETS) rather than a literal 3 -- add a weight bracket
+                and the banding follows the states instead of cutting across
+                them.
+                """
+                per_state = len(six_state.BRACKETS)
+                return "six-band" if (i // per_state) % 2 == 0 else ""
+
             # Two blocks of nine side by side, the shape of the sheet this
             # replaces: Arkansas/Iowa/Kansas on the left, Missouri/Nebraska/
             # Oklahoma on the right.
             _six_head = ("<th>State</th><th>Wt Range</th><th>Price Range</th>"
                          "<th>WTD Averages</th><th>MoM Change</th>")
             _six_body = "".join(
-                f"<tr>{_six_cells(l)}<td class='six-gap'></td>{_six_cells(r)}</tr>"
-                for l, r in zip(_six_rows[:9], _six_rows[9:]))
+                f"<tr class='{_six_band(i)}'>{_six_cells(l)}"
+                f"<td class='six-gap'></td>{_six_cells(r)}</tr>"
+                for i, (l, r) in enumerate(zip(_six_rows[:9], _six_rows[9:])))
 
             # st.html, not st.markdown: this table carries eighteen prices and
             # Streamlit's markdown renders a PAIR of dollar signs as inline
@@ -2853,6 +2882,15 @@ with tab_six:
                               border-bottom:1px solid {TEXT}; }}
               .six-wrap td {{ text-align:left; padding:2px 14px 2px 0; }}
               .six-wrap .six-gap {{ padding:0 18px; }}
+              /* Shade alternate STATES, the way Ross's own sheet separates
+                 them. Both blocks change state on the same rows, so one
+                 class per row bands the left and right halves together.
+                 The gap column is left clear so the two halves still read
+                 as two tables rather than one wide banded one. A tint
+                 rather than a palette colour: it sits on whatever CARD_BG
+                 is and needs no second constant to keep in step. */
+              .six-wrap tr.six-band td {{ background:rgba(0,0,0,0.04); }}
+              .six-wrap tr.six-band td.six-gap {{ background:transparent; }}
               .six-wrap .six-name {{ padding-right:10px; }}
             </style>
             <div class="six-wrap">
@@ -2863,6 +2901,55 @@ with tab_six:
                 <thead><tr>{_six_head}<th class="six-gap"></th>{_six_head}</tr></thead>
                 <tbody>{_six_body}</tbody>
               </table>
+            </div>
+            """)
+
+
+            # ── Market summary ───────────────────────────────────────────
+            # WHAT moved, computed. The arithmetic is six_state.py's, shared
+            # byte-identically with the portal, so the two dashboards cannot
+            # disagree about what the week did.
+            #
+            # The WRITTEN cause is deliberately portal-only. It needs a
+            # durable store and this repo has no letter/ package, so a box
+            # here would take a note and lose it on the next restart --
+            # exactly how a nearly finished Friday letter went once already.
+            # Nothing on either page infers a cause.
+            #
+            # Rendered with st.html for the same reason the table is: these
+            # sentences quote four dollar amounts in one line, and
+            # Streamlit's markdown turns a PAIR of dollar signs into inline
+            # LaTeX and swallows what is between them.
+            _six_prev = next((w for w in _six_weeks
+                              if w["begin"] < _six_week["begin"]), None)
+            _six_sum = six_state.summary(_six, _six_week, _six_prev, _six_base)
+
+            _six_says = [s for s in (
+                six_state.split_sentence(_six_sum, "mom"),
+                six_state.split_sentence(_six_sum, "wow"),
+                six_state.slide_sentence(_six_sum),
+                six_state.leader_sentence(_six_sum, "mom"),
+            ) if s]
+            _six_warn = [s for s in (six_state.roster_caution(_six_sum, "mom"),
+                                     six_state.base_caution(_six_sum)) if s]
+
+            st.html(f"""
+            <style>
+              .six-sum {{ background:{CARD_BG}; border:1px solid {BORDER};
+                          border-radius:10px; padding:14px 18px;
+                          margin-top:14px; color:{TEXT}; font-size:0.86rem;
+                          line-height:1.65; }}
+              .six-sum .six-sum-h {{ font-weight:700; font-size:0.95rem;
+                                     margin-bottom:6px; }}
+              .six-sum ul {{ margin:0 0 0 18px; padding:0; }}
+              .six-sum .six-warn {{ color:{TEXT}; font-weight:700; }}
+            </style>
+            <div class="six-sum">
+              <div class="six-sum-h">What moved, week of
+                   {six_state.week_label(_six_week)}</div>
+              <ul>{"".join(f"<li>{_six_esc(s)}</li>" for s in _six_says)}
+                  {"".join(f'<li class="six-warn">{_six_esc(s)}</li>'
+                           for s in _six_warn)}</ul>
             </div>
             """)
 

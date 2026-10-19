@@ -148,6 +148,109 @@ imports none of them. Locally `load_dotenv()` supplies the key from `.env`.
 console**; without it the tab prints one error naming the secret and the
 other three tabs are unaffected.
 
+### The market summary — what is computed and what is written
+
+Added 2026-10-19, after Ross asked why lighter calves were bringing a bigger
+premium over the month and whether the page could explain the week. Two
+halves, and the split is the point: `six_state.summary()` computes WHAT
+moved, and a box on the page takes the WHY from a person. Nothing on the
+page infers a cause. That is the arithmetic/editorial line the daily letter
+already runs on, and this file records a note deleted from the beef-trade
+chart for being a plausible wrong cause.
+
+**THE HEADLINE IS THE FIXED-PANEL MOVE, NOT THE AVERAGE ACROSS STATES, and
+that is the whole correctness of the panel.** A state entering or leaving a
+bracket moves a head-weighted average with no barn changing its bid.
+Nebraska went from **none** of the 5-600# head in the week of 8/30/2026 to
+**62%** of it by 10/11, at the dearest light price in the panel — on its own
+that was **+27.45 of an apparent +49.56**, 55% of the move. `bracket_move()`
+returns `reported`, `same_panel` and `roster`, the summary leads with
+`same_panel`, and `roster_caution()` prints both numbers when they disagree
+by more than `ROSTER_MATERIAL` ($2.00/cwt).
+
+**The eighteen published cells carry none of this** — each compares a state
+against itself, and a state that did not report prints N/A. Only an
+aggregate across states is exposed, which is exactly what a summary is.
+
+Three more things in it that look fussy and are not:
+
+- **The slide is a MEDIAN ACROSS STATES, never the gap between two
+  head-weighted averages.** The two ends of the ladder are not drawn from the
+  same roster in a given week, so differencing two averages measures the
+  roster as much as the ladder. Over the three weeks to 10/17/2026 the
+  head-weighted spread moved 91.80 → 97.50 → 92.90 while the median sat at
+  80.88 → 80.42 → 80.81. The flat series is the honest one.
+- **`MIN_WEEKS_FOR_EXTREME = 8`.** `base_caution()` says when the month-ago
+  week is the widest or narrowest on file, which matters: the week of
+  8/30/2026 was the narrowest of 26 and every month change measured off it
+  overstates the move. But on a short file EVERY week is an extreme — on the
+  two-week test fixture the caution fired on both, which is a banner that
+  always fires and so is one nobody reads on the week it matters.
+- **`leader_sentence` names the states that went the OTHER way.** Over the
+  month to 10/10/2026 the light end outran the heavy end in Iowa, Kansas and
+  Missouri and LOST to it in Arkansas and Oklahoma. A panel figure alone
+  reports "lighter calves led" and hides that it was false in two of five.
+
+`six_state.py` still imports exactly `{datetime, concurrent, requests}` and a
+test pins it, which is why `_median` is written out rather than imported from
+`statistics`, and why corn and the feeder board are **not** in here even
+though both moved the same way over this window (corn −10.7%, the index
++4.4%). Consistent is not causal, and the module has no business holding
+either series.
+
+### The written cause is PORTAL-ONLY, deliberately
+
+It is saved in `JSA.LETTER.DRAFTS` under `KIND = "sixstate"`, keyed on the
+**week** it describes — the store `weekbase` and `settlelog` already share.
+No new table, and it survives the reboot that wipes `out/`, which is how a
+nearly finished Friday letter was lost once already.
+
+`cme-feeder-cattle-index` gets the computed half and **no box**: it has no
+`letter/` package and so no durable store, and a box there would take a note
+and lose it on the next restart. `tests/test_no_drift.py` asserts the
+asymmetry in both directions so it stays a decision rather than something
+that rotted.
+
+Keyed on the week and not on today, which is pinned by AST because the save
+path needs Snowflake and cannot run on a developer machine — `enabled()` is
+false without `USE_SNOWFLAKE`, so the box hides itself locally and says why.
+**A live save is only exercisable on the deployed app.**
+
+### Three page-level defects that only a browser found
+
+All three passed `py_compile` and the full suite, and two of them passed
+`get_page_text` as well.
+
+- **`_h` as a helper name is already taken.** The page rebinds `_h` to an int
+  in a plot loop a thousand lines earlier (`for _w2, _h in _pts`), so every
+  call raised `TypeError: 'int' object is not callable` and the whole summary
+  panel vanished. It is `_six_esc` now. **Both copies had it**, because the
+  loop is in both.
+- **A LITERAL TAG INSIDE A `<style>` BLOCK ENDS THE BLOCK.** The comment
+  explaining the state banding said "one class per `<tr>`", and the HTML
+  parser stopped the style element there — so the table's entire stylesheet
+  was dropped and it rendered as an unstyled grid with no card, no border, no
+  font size and no banding. The data was all correct, so `get_page_text` read
+  it back perfectly. Found by measuring `.six-wrap`'s computed background and
+  getting `rgba(0, 0, 0, 0)` where a white card belonged.
+  `tests/test_six_state.py` now scans every `<style>` block on the page for a
+  tag start.
+- **Four dollar amounts in one sentence is LaTeX.** `slide_sentence()` quotes
+  four, so the panel renders through `st.html` like the table. The tab's own
+  test already fails any `st.caption` here containing a `$`.
+
+### The state banding
+
+Ross's own sheet greys alternate states to separate them, and the table now
+does the same: `_six_band(i)` puts `six-band` on every other STATE, grouped
+by `len(BRACKETS)` rather than a literal 3, so adding a weight bracket moves
+the banding with the states instead of cutting across them. Both blocks
+change state on the same rows, so one class per row bands the left and right
+halves together. The gap column is left clear so the two halves still read as
+two tables rather than one wide banded one, and the shade is a tint
+(`rgba(0,0,0,0.04)`) rather than a palette colour so it sits on whatever
+`CARD_BG` each repo uses without a second constant to keep in step.
+
 ## Traps that have cost real time
 
 Every one of these failed **silently**. None raised.

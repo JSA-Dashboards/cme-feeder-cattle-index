@@ -131,6 +131,20 @@ HISTORY_DAYS = 182
 
 NA = "N/A"
 
+# How far the as-reported average and the fixed-panel one must disagree
+# before the summary says so, $/cwt. Below this the two tell the same
+# story, and a caution that fires every week is one nobody reads on the
+# week it matters.
+ROSTER_MATERIAL = 2.00
+
+# Weeks that must be on file before calling one of them the widest or
+# narrowest spread means anything. On a short file every week is an
+# extreme of it -- with two weeks the caution fires on BOTH, which is a
+# banner that always fires and so is one nobody reads on the week it
+# matters. 182 days of history is 26 weeks, so this costs nothing in
+# normal running and only withholds the claim when it would be vacuous.
+MIN_WEEKS_FOR_EXTREME = 8
+
 
 def _num(v):
     """AMS sends numbers as strings. Blank / NA / unparseable -> None."""
@@ -432,3 +446,290 @@ def week_label(week) -> str:
         return NA
     b, e = week["begin"], week["end"] or week["begin"] + dt.timedelta(days=6)
     return f"{b.month}/{b.day} - {e.month}/{e.day}/{e.year}"
+
+
+# ── The market summary ───────────────────────────────────────────────────────
+# WHAT moved, and never why. The cause is written by a human on the page and
+# saved beside the week -- the arithmetic/editorial split the daily letter
+# already runs on, and the reason CLAUDE.md gives for having removed a
+# plausible wrong cause from the beef-trade chart.
+#
+# Nothing here reaches a second data source. Corn and the feeder board would
+# both be relevant and neither is here, because a test pins this module's
+# imports to exactly {datetime, concurrent, requests} to stop it acquiring a
+# database handle. That is also why `_median` is written out below rather than
+# imported from `statistics`.
+
+def _median(xs):
+    """The median of a list, or None. See the import note above."""
+    s = sorted(x for x in xs if x is not None)
+    if not s:
+        return None
+    m = len(s) // 2
+    return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
+
+
+def _hw(cells, bracket, states=None):
+    """(head-weighted price, head) over one bracket, optionally one panel."""
+    num = den = 0
+    for (st, br), c in cells.items():
+        if br != bracket or not c or (states is not None and st not in states):
+            continue
+        num += c["price"] * c["head"]
+        den += c["head"]
+    return (round(num / den, 2) if den else None), den
+
+
+def _cells(data, week):
+    """{(state, bracket): cell} for one week, qualifying lots only."""
+    if not week:
+        return {}
+    return {(r["state"], r["bracket"]): r["now"]
+            for r in table(data, week) if r["now"]}
+
+
+def _priced(cells, bracket):
+    return {st for (st, br), c in cells.items() if br == bracket and c}
+
+
+def bracket_move(data: dict, week, other):
+    """
+    Each bracket's move between two weeks, as reported AND on a fixed panel.
+
+    THE TWO ARE DIFFERENT NUMBERS AND THE DIFFERENCE IS THE WHOLE POINT. A
+    state entering or leaving a bracket moves the head-weighted average with
+    no barn changing its bid. Nebraska went from none of the 5-600# head in
+    the week of 8/30/2026 to 62% of it by 10/11, and its light calves are the
+    dearest in the panel -- on its own that accounted for +27.45 of what
+    looked like a +49.56 move, 55% of it.
+
+    The eighteen published cells compare a state against ITSELF and so carry
+    none of this. An average across states carries all of it, which is why
+    `same_panel` is what the summary leads with and `reported` is kept beside
+    it rather than thrown away.
+
+    Returns {bracket: {"level", "reported", "same_panel", "roster", "panel",
+    "head"}}, with None where either week lacks the bracket.
+    """
+    a, b = _cells(data, other), _cells(data, week)
+    out = {}
+    for label, _low, _high in BRACKETS:
+        lvl, head = _hw(b, label)
+        ra, _ = _hw(a, label)
+        rb = lvl
+        panel = _priced(a, label) & _priced(b, label)
+        pa, _ = _hw(a, label, panel)
+        pb, _ = _hw(b, label, panel)
+        reported = round(rb - ra, 2) if (ra is not None and rb is not None) else None
+        same = round(pb - pa, 2) if (pa is not None and pb is not None) else None
+        out[label] = {
+            "level": lvl,
+            "head": head,
+            "reported": reported,
+            "same_panel": same,
+            "roster": (round(reported - same, 2)
+                       if (reported is not None and same is not None) else None),
+            "panel": sorted(panel),
+        }
+    return out
+
+
+def slide(data: dict, week):
+    """
+    Light minus heavy for one week: the median ACROSS STATES, not the
+    difference of two head-weighted averages.
+
+    The median is the robust one here for the reason in `bracket_move`: the
+    two ends of the ladder are not drawn from the same roster in a given week,
+    so differencing two head-weighted averages measures the roster as much as
+    the ladder. Over the three weeks to 10/17/2026 the head-weighted spread
+    moved 91.80 -> 97.50 -> 92.90 while this one sat at 80.88 -> 80.42 ->
+    80.81; the flat series is the honest one.
+
+    None unless at least one state priced BOTH ends.
+    """
+    c = _cells(data, week)
+    lo_label, hi_label = BRACKETS[0][0], BRACKETS[-1][0]
+    gaps = [c[(st, lo_label)]["price"] - c[(st, hi_label)]["price"]
+            for st in _priced(c, lo_label) & _priced(c, hi_label)]
+    v = _median(gaps)
+    return None if v is None else round(v, 2)
+
+
+def slide_history(data: dict):
+    """[(week, slide)] oldest first, over every week on file that has one."""
+    out = [(w, slide(data, w)) for w in sorted(weeks(data), key=lambda w: w["begin"])]
+    return [(w, s) for w, s in out if s is not None]
+
+
+def movers(data: dict, week, other, bracket):
+    """
+    [(state, change)] for one bracket between two weeks, biggest first.
+
+    Per state against itself, so this is the published cell's arithmetic and
+    carries no roster effect.
+    """
+    a, b = _cells(data, other), _cells(data, week)
+    out = [(st, round(b[(st, bracket)]["price"] - a[(st, bracket)]["price"], 2))
+           for st in _priced(a, bracket) & _priced(b, bracket)]
+    return sorted(out, key=lambda t: t[1], reverse=True)
+
+
+def summary(data: dict, week, prev_week=None, base_week=None) -> dict:
+    """
+    Everything the page states about the week, computed. No cause anywhere.
+
+    `split` is the headline: how far the light end moved against the heavy end
+    on a FIXED panel, which is the question "are lighter calves bringing a
+    bigger premium" actually asks. `base_extreme` fires when the week being
+    compared against is itself the widest or narrowest on file, because a
+    month change measured off an outlier describes the outlier.
+    """
+    lo_label, hi_label = BRACKETS[0][0], BRACKETS[-1][0]
+    hist = slide_history(data)
+    vals = [s for _w, s in hist]
+    here = slide(data, week)
+
+    out = {
+        "week": week,
+        "prev_week": prev_week,
+        "base_week": base_week,
+        "slide": here,
+        "slide_prev": slide(data, prev_week) if prev_week else None,
+        "slide_base": slide(data, base_week) if base_week else None,
+        "slide_min": min(vals) if vals else None,
+        "slide_max": max(vals) if vals else None,
+        "weeks_on_file": len(hist),
+        "wow": bracket_move(data, week, prev_week) if prev_week else {},
+        "mom": bracket_move(data, week, base_week) if base_week else {},
+        "base_extreme": None,
+    }
+
+    for span in ("wow", "mom"):
+        m = out[span]
+        lo = m.get(lo_label, {}).get("same_panel")
+        hi = m.get(hi_label, {}).get("same_panel")
+        out[span + "_split"] = (round(lo - hi, 2)
+                                if (lo is not None and hi is not None) else None)
+
+    sb = out["slide_base"]
+    if sb is not None and len(vals) >= MIN_WEEKS_FOR_EXTREME:
+        if sb == min(vals):
+            out["base_extreme"] = "narrowest"
+        elif sb == max(vals):
+            out["base_extreme"] = "widest"
+
+    out["leaders"] = {
+        span: ({b[0]: movers(data, week, other, b[0]) for b in BRACKETS}
+               if other else {})
+        for span, other in (("mom", base_week), ("wow", prev_week))}
+    return out
+
+
+def split_sentence(s: dict, span: str = "mom") -> str:
+    """
+    The one line the whole panel exists to produce, written so it reads on its
+    own -- CLAUDE.md's standing rule. It names both brackets, both figures,
+    the period and the panel it was measured on, because "lighter calves led"
+    is the claim a reader would otherwise have to take on trust.
+    """
+    lo_label, hi_label = BRACKETS[0][0], BRACKETS[-1][0]
+    m, split = s.get(span) or {}, s.get(span + "_split")
+    other = s.get("base_week" if span == "mom" else "prev_week")
+    word = "month" if span == "mom" else "week"
+    if split is None or not m:
+        return (f"No {word}-over-{word} comparison: the {word}-ago week is not "
+                f"on file, or no state priced both ends of the ladder in it.")
+    lo, hi = m[lo_label]["same_panel"], m[hi_label]["same_panel"]
+    n = len(m[lo_label]["panel"])
+    lead = (f"{lo_label} calves outran {hi_label} by {abs(split):,.2f}/cwt"
+            if split > 0 else
+            f"{hi_label} cattle outran {lo_label} by {abs(split):,.2f}/cwt"
+            if split < 0 else
+            f"{lo_label} and {hi_label} moved together")
+    return (f"Against the week of {week_label(other)}, {lead} "
+            f"({lo_label} {mom_change(lo)}, {hi_label} {mom_change(hi)}), "
+            f"measured on the {n} state{'' if n == 1 else 's'} that priced "
+            f"that bracket in both weeks.")
+
+
+def roster_caution(s: dict, span: str = "mom"):
+    """
+    The sentence to print when the as-reported average and the fixed-panel one
+    disagree materially, naming both. None when they agree.
+
+    `ROSTER_MATERIAL` is 2.00/cwt: below that the two readings tell the same
+    story and a caution on every load is one nobody reads on the week it
+    matters -- the argument `reconciles()` already makes for not crying stale
+    at a weekend.
+    """
+    lo_label = BRACKETS[0][0]
+    m = (s.get(span) or {}).get(lo_label)
+    if not m or m.get("roster") is None:
+        return None
+    if abs(m["roster"]) < ROSTER_MATERIAL:
+        return None
+    return (f"Read that on the fixed panel, not the raw average: across all "
+            f"reporting states {lo_label} shows {mom_change(m['reported'])}, "
+            f"of which {m['roster']:+,.2f} is which states brought light "
+            f"calves rather than any bid moving.")
+
+
+def base_caution(s: dict):
+    """The month base being an extreme of the series, or None."""
+    if not s.get("base_extreme"):
+        return None
+    return (f"The month-ago week of {week_label(s['base_week'])} is the "
+            f"{s['base_extreme']} light-to-heavy spread of the "
+            f"{s['weeks_on_file']} weeks on file, at "
+            f"${s['slide_base']:,.2f}/cwt, so the month change is measured "
+            f"off an outlier and overstates the move.")
+
+
+def slide_sentence(s: dict) -> str:
+    """Where the spread sits now against everything on file."""
+    if s.get("slide") is None:
+        return "No state priced both ends of the ladder this week."
+    bits = [f"The light-to-heavy spread is ${s['slide']:,.2f}/cwt"]
+    if s.get("slide_base") is not None:
+        bits.append(f"against ${s['slide_base']:,.2f} a month ago")
+    if s.get("slide_min") is not None and s.get("slide_max") is not None:
+        bits.append(f"within a range of ${s['slide_min']:,.2f} to "
+                    f"${s['slide_max']:,.2f} over the {s['weeks_on_file']} "
+                    f"weeks on file")
+    return ", ".join(bits) + "."
+
+
+def leader_sentence(s: dict, span: str = "mom") -> str:
+    """
+    Which states led and which went the other way, named, with their figures.
+
+    NOT DECORATION. Over the month to 10/10/2026 the light end outran the
+    heavy end in Iowa, Kansas and Missouri and LOST to it in Arkansas and
+    Oklahoma, so "lighter calves led" was false in two of the five states on
+    the table. A panel figure alone hides that completely.
+
+    It names its own period and both figures because the line is quotable on
+    its own -- CLAUDE.md's standing rule, and the reason this does not read
+    "Iowa led" and stop.
+    """
+    lo_label, hi_label = BRACKETS[0][0], BRACKETS[-1][0]
+    heads = (s.get("leaders") or {}).get(span) or {}
+    lo = dict(heads.get(lo_label) or [])
+    hi = dict(heads.get(hi_label) or [])
+    both = {st: round(lo[st] - hi[st], 2) for st in lo if st in hi}
+    if not both:
+        return ""
+    word = "month" if span == "mom" else "week"
+    led = sorted(both.items(), key=lambda t: t[1])
+    parts = []
+    top, gap = led[-1]
+    if gap > 0:
+        parts.append(f"Over the {word}, {top} split the widest: its "
+                     f"{lo_label} {mom_change(lo[top])} against "
+                     f"{mom_change(hi[top])} on its {hi_label}")
+    against = [k for k, v in led if v < 0]
+    if against:
+        parts.append("the heavy end outran the light end in "
+                     + ", ".join(against))
+    return "; ".join(parts) + "." if parts else ""

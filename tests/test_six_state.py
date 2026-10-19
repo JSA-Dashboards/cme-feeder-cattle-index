@@ -401,3 +401,275 @@ def test_the_table_is_rendered_without_the_markdown_parser():
         head = caption[:600]
         assert "$" not in head.split(")")[0], \
             "a caption on this tab quotes a dollar figure -- escape it or move it"
+
+
+# ---------------------------------------------------------------------------
+# The market summary.
+#
+# The page states WHAT moved and never why; the cause is typed by a human and
+# saved beside the week. So every test here is about the arithmetic being the
+# arithmetic a reader would check by hand, plus one that holds the editorial
+# line itself.
+# ---------------------------------------------------------------------------
+
+W1 = dt.date(2026, 3, 1)      # two synthetic weeks, a month apart in spirit
+W2 = dt.date(2026, 4, 5)
+
+
+def _row(begin, wlow, head, price, weight=600):
+    """One qualifying MARS row. Every filtered field is set to pass."""
+    return {"begin": begin, "end": begin + dt.timedelta(days=6),
+            "published": begin + dt.timedelta(days=8),
+            "commodity": ss.COMMODITY, "class": ss.CLASS, "frame": ss.FRAME,
+            "grade": ss.GRADE, "unit": ss.PER_CWT, "lot_desc": "",
+            "wlow": wlow, "head": head, "weight": weight, "price": price,
+            "price_low": price, "price_high": price}
+
+
+def _data(spec):
+    """
+    spec: {state_code: {(begin, wlow): [(head, price), ...]}} -> a data dict.
+    """
+    return {"states": {c: [_row(b, w, h, p) for (b, w), lots in d.items()
+                           for h, p in lots]
+                       for c, d in spec.items()},
+            "errors": {}}
+
+
+def _wk(begin):
+    return {"begin": begin, "end": begin + dt.timedelta(days=6), "states": set()}
+
+
+def test_the_roster_term_is_exactly_what_the_fixed_panel_leaves_over(data):
+    """
+    reported == same_panel + roster, on every bracket, on the real payload.
+
+    An identity rather than a tolerance: both sides are built from the same
+    head counts, so any gap is an arithmetic fault and not rounding of two
+    independent quantities.
+    """
+    ws = ss.weeks(data)
+    cur = next(w for w in ws if w["begin"] == WEEK)
+    base = ss.week_containing(ws, ss.month_before(WEEK))
+    for br, m in ss.bracket_move(data, cur, base).items():
+        if m["reported"] is None or m["same_panel"] is None:
+            continue
+        assert abs(m["reported"] - (m["same_panel"] + m["roster"])) < 0.005, br
+
+
+def test_the_headline_quotes_the_FIXED_PANEL_and_not_the_raw_average():
+    """
+    THE ONE THAT MATTERS. A state joining a bracket moves the head-weighted
+    average with no bid changing, and on the live feed that was 55% of an
+    apparent move -- Nebraska went from none of the 5-600# head in the week of
+    8/30/2026 to 62% of it by 10/11, at the dearest light price in the panel.
+
+    Built so the two readings disagree in SIGN: on the states present in both
+    weeks the light end FELL, while the raw average ROSE because a dear state
+    arrived. A summary reading the raw average calls that a rally.
+    """
+    lo, hi = ss.BRACKETS[0], ss.BRACKETS[-1]
+    d = _data({
+        # priced in both weeks, and its light end falls 400 -> 380
+        "KS": {(W1, lo[1]): [(100, 400.0)], (W2, lo[1]): [(100, 380.0)],
+               (W1, hi[1]): [(100, 300.0)], (W2, hi[1]): [(100, 300.0)]},
+        # absent in W1, arrives in W2 with a big draft at a dear price
+        "NE": {(W2, lo[1]): [(900, 500.0)],
+               (W1, hi[1]): [(100, 300.0)], (W2, hi[1]): [(100, 300.0)]},
+    })
+    m = ss.bracket_move(d, _wk(W2), _wk(W1))[lo[0]]
+    assert m["reported"] > 0, "the raw average must rise, or the case is not set"
+    assert m["same_panel"] == -20.0, m["same_panel"]
+    assert m["roster"] > 0
+
+    s = ss.summary(d, _wk(W2), None, _wk(W1))
+    text = ss.split_sentence(s, "mom")
+    assert "-20.00/cwt" in text, text
+    assert f"{m['reported']:+,.2f}" not in text, \
+        "the headline quoted the roster-contaminated average"
+
+
+def test_the_roster_caution_names_both_numbers_when_they_disagree():
+    """
+    And says nothing when they agree. A caution that fires every week is one
+    nobody reads on the week it matters.
+    """
+    lo, hi = ss.BRACKETS[0], ss.BRACKETS[-1]
+    agree = _data({
+        "KS": {(W1, lo[1]): [(100, 400.0)], (W2, lo[1]): [(100, 410.0)],
+               (W1, hi[1]): [(100, 300.0)], (W2, hi[1]): [(100, 300.0)]},
+        "IA": {(W1, lo[1]): [(100, 400.0)], (W2, lo[1]): [(100, 410.0)],
+               (W1, hi[1]): [(100, 300.0)], (W2, hi[1]): [(100, 300.0)]},
+    })
+    assert ss.roster_caution(ss.summary(agree, _wk(W2), None, _wk(W1))) is None
+
+    skewed = _data({
+        "KS": {(W1, lo[1]): [(100, 400.0)], (W2, lo[1]): [(100, 400.0)],
+               (W1, hi[1]): [(100, 300.0)], (W2, hi[1]): [(100, 300.0)]},
+        "NE": {(W2, lo[1]): [(900, 500.0)],
+               (W1, hi[1]): [(100, 300.0)], (W2, hi[1]): [(100, 300.0)]},
+    })
+    s = ss.summary(skewed, _wk(W2), None, _wk(W1))
+    said = ss.roster_caution(s)
+    assert said and "which states brought light calves" in said
+    assert f"{s['mom'][lo[0]]['roster']:+,.2f}" in said
+
+
+def test_a_short_file_makes_no_claim_about_the_widest_or_narrowest_week(data):
+    """
+    On a two-week file every week is both an extreme and unremarkable, so the
+    caution would fire on every load and mean nothing. The shipped fixture IS
+    two weeks, which is why this is pinned against it rather than a synthetic.
+    """
+    ws = ss.weeks(data)
+    cur = next(w for w in ws if w["begin"] == WEEK)
+    s = ss.summary(data, cur, None, ss.week_containing(ws, ss.month_before(WEEK)))
+    assert len(ss.slide_history(data)) < ss.MIN_WEEKS_FOR_EXTREME
+    assert s["base_extreme"] is None
+    assert ss.base_caution(s) is None
+
+
+def test_the_extreme_claim_still_fires_once_there_is_enough_history():
+    """Guard the guard above: the withholding must be about LENGTH, not dead."""
+    lo, hi = ss.BRACKETS[0], ss.BRACKETS[-1]
+    spec = {"KS": {}}
+    for i in range(ss.MIN_WEEKS_FOR_EXTREME + 2):
+        b = W1 + dt.timedelta(days=7 * i)
+        spec["KS"][(b, lo[1])] = [(100, 400.0 + i)]     # spread widens weekly
+        spec["KS"][(b, hi[1])] = [(100, 300.0)]
+    d = _data(spec)
+    weeks = sorted(ss.weeks(d), key=lambda w: w["begin"])
+    s = ss.summary(d, weeks[-1], None, weeks[0])        # base is the narrowest
+    assert s["base_extreme"] == "narrowest", s["base_extreme"]
+    assert "narrowest" in (ss.base_caution(s) or "")
+
+
+def test_the_slide_is_a_median_across_states_not_a_gap_between_averages():
+    """
+    The two ends of the ladder are not drawn from the same roster in a given
+    week, so differencing two head-weighted averages measures the roster as
+    much as the ladder. Built so they disagree by more than 20/cwt.
+    """
+    lo, hi = ss.BRACKETS[0], ss.BRACKETS[-1]
+    d = _data({
+        "KS": {(W2, lo[1]): [(10, 400.0)], (W2, hi[1]): [(1000, 300.0)]},
+        "IA": {(W2, lo[1]): [(1000, 500.0)], (W2, hi[1]): [(10, 300.0)]},
+    })
+    # per state the gaps are 100 and 200, so the median is 150
+    assert ss.slide(d, _wk(W2)) == 150.0
+    c = ss._cells(d, _wk(W2))
+    gap_of_averages = ss._hw(c, lo[0])[0] - ss._hw(c, hi[0])[0]
+    assert abs(gap_of_averages - 150.0) > 20, \
+        "the case no longer separates the two measures"
+
+
+def test_the_leader_line_names_the_states_that_went_the_other_way(data):
+    """
+    "Lighter calves led" was false in two of the five states on the live table
+    for the month to 10/10/2026. A panel figure alone hides that, so the line
+    must name them and must carry its own period and figures.
+    """
+    ws = ss.weeks(data)
+    cur = next(w for w in ws if w["begin"] == WEEK)
+    s = ss.summary(data, cur, None, ss.week_containing(ws, ss.month_before(WEEK)))
+    said = ss.leader_sentence(s, "mom")
+    assert said.startswith("Over the month,"), said
+    assert "/cwt" in said
+    assert "the heavy end outran the light end in" in said
+    # and the week version says week, not month
+    assert ss.leader_sentence(s, "wow") == "" or \
+        ss.leader_sentence(s, "wow").startswith("Over the week,")
+
+
+def test_the_summary_never_states_a_cause(data):
+    """
+    The editorial line itself. Corn, the board and the fall run all moved over
+    this window and none of them is established as the cause by anything here,
+    so the computed text explains nothing -- the human box on the page does.
+    CLAUDE.md records a note deleted from the beef-trade chart for being a
+    plausible wrong cause; this keeps one from being added here.
+    """
+    ws = ss.weeks(data)
+    cur = next(w for w in ws if w["begin"] == WEEK)
+    s = ss.summary(data, cur, None, ss.week_containing(ws, ss.month_before(WEEK)))
+    said = " ".join(filter(None, [
+        ss.split_sentence(s, "mom"), ss.slide_sentence(s),
+        ss.leader_sentence(s, "mom"), ss.roster_caution(s) or "",
+        ss.base_caution(s) or ""])).lower()
+    for banned in ("because", "driven by", "due to", "thanks to", "on the back of",
+                   "corn", "wheat pasture", "demand for", "supply of", "as a result"):
+        assert banned not in said, f"the summary explained itself: {banned!r}"
+
+
+def _style_blocks(src):
+    """Every <style> ... </style> body in a source file, as plain text."""
+    out, i = [], 0
+    while True:
+        a = src.find("<style>", i)
+        if a < 0:
+            return out
+        b = src.find("</style>", a)
+        assert b > a, "an unclosed <style> in the page source"
+        out.append(src[a + len("<style>"):b])
+        i = b
+
+
+def test_no_style_block_on_this_tab_contains_a_literal_tag():
+    """
+    A LITERAL TAG INSIDE A <style> BLOCK ENDS THE BLOCK.
+
+    The HTML parser does not read CSS -- it scans the style element's text for
+    a tag and stops there, so the rest of the sheet becomes body text and
+    EVERY rule after it is silently lost. A CSS comment is not a safe place to
+    write one.
+
+    Cost a real debugging round: the comment explaining the state banding said
+    "one class per <tr>", which dropped the whole table stylesheet. The table
+    kept its classes and its data and rendered as an unstyled grid -- no card,
+    no border, no font size, no banding. py_compile passed, the suite passed,
+    and `get_page_text` read the figures back perfectly, because none of them
+    can see a stylesheet that was never applied. It was found by measuring
+    `.six-wrap`'s computed background in a browser and getting
+    `rgba(0, 0, 0, 0)` where a white card was expected.
+
+    Checked across the whole page, not just the six-state tab: the trap
+    belongs to st.html rather than to this feature.
+    """
+    src = (APP_DIR / "app.py").read_text(encoding="utf-8")
+    blocks = _style_blocks(src)
+    assert blocks, "no <style> blocks found -- has the page stopped using st.html?"
+    for body in blocks:
+        for i, ch in enumerate(body):
+            if ch != "<":
+                continue
+            nxt = body[i + 1:i + 2]
+            assert not (nxt.isalpha() or nxt == "/"), (
+                "a literal tag inside a <style> block ends the block and "
+                "silently drops every rule after it: "
+                + " ".join(body[max(0, i - 60):i + 20].split()))
+
+
+def test_the_literal_tag_guard_can_actually_fail():
+    """
+    Guard the guard. `<` is legal in CSS (`a < b` never appears, but media
+    queries and `:not(` do carry odd characters), so the check keys on a tag
+    START -- a letter or a slash right after the angle bracket. Prove it
+    separates the two rather than banning the character outright.
+    """
+    ok = _style_blocks("<style> .a {{ width: calc(100% - 2px); }} </style>")
+    assert ok and "<" not in ok[0]
+
+    bad = _style_blocks("<style> /* one class per <tr> */ .a {{ color:red; }} </style>")
+    assert bad and "<tr>" in bad[0], "the fixture must contain the trap"
+
+    def scan(blocks):
+        for body in blocks:
+            for i, ch in enumerate(body):
+                if ch == "<" and (body[i + 1:i + 2].isalpha()
+                                  or body[i + 1:i + 2] == "/"):
+                    return True
+        return False
+
+    assert scan(bad), "a literal tag must be detected"
+    assert not scan(ok), "ordinary CSS must not trip the check"
+    assert not scan(_style_blocks("<style> .a:not(.b) {{ color:red; }} </style>"))

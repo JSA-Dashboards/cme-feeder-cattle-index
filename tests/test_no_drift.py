@@ -475,3 +475,146 @@ def test_both_trimmings_dashboards_use_the_tested_checks():
             f"{app}: the weekly tile stopped using PREV"
         assert src.count('"avg_price", [PREV, MONTH, YEAR]') == 2, \
             f"{app}: an import tile stopped using PREV"
+
+
+def test_both_dashboards_render_the_computed_market_summary():
+    """
+    The 6 State tab states WHAT moved from the shared module, on both copies.
+
+    The arithmetic cannot drift -- six_state.py is in SHARED above -- but a
+    page is free to stop CALLING it, and the symptom of that is a tab that
+    still renders its table perfectly with the read missing. So each copy is
+    checked for the four sentences and both cautions by name.
+
+    THE WRITTEN CAUSE IS PORTAL-ONLY AND THAT IS DELIBERATE, not drift: it
+    needs a durable store and cme-feeder-cattle-index has no letter/ package,
+    so a box there would take a note and lose it on the next restart. Asserted
+    in both directions so the asymmetry stays a decision somebody made rather
+    than something that rotted.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert "six_state.summary(" in src, \
+            f"{app} no longer computes the market summary"
+        for fn in ("split_sentence", "slide_sentence", "leader_sentence",
+                   "roster_caution", "base_caution"):
+            assert f"six_state.{fn}(" in src, f"{app} dropped {fn}"
+        # It must go through st.html: these lines quote four dollar amounts
+        # and st.markdown renders a PAIR of dollar signs as inline LaTeX.
+        body = src.split("with tab_six:")[1]
+        assert body.index("six-sum") > body.index("st.html("), \
+            f"{app} renders the summary outside st.html"
+
+    portal = (PORTAL / "app.py").read_text(encoding="utf-8")
+    standalone = (HERE / "app.py").read_text(encoding="utf-8")
+    assert "SIX_NOTE_KIND" in portal and "Write the why for this week" in portal, \
+        "the portal lost the written-cause box"
+    assert "SIX_NOTE_KIND" not in standalone, (
+        "the standalone grew a written-cause box; it has no durable store, so "
+        "a note typed there is lost on the next restart")
+
+
+# Phrases that assert a CAUSE. The 6 State tab computes what moved and leaves
+# why to a person, so these may appear only inside the prompt in the writer's
+# own box.
+CAUSAL_PHRASES = ("because the", "driven by", "due to the",
+                  "on the back of", "as a result of", "reflecting the")
+
+
+def _without_placeholders(src, body):
+    """`body` with every `placeholder=` string literal in `src` removed."""
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, ast.keyword) and node.arg == "placeholder"
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            body = body.replace(node.value.value, "")
+    return body
+
+
+def test_neither_dashboard_infers_a_cause_on_the_six_state_tab():
+    """
+    The editorial line, held at the PAGE as well as in the module.
+
+    six_state.py's own test pins that its computed sentences explain nothing.
+    This pins that neither page then writes a cause around them -- which is
+    where it would actually be tempting, and where CLAUDE.md records one
+    having been deleted from the beef-trade chart for being plausible and
+    wrong.
+
+    The human's own prompt is cut out by its string literal before the search,
+    not waved through by a substring check anywhere in the body: the box is
+    meant to invite a cause and everything else is meant not to state one. An
+    earlier version of this test asked only whether the word "placeholder"
+    appeared somewhere in the tab, which let any number of causal phrases
+    through -- a guard that cannot fail is the thing it guards against.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        body = src.split("with tab_six:")[1].split("_year = datetime.now().year")[0]
+        body = _without_placeholders(src, body)
+        low = " ".join(body.lower().split())
+        for phrase in CAUSAL_PHRASES:
+            assert phrase not in low, (
+                f"{app}: the 6 State tab states a cause ({phrase!r}). What "
+                f"moved is computed; why it moved is written by a person.")
+
+
+def test_the_cause_guard_can_actually_fail():
+    """
+    Guard that guard: the placeholder cut-out must remove the prompt and
+    nothing else, so a cause asserted in a caption still trips the check.
+    """
+    src = "\n".join([
+        "def f():",
+        '    st.text_area("x", placeholder="corn, driven by the board")',
+        '    st.caption("Lights led because the board rallied")',
+    ])
+    body = _without_placeholders(src, src)
+    low = " ".join(body.lower().split())
+    assert "driven by" not in low, "the placeholder must be cut out"
+    assert "because the" in low, "a cause outside the placeholder must survive"
+    assert any(p in low for p in CAUSAL_PHRASES)
+
+
+def test_the_written_cause_is_keyed_on_the_WEEK_and_not_on_today():
+    """
+    Every note must hang off the week it is about.
+
+    Keyed on today instead, the page would still save, still reload, and still
+    look right all day -- and then show Monday's note under Tuesday's table
+    and pile a season's worth of causes onto a handful of dates. Nothing would
+    raise, because a date is a date.
+
+    Checked at the source because the save path needs Snowflake and so cannot
+    run on a developer machine: `enabled()` is false without USE_SNOWFLAKE, so
+    the box is hidden locally by design and a live save is only exercisable on
+    the deployed app.
+    """
+    src = (PORTAL / "app.py").read_text(encoding="utf-8")
+    body = src.split("with tab_six:")[1]
+
+    assert '_six_note_key = _six_week["begin"]' in body, (
+        "the note key is no longer the week being displayed")
+    for call in ("_six_draft_store.fetch(", "_six_draft_store.store("):
+        i = body.find(call)
+        assert i > 0, f"{call} is gone from the tab"
+        args = body[i + len(call):i + len(call) + 120]
+        assert "_six_note_key" in args, (
+            f"{call} no longer keys on the week: {args.split(')')[0]!r}")
+        assert "SIX_NOTE_KIND" in args, f"{call} lost its kind"
+
+    # datetime.now() anywhere near the note is the mistake this guards.
+    note_region = body[body.find("_six_note_key"):body.find("</div>")]
+    for bad in ("datetime.now(", "date.today(", "now_central("):
+        assert bad not in note_region, (
+            f"the note region calls {bad} -- a note keyed on the clock "
+            f"rather than on the week it describes")
+
+
+def test_the_note_key_guard_can_actually_fail():
+    """Guard the guard: the arg check must reject a today-keyed call."""
+    good = '_six_draft_store.store(_six_note_key, SIX_NOTE_KIND, body, "page")'
+    bad = '_six_draft_store.store(datetime.now().date(), SIX_NOTE_KIND, body)'
+    for src, expect in ((good, True), (bad, False)):
+        args = src.split("_six_draft_store.store(")[1]
+        assert ("_six_note_key" in args) is expect, src

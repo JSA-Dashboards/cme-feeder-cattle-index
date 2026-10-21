@@ -21,6 +21,7 @@ in the caption rather than letting a reader take the 6-month swing for a barn's
 own change.
 """
 import datetime as _dt
+import pathlib
 import sqlite3
 import sys
 import types
@@ -371,3 +372,46 @@ def test_the_cutoff_date_renders_on_windows():
     text = bb._cutoff_text()
     assert text == "28 August 2026", text
     assert not text.startswith("0")
+
+
+# ---------------------------------------------------------------------------
+# Rendering. Both of these shipped and were only visible on the page.
+# ---------------------------------------------------------------------------
+
+def test_an_all_absent_lookback_column_is_NaN_not_the_word_None():
+    """
+    pandas keeps a column of None as dtype=object and st.dataframe prints the
+    word "None" in every cell. It only bites when EVERY value is absent -- which
+    is exactly what the cutoff produces -- so this shipped on 2026-10-21 as a
+    table reading "None" down both lookback columns.
+
+    NaN keeps the column float and renders empty.
+    """
+    import pandas as pd
+    none_col = pd.DataFrame([{"x": None}, {"x": None}])
+    nan_col = pd.DataFrame([{"x": float("nan")}, {"x": float("nan")}])
+    assert none_col["x"].dtype == object, "the shape of the bug"
+    assert str(none_col["x"].iloc[0]) == "None"
+    assert nan_col["x"].dtype == float, "NaN keeps it numeric, so it renders blank"
+
+    src = (pathlib.Path(bb.__file__)).read_text(encoding="utf-8")
+    assert 'else float("nan")' in src, \
+        "the lookback column must fall back to NaN, not None"
+    assert 'else None' not in src.split("def _row(")[-1].split("st.dataframe")[0], \
+        "no None fallback may survive in the row builder"
+
+
+def test_the_blanking_caption_escapes_its_dollar_signs():
+    """
+    _md's own docstring: Streamlit markdown reads a PAIR of dollar signs as
+    LaTeX and eats everything between, raising nothing. The blanking caption
+    names two prices -- $2.81 and $1.69 -- and shipped unescaped, so the page
+    rendered "the index ran 2.81 out on average over the six-month band and
+    1.69 ..." with the middle set in maths.
+    """
+    src = (pathlib.Path(bb.__file__)).read_text(encoding="utf-8")
+    block = src.split("are blank in this mode on purpose")[1].split("st.caption")[0]
+    assert "$2.81" in block and "$1.69" in block, "re-point this at the wording"
+    head = src.split("are blank in this mode on purpose")[0]
+    assert head.rstrip().endswith("st.caption(_md(") or "_md(" in head[-80:], \
+        "the caption naming two prices must go through _md()"

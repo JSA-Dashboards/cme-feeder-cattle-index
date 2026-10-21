@@ -400,11 +400,16 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
                "$/head": round(r["price"] * r["weight"] / 100, 2)}
         prior = back.get((r["barn"], r["state"]), {})
         for centre, label in LOOKBACKS:
-            # None, NOT 0.0 and not the current price. pandas renders it blank
-            # and leaves the column numeric; a zero would sort to the bottom and
-            # read as a $427 collapse.
+            # NaN, NOT 0.0 and not the current price. A zero would sort to the
+            # bottom and read as a $427 collapse.
+            #
+            # NaN rather than None because pandas keeps a column of None as
+            # dtype=object and st.dataframe then prints the word "None" in every
+            # cell. It only bites when EVERY value is absent -- a bracket with
+            # no history at all -- which is how barn_basis.py shipped a table
+            # reading "None" down both lookback columns on 2026-10-21.
             p = prior.get(centre)
-            out[label] = round(p, 2) if p is not None else None
+            out[label] = round(p, 2) if p is not None else float("nan")
         out["Prints"] = r["prints"]
         out["Last sale"] = _fmt_date(r["last"])
         return out

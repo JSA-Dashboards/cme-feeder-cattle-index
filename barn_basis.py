@@ -735,9 +735,17 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
             # .get(metric), NOT [metric]. A band can carry "rel" and not
             # "basis" -- see index_is_trustworthy -- and a KeyError here would
             # take the whole tab down rather than leaving one column blank.
+            #
+            # NaN, NOT None, and the difference is visible rather than academic.
+            # pandas keeps a column of None as dtype=object and st.dataframe
+            # then prints the word "None" in every cell; NaN keeps it float and
+            # renders empty. With the cutoff in force EVERY value in these two
+            # columns is absent, which is exactly the case that turns the column
+            # to object -- so the first version of this shipped a table reading
+            # "None" down both columns.
             p = prior.get(centre) or {}
             v = p.get(metric)
-            out[f"{short} {label}"] = round(v, 2) if v is not None else None
+            out[f"{short} {label}"] = round(v, 2) if v is not None else float("nan")
         out["Timing"] = round(r["timing"], 2)
         out["Last sale"] = _fmt_date(r["last"])
         return out
@@ -756,7 +764,7 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
     )
     stale = [lbl for cen, lbl in LOOKBACKS if not index_is_trustworthy(cen)]
     if stale and mode == MODE_FCI:
-        st.caption(
+        st.caption(_md(
             f"**{' and '.join(stale)} are blank in this mode on purpose.** Those "
             f"bands reach back before {_cutoff_text()} where "
             f"available, and the reconstruction did not carry direct-trade sales "
@@ -767,7 +775,7 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
             f"Switch to **{MODE_BRACKET}** to see those bands: it compares a "
             f"barn against the bracket on the same sale days, so the index error "
             f"very largely cancels."
-        )
+        ))
 
     st.caption(
         f"Steers only, muscle grade #1 and #1-2, {wt}-{wt + 49} lb, from the "

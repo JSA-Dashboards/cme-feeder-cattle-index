@@ -773,10 +773,14 @@ def test_removing_any_one_barn_names_exactly_that_barn(conn, tmp_path,
 
 @pytest.mark.parametrize("slug_ids,newly_reported", [
     ([1906, 3090], {"Brush"}),
-    # the lajunta -> la junta pin: five spellings, two slugs, and the roster
-    # has to lose both before any of them is reported
-    ([1901, 1903], {"La Junta", "La Junta Winter", "Lajunta",
-                    "Lajunta Livestock", "Lajunta Winter"}),
+    # the lajunta -> la junta pin: five spellings, THREE slugs since 2026-10-21,
+    # and the roster has to lose all of them before any spelling is reported.
+    # 1902 is the Winter Livestock SEASONAL Monday sale, added after CME printed
+    # 39 head of La Junta on 2026-10-19 that we held none of -- the sale had
+    # simply not started yet when the roster was last swept, which is the one
+    # thing a fetch-test over a fixed window cannot see.
+    ([1901, 1902, 1903], {"La Junta", "La Junta Winter", "Lajunta",
+                          "Lajunta Livestock", "Lajunta Winter"}),
     # THREE slugs since 2026-10-09, not two. The Special (2105) was added after
     # CME printed 20 head of Torrington on 2026-10-12 that we held none of: the
     # regular reports run Wednesdays and the special ran that Monday. Dropping

@@ -378,27 +378,53 @@ def test_the_cutoff_date_renders_on_windows():
 # Rendering. Both of these shipped and were only visible on the page.
 # ---------------------------------------------------------------------------
 
-def test_an_all_absent_lookback_column_is_NaN_not_the_word_None():
+def test_an_all_absent_lookback_column_is_DROPPED_not_rendered():
     """
-    pandas keeps a column of None as dtype=object and st.dataframe prints the
-    word "None" in every cell. It only bites when EVERY value is absent -- which
-    is exactly what the cutoff produces -- so this shipped on 2026-10-21 as a
-    table reading "None" down both lookback columns.
+    NEITHER None NOR NaN RENDERS AS BLANK, and both shipped before this test
+    existed. Measured on this pandas/pyarrow:
 
-    NaN keeps the column float and renders empty.
+        column of None        dtype=object   arrow -> ['None', 'None']
+        column of float64 NaN dtype=float64  arrow -> ['None', 'None']
+
+    pyarrow serialises NaN to null and st.dataframe prints the word, so an
+    all-absent column reaches the page as a stripe of "None" either way. With
+    the index cutoff in force that is every row of both lookback columns on a
+    traded table.
+
+    The fix is to drop the column. This test asserts the Arrow behaviour too,
+    so that if a future pandas starts rendering NaN blank, it fails and says so
+    rather than leaving a workaround nobody can justify.
     """
     import pandas as pd
-    none_col = pd.DataFrame([{"x": None}, {"x": None}])
-    nan_col = pd.DataFrame([{"x": float("nan")}, {"x": float("nan")}])
-    assert none_col["x"].dtype == object, "the shape of the bug"
-    assert str(none_col["x"].iloc[0]) == "None"
-    assert nan_col["x"].dtype == float, "NaN keeps it numeric, so it renders blank"
+    import pyarrow as pa
 
-    src = (pathlib.Path(bb.__file__)).read_text(encoding="utf-8")
-    assert 'else float("nan")' in src, \
-        "the lookback column must fall back to NaN, not None"
-    assert 'else None' not in src.split("def _row(")[-1].split("st.dataframe")[0], \
-        "no None fallback may survive in the row builder"
+    for rows, kind in (([{"L": None}, {"L": None}], "None"),
+                       ([{"L": float("nan")}, {"L": float("nan")}], "NaN")):
+        col = pa.Table.from_pandas(pd.DataFrame(rows)).column("L")
+        assert [str(v) for v in col] == ["None", "None"],             "a column of %s no longer arrives as 'None' -- re-check the fix" % kind
+
+    short = "vs FCI"
+    label = bb.LOOKBACKS[0][1]
+    empty = pd.DataFrame([{"Sale barn": "A", "%s %s" % (short, label): float("nan")},
+                          {"Sale barn": "B", "%s %s" % (short, label): float("nan")}])
+    assert "%s %s" % (short, label) not in bb.drop_empty_lookbacks(empty, short).columns
+
+
+def test_a_SPARSE_lookback_column_is_kept():
+    """
+    The other half. One barn missing a band is a fact about that barn, and the
+    column still carries real numbers to sort on -- dropping it would hide them.
+    A rule that drops every column with any gap would empty the table on the
+    first barn that skipped a week.
+    """
+    import pandas as pd
+    short, label = "vs FCI", bb.LOOKBACKS[0][1]
+    col = "%s %s" % (short, label)
+    sparse = pd.DataFrame([{"Sale barn": "A", col: 12.34},
+                           {"Sale barn": "B", col: float("nan")}])
+    kept = bb.drop_empty_lookbacks(sparse, short)
+    assert col in kept.columns
+    assert kept[col].iloc[0] == 12.34
 
 
 def test_the_blanking_caption_escapes_its_dollar_signs():

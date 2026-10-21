@@ -205,6 +205,33 @@ LOOKBACK_BAND_DAYS = 30
 INDEX_TRUSTWORTHY_FROM = _dt.date(2026, 8, 28)
 
 
+def drop_empty_lookbacks(table, short):
+    """
+    Remove a lookback column that has no value in any row.
+
+    NEITHER None NOR NaN RENDERS AS BLANK, which is the whole reason this
+    exists. Measured on this pandas/pyarrow: a column of None is dtype=object
+    and arrives at Arrow as ['None', 'None']; a column of float64 NaN arrives as
+    ['None', 'None'] TOO, because pyarrow serialises NaN to null and
+    st.dataframe prints the word. So an all-absent column reaches a traded page
+    as a stripe of "None" either way, and with the index cutoff in force that is
+    every row of both columns.
+
+    Two attempts shipped before this one -- None, then NaN -- and both passed
+    the whole suite, because nothing in it builds the DataFrame. Only opening
+    the page showed it.
+
+    A SPARSE column is kept: one barn missing a band is a fact about that barn,
+    the column still carries real numbers to sort on, and dropping it would hide
+    them. Only a column that says nothing at all goes.
+    """
+    for _centre, label in LOOKBACKS:
+        col = "%s %s" % (short, label)
+        if col in table.columns and table[col].isna().all():
+            table = table.drop(columns=[col])
+    return table
+
+
 def _cutoff_text():
     """
     "28 August 2026". Built by hand because %-d is glibc-only and raises
@@ -750,8 +777,8 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
         out["Last sale"] = _fmt_date(r["last"])
         return out
 
-    st.dataframe(pd.DataFrame([_row(r) for r in ranked]),
-                 use_container_width=True, hide_index=True)
+    table = drop_empty_lookbacks(pd.DataFrame([_row(r) for r in ranked]), short)
+    st.dataframe(table, use_container_width=True, hide_index=True)
     st.caption(
         f"**{short} {LOOKBACKS[0][1]}** and **{short} {LOOKBACKS[1][1]}** are "
         f"the same measure at a point in time — that barn's basis over a "

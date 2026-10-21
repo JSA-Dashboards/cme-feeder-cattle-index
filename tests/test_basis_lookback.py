@@ -20,6 +20,7 @@ the module treats the 12-month column as the like-for-like comparison and says s
 in the caption rather than letting a reader take the 6-month swing for a barn's
 own change.
 """
+import datetime as _dt
 import sqlite3
 import sys
 import types
@@ -68,6 +69,13 @@ def db(monkeypatch, tmp_path):
     compares a window against a lookback calls both, and failed exactly there.
     """
     monkeypatch.delenv("USE_SNOWFLAKE", raising=False)
+    # These tests are about the MEASURE -- head-weighting, the inner join, the
+    # band's edges, rel against the bracket as it was. None is about whether
+    # fci_daily can be trusted that far back, so the cutoff is moved out of the
+    # way and the tests that ARE about it put it back explicitly. Leaving the
+    # real date here would make every one of them assert the blanking rule by
+    # accident and stop testing what its name says.
+    monkeypatch.setattr(bb, "INDEX_TRUSTWORTHY_FROM", _dt.date(2000, 1, 1))
     path = tmp_path / "t.db"
     setup = sqlite3.connect(path)
     setup.executescript(SCHEMA)
@@ -276,3 +284,90 @@ def test_the_offsets_are_roughly_six_and_twelve_months():
     centres = [c for c, _ in bb.LOOKBACKS]
     assert centres == sorted(centres)
     assert 170 <= centres[0] <= 195 and 355 <= centres[1] <= 380, centres
+
+
+# ---------------------------------------------------------------------------
+# The index is not trustworthy all the way back, and the columns say so.
+# ---------------------------------------------------------------------------
+
+def test_a_band_reaching_before_the_cutoff_omits_the_vs_FCI_basis(db, monkeypatch):
+    """
+    THE 2026-10-21 FINDING. fci_daily did not carry direct-trade sales until
+    2026-08-28. Measured against CME's own file, it ran $2.814 out on average
+    over the six-month band and $1.691 over the twelve-month one, against
+    $0.005 today. "vs FCI 6 mo ago" was quoting a basis to the cent off an
+    index that was dollars wrong, in the same row as a column accurate to half
+    a cent, under a caption saying the two were comparable.
+    """
+    monkeypatch.setattr(bb, "INDEX_TRUSTWORTHY_FROM", _dt.date(2026, 8, 28))
+    sale(db, 182, "Carthage", 460.0, 400.0)
+    got = bb.load_basis_lookbacks(600)[("Carthage", "MO")][182]
+    assert "basis" not in got, "vs FCI must be absent for an untrustworthy band"
+    assert "rel" in got, "vs bracket survives -- the index error cancels"
+
+
+def test_vs_bracket_survives_because_the_index_error_cancels(db, monkeypatch):
+    """
+    The asymmetry is deliberate, not an oversight. rel is a barn's basis minus
+    the whole bracket's, both built from the same fci_daily on the same sale
+    days, so a wrong index very largely drops out. Mode A has nothing to stand
+    on; mode B compares barns with each other.
+    """
+    monkeypatch.setattr(bb, "INDEX_TRUSTWORTHY_FROM", _dt.date(2026, 8, 28))
+    sale(db, 182, "Wide", 460.0, 400.0, head=100)
+    sale(db, 182, "Narrow", 420.0, 400.0, head=100)
+    got = bb.load_basis_lookbacks(600)
+    assert got[("Wide", "MO")][182]["rel"] == pytest.approx(20.0, abs=0.01)
+    assert got[("Narrow", "MO")][182]["rel"] == pytest.approx(-20.0, abs=0.01)
+
+
+def test_the_cutoff_needs_the_WHOLE_band_not_just_its_newest_day(db, monkeypatch):
+    """
+    A straddling band is part good and part dollars out, and nothing says which
+    side a given barn's sale fell on. Newest-day-only would have let the
+    six-month band through from about 2027-02-25, quoting a number that is
+    half wrong.
+    """
+    import datetime as dt
+    monkeypatch.setattr(bb, "INDEX_TRUSTWORTHY_FROM", dt.date(2026, 8, 28))
+    cutoff = bb.INDEX_TRUSTWORTHY_FROM
+    half = bb.LOOKBACK_BAND_DAYS // 2
+    # a 'today' where the band's newest day clears the cutoff but its oldest does not
+    straddle = cutoff + dt.timedelta(days=182 - half + 1)
+    oldest, newest = bb.band_dates(182, today=straddle)
+    assert oldest < cutoff <= newest, (oldest, cutoff, newest)
+    assert not bb.index_is_trustworthy(182, today=straddle)
+
+
+def test_the_cutoff_opens_up_once_the_band_clears_it(db, monkeypatch):
+    """The other half -- a rule that never admits anything is not a rule."""
+    import datetime as dt
+    monkeypatch.setattr(bb, "INDEX_TRUSTWORTHY_FROM", dt.date(2026, 8, 28))
+    clear = bb.INDEX_TRUSTWORTHY_FROM + dt.timedelta(days=182 + 20)
+    assert bb.index_is_trustworthy(182, today=clear)
+    assert bb.band_dates(182, today=clear)[0] >= bb.INDEX_TRUSTWORTHY_FROM
+
+
+def test_band_dates_mirrors_the_sql_band():
+    """
+    band_dates answers questions about the window _band builds. If they drift,
+    the cutoff is applied to a different span than the query reads.
+    """
+    import datetime as dt
+    today = dt.date(2026, 10, 21)
+    oldest, newest = bb.band_dates(182, today=today)
+    sql = bb._band(FakeDb(), 182)
+    assert "-%d day" % (today - oldest).days in sql
+    assert "-%d day" % (today - newest).days in sql
+
+
+def test_the_cutoff_date_renders_on_windows():
+    """
+    %-d is glibc-only and raises ValueError on Windows, which is where this job
+    runs. _fmt_date in this module already carries that warning and the caption
+    fell into it anyway -- the first version used {date:%-d %B %Y} and would
+    have thrown on every page load.
+    """
+    text = bb._cutoff_text()
+    assert text == "28 August 2026", text
+    assert not text.startswith("0")

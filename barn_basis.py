@@ -49,6 +49,8 @@ name is written unquoted throughout, in prose as well as SQL, because
 tests/test_index_isolation.py bans it wrapped in either kind of quote inside an
 index module and that habit is what keeps app.py clean.
 """
+import datetime as _dt
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -178,6 +180,66 @@ def _since(_db, days):
 # which rather than leaving the reader to assume they are equivalent.
 LOOKBACKS = [(182, "6 mo ago"), (365, "12 mo ago")]
 LOOKBACK_BAND_DAYS = 30
+
+# BEFORE THIS DATE fci_daily IS NOT ACCURATE ENOUGH TO SUBTRACT A PRICE FROM.
+#
+# The direct-trade component was added to the reconstruction on 2026-08-28, and
+# CLAUDE.md records the consequence in one line: agreement with CME is to a
+# fraction of a cent FROM that date on. Before it, a whole class of sale is
+# absent. Measured 2026-10-21 against CME's own published file:
+#
+#     2026-04-07..05-07   mean |miss| $2.814   max $7.510   <- the 6 mo band
+#     2025-10-06..11-05   mean |miss| $1.691   max $4.058   <- the 12 mo band
+#     2026-08-28 onward   mean |miss| $0.005   max $0.022
+#
+# So "vs FCI 6 mo ago" was being measured against an index that was $2.81 out on
+# average, sitting in the same row as a live column accurate to half a cent, and
+# the caption said they were comparable. They are not, and a basis quoted to the
+# cent against a figure that is dollars wrong is worse than no answer.
+#
+# vs BRACKET SURVIVES, and the asymmetry is the point rather than an oversight:
+# rel is a barn's basis minus the whole bracket's, both built from the same
+# fci_daily on the same sale days, so the index error very largely cancels. It
+# is a comparison between barns; mode A is a comparison against the index
+# itself, and that is the one with nothing solid to stand on.
+INDEX_TRUSTWORTHY_FROM = _dt.date(2026, 8, 28)
+
+
+def _cutoff_text():
+    """
+    "28 August 2026". Built by hand because %-d is glibc-only and raises
+    ValueError on Windows, which is where this job actually runs -- the same
+    trap _fmt_date below already carries a note about, and which this caption
+    fell into anyway.
+    """
+    d = INDEX_TRUSTWORTHY_FROM
+    return "%d %s" % (d.day, d.strftime("%B %Y"))
+
+
+def band_dates(centre_days, width=LOOKBACK_BAND_DAYS, today=None):
+    """
+    (oldest, newest) real dates the band covers. Mirrors _band's arithmetic so
+    the two cannot drift: _band builds the SQL, this answers questions about it.
+    `today` is injectable so the cutoff below is testable without waiting a year.
+    """
+    today = today or _dt.date.today()
+    half = width // 2
+    return (today - _dt.timedelta(days=int(centre_days) + half),
+            today - _dt.timedelta(days=int(centre_days) - half))
+
+
+def index_is_trustworthy(centre_days, width=LOOKBACK_BAND_DAYS, today=None):
+    """
+    May a basis measured AGAINST THE INDEX be quoted for this band?
+
+    Requires the WHOLE band to sit on or after INDEX_TRUSTWORTHY_FROM, not just
+    its newest day. A band straddling the cutoff is part good and part dollars
+    out, and there is no way to say which part a given barn's sale fell in --
+    so the honest answer for a straddling band is the same as for a wholly bad
+    one: nothing.
+    """
+    oldest, _newest = band_dates(centre_days, width, today)
+    return oldest >= INDEX_TRUSTWORTHY_FROM
 
 
 def _band(_db, centre_days, width=LOOKBACK_BAND_DAYS):
@@ -378,11 +440,15 @@ def load_basis_lookbacks(weight_low: int):
                 continue
             head = sum(r["head"] for r in band)
             bracket_basis = sum(r["head"] * r["basis"] for r in band) / head
+            # OMITTED, not zeroed and not quietly wrong: a band that reaches
+            # back past INDEX_TRUSTWORTHY_FROM has no index worth subtracting
+            # a price from. render() renders a missing key as blank.
+            trust = index_is_trustworthy(centre)
             for r in band:
-                out.setdefault((r["barn"], r["state"]), {})[centre] = {
-                    "basis": r["basis"],
-                    "rel": r["basis"] - bracket_basis,
-                }
+                entry = {"rel": r["basis"] - bracket_basis}
+                if trust:
+                    entry["basis"] = r["basis"]
+                out.setdefault((r["barn"], r["state"]), {})[centre] = entry
     except Exception:
         return out
     finally:
@@ -666,8 +732,12 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
             # None, NOT 0.0. Zero basis is a real and ordinary reading here, so a
             # filled-in zero would be indistinguishable from a barn that traded
             # exactly at the index that month.
-            p = prior.get(centre)
-            out[f"{short} {label}"] = round(p[metric], 2) if p else None
+            # .get(metric), NOT [metric]. A band can carry "rel" and not
+            # "basis" -- see index_is_trustworthy -- and a KeyError here would
+            # take the whole tab down rather than leaving one column blank.
+            p = prior.get(centre) or {}
+            v = p.get(metric)
+            out[f"{short} {label}"] = round(v, 2) if v is not None else None
         out["Timing"] = round(r["timing"], 2)
         out["Last sale"] = _fmt_date(r["last"])
         return out
@@ -684,6 +754,20 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
         f"opposite season and moves with it. Blank means the barn had no "
         f"qualifying sales in that band."
     )
+    stale = [lbl for cen, lbl in LOOKBACKS if not index_is_trustworthy(cen)]
+    if stale and mode == MODE_FCI:
+        st.caption(
+            f"**{' and '.join(stale)} are blank in this mode on purpose.** Those "
+            f"bands reach back before {_cutoff_text()} where "
+            f"available, and the reconstruction did not carry direct-trade sales "
+            f"until then — measured against CME's own file, the index ran "
+            f"$2.81 out on average over the six-month band and $1.69 over the "
+            f"twelve-month one, against half a cent today. A basis quoted to the "
+            f"cent off a figure that is dollars wrong is worse than no answer. "
+            f"Switch to **{MODE_BRACKET}** to see those bands: it compares a "
+            f"barn against the bracket on the same sale days, so the index error "
+            f"very largely cancels."
+        )
 
     st.caption(
         f"Steers only, muscle grade #1 and #1-2, {wt}-{wt + 49} lb, from the "

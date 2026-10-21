@@ -28,6 +28,12 @@ import pytest
 if "streamlit" not in sys.modules:
     _stub = types.ModuleType("streamlit")
     _stub.cache_data = lambda **kw: (lambda f: f)
+    # column_config, because blank_missing_lookbacks asks for a TextColumn to
+    # right-align what it has just turned into text. The stub records the
+    # kwargs rather than ignoring them, so a test can see WHICH columns were
+    # configured without needing real streamlit.
+    _stub.column_config = types.SimpleNamespace(
+        TextColumn=lambda **kw: ("TextColumn", kw))
     sys.modules["streamlit"] = _stub
 
 import cash_calves as cc

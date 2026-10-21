@@ -210,26 +210,65 @@ def drop_empty_lookbacks(table, short):
     Remove a lookback column that has no value in any row.
 
     NEITHER None NOR NaN RENDERS AS BLANK, which is the whole reason this
-    exists. Measured on this pandas/pyarrow: a column of None is dtype=object
-    and arrives at Arrow as ['None', 'None']; a column of float64 NaN arrives as
-    ['None', 'None'] TOO, because pyarrow serialises NaN to null and
-    st.dataframe prints the word. So an all-absent column reaches a traded page
-    as a stripe of "None" either way, and with the index cutoff in force that is
-    every row of both columns.
+    exists: an all-absent column reaches a traded page as a stripe of "None",
+    and with the index cutoff in force that is every row of both columns.
+    blank_missing_lookbacks below carries what was actually measured, and why
+    the first two attempts could not tell a blank from a null.
 
     Two attempts shipped before this one -- None, then NaN -- and both passed
     the whole suite, because nothing in it builds the DataFrame. Only opening
     the page showed it.
 
     A SPARSE column is kept: one barn missing a band is a fact about that barn,
-    the column still carries real numbers to sort on, and dropping it would hide
-    them. Only a column that says nothing at all goes.
+    the column still carries real readings, and dropping it would hide them.
+    Only a column that says nothing at all goes.
     """
     for _centre, label in LOOKBACKS:
         col = "%s %s" % (short, label)
         if col in table.columns and table[col].isna().all():
             table = table.drop(columns=[col])
     return table
+
+
+def blank_missing_lookbacks(table, short):
+    """
+    Turn the surviving lookback columns into TEXT, empty where the value is
+    missing, and hand back the column_config that keeps them right-aligned.
+
+    A NULL IS NOT A BLANK. Measured in a browser against this Streamlit, one
+    missing cell in a column of real numbers: float NaN prints "None", pandas
+    pd.NA prints "None", NumberColumn(format="%.2f") prints "None", and a
+    Styler carrying na_rep="" prints "None". Only a string column holding ""
+    renders empty, so the column has to stop being numeric for a gap to read
+    as a gap.
+
+    The two earlier attempts -- None, then NaN -- were each checked by reading
+    pyarrow's to_pylist(), which prints None for ANY null and so could not tell
+    them apart, or tell either from a blank. That check could not fail. Only
+    the rendered page could, and did.
+
+    THE COST IS THE SORT: the grid sorts text lexically, so clicking one of
+    these headers puts "-18.53" after "5.46". Taken deliberately. The caption
+    under this table promises "Blank means the barn had no qualifying sales in
+    that band"; a column printing "None" breaks that promise on every row with
+    no data, where the sort misleads only a reader who sorts by that column.
+
+    Runs AFTER drop_empty_lookbacks, which needs the NaNs to recognise a column
+    that says nothing at all.
+    """
+    cfg = {}
+    for _centre, label in LOOKBACKS:
+        col = "%s %s" % (short, label)
+        if col not in table.columns:
+            continue
+        table[col] = ["" if pd.isna(v) else "%.2f" % v for v in table[col]]
+        try:
+            cfg[col] = st.column_config.TextColumn(alignment="right")
+        except TypeError:
+            # alignment= is newer than this file's floor. Losing it costs
+            # alignment; raising here would cost the whole tab.
+            cfg[col] = st.column_config.TextColumn()
+    return table, cfg
 
 
 def _cutoff_text():
@@ -763,13 +802,11 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
             # "basis" -- see index_is_trustworthy -- and a KeyError here would
             # take the whole tab down rather than leaving one column blank.
             #
-            # NaN, NOT None, and the difference is visible rather than academic.
-            # pandas keeps a column of None as dtype=object and st.dataframe
-            # then prints the word "None" in every cell; NaN keeps it float and
-            # renders empty. With the cutoff in force EVERY value in these two
-            # columns is absent, which is exactly the case that turns the column
-            # to object -- so the first version of this shipped a table reading
-            # "None" down both columns.
+            # NaN, not None: drop_empty_lookbacks needs .isna() to find a
+            # column that says nothing at all, and blank_missing_lookbacks
+            # needs it to find the individual gaps. NEITHER renders as blank
+            # on its own -- both print the word "None" -- which is what
+            # blank_missing_lookbacks exists to deal with.
             p = prior.get(centre) or {}
             v = p.get(metric)
             out[f"{short} {label}"] = round(v, 2) if v is not None else float("nan")
@@ -778,7 +815,9 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
         return out
 
     table = drop_empty_lookbacks(pd.DataFrame([_row(r) for r in ranked]), short)
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    table, lookback_cfg = blank_missing_lookbacks(table, short)
+    st.dataframe(table, use_container_width=True, hide_index=True,
+                 column_config=lookback_cfg)
     st.caption(
         f"**{short} {LOOKBACKS[0][1]}** and **{short} {LOOKBACKS[1][1]}** are "
         f"the same measure at a point in time — that barn's basis over a "

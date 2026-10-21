@@ -31,6 +31,12 @@ import pytest
 if "streamlit" not in sys.modules:
     _stub = types.ModuleType("streamlit")
     _stub.cache_data = lambda **kw: (lambda f: f)
+    # column_config, because blank_missing_lookbacks asks for a TextColumn to
+    # right-align what it has just turned into text. The stub records the
+    # kwargs rather than ignoring them, so a test can see WHICH columns were
+    # configured without needing real streamlit.
+    _stub.column_config = types.SimpleNamespace(
+        TextColumn=lambda **kw: ("TextColumn", kw))
     sys.modules["streamlit"] = _stub
 
 import barn_basis as bb
@@ -391,17 +397,16 @@ def test_an_all_absent_lookback_column_is_DROPPED_not_rendered():
     the index cutoff in force that is every row of both lookback columns on a
     traded table.
 
-    The fix is to drop the column. This test asserts the Arrow behaviour too,
-    so that if a future pandas starts rendering NaN blank, it fails and says so
-    rather than leaving a workaround nobody can justify.
+    The fix is to drop the column.
+
+    AN EARLIER VERSION OF THIS TEST ALSO ASSERTED pyarrow's to_pylist(), on the
+    theory that it showed NaN "arriving as None". It does not show that: nulls
+    print as None in Python whatever produced them, so the assertion held for a
+    blank, a NaN and a None alike and could not have failed. It is gone, and
+    what a gap actually renders as is pinned by
+    test_the_blank_check_REJECTS_the_two_versions_that_shipped below.
     """
     import pandas as pd
-    import pyarrow as pa
-
-    for rows, kind in (([{"L": None}, {"L": None}], "None"),
-                       ([{"L": float("nan")}, {"L": float("nan")}], "NaN")):
-        col = pa.Table.from_pandas(pd.DataFrame(rows)).column("L")
-        assert [str(v) for v in col] == ["None", "None"],             "a column of %s no longer arrives as 'None' -- re-check the fix" % kind
 
     short = "vs FCI"
     label = bb.LOOKBACKS[0][1]
@@ -441,3 +446,107 @@ def test_the_blanking_caption_escapes_its_dollar_signs():
     head = src.split("are blank in this mode on purpose")[0]
     assert head.rstrip().endswith("st.caption(_md(") or "_md(" in head[-80:], \
         "the caption naming two prices must go through _md()"
+
+
+# ---------------------------------------------------------------------------
+# A missing cell, not a missing column. drop_empty_lookbacks handles the column
+# that says nothing at all; these cover the gap INSIDE a column that is kept.
+# ---------------------------------------------------------------------------
+
+def _rendered(series):
+    """
+    What st.dataframe would put in each cell.
+
+    A NULL IS NOT A BLANK -- measured in a browser against Streamlit 1.63 on a
+    column of real numbers with one cell missing: float NaN, pandas pd.NA,
+    NumberColumn(format=...) and a Styler with na_rep="" ALL print the word
+    "None"; only a string column holding "" renders empty. So anything still
+    null by the time it reaches the page is a cell that reads "None".
+    """
+    import pandas as pd
+    return ["None" if pd.isna(v) else v for v in series]
+
+
+def test_a_missing_lookback_cell_renders_BLANK_not_the_word_None():
+    import pandas as pd
+    short, label = "vs bracket", bb.LOOKBACKS[0][1]
+    col = "%s %s" % (short, label)
+    sparse = pd.DataFrame([{"Sale barn": "Valentine", col: 35.3},
+                           {"Sale barn": "Philip", col: float("nan")}])
+    out, _cfg = bb.blank_missing_lookbacks(sparse, short)
+    assert _rendered(out[col]) == ["35.30", ""]
+
+
+def test_the_blank_check_REJECTS_the_two_versions_that_shipped():
+    """
+    THE GUARD PROVEN TO FAIL. Both earlier fixes -- a column of None, then a
+    column of float NaN -- passed the whole suite and rendered "None" on the
+    traded page. If _rendered above cannot tell them from a blank then neither
+    can the test above, and this one would have been just as green as the suite
+    was on the day both shipped.
+    """
+    import pandas as pd
+    assert _rendered(pd.Series([35.3, float("nan")])) == [35.3, "None"]
+    assert _rendered(pd.Series([35.3, None])) == [35.3, "None"]
+    assert _rendered(pd.Series(["35.30", ""])) == ["35.30", ""]
+
+
+def test_a_present_lookback_value_keeps_both_decimals():
+    """
+    "35.3" beside "33.16" in a column of dollars reads as a different precision,
+    not a rounder number. The float column got this free from the grid; a text
+    column has to do it.
+    """
+    import pandas as pd
+    short, label = "vs bracket", bb.LOOKBACKS[0][1]
+    col = "%s %s" % (short, label)
+    out, _cfg = bb.blank_missing_lookbacks(
+        pd.DataFrame([{col: 35.3}, {col: -18.5}, {col: 0.0}]), short)
+    assert list(out[col]) == ["35.30", "-18.50", "0.00"]
+
+
+def test_zero_is_a_reading_and_survives_the_blanking():
+    """
+    Zero basis is real and ordinary here -- a barn that traded at the bracket.
+    Blanking it would be the same error as filling a gap with zero, in reverse.
+    """
+    import pandas as pd
+    short, label = "vs bracket", bb.LOOKBACKS[0][1]
+    col = "%s %s" % (short, label)
+    out, _cfg = bb.blank_missing_lookbacks(pd.DataFrame([{col: 0.0}]), short)
+    assert list(out[col]) == ["0.00"]
+
+
+def test_the_blanked_columns_are_right_aligned_like_their_neighbours():
+    import pandas as pd
+    short = "vs bracket"
+    cols = {"%s %s" % (short, lbl): 1.0 for _c, lbl in bb.LOOKBACKS}
+    _out, cfg = bb.blank_missing_lookbacks(pd.DataFrame([cols]), short)
+    assert set(cfg) == set(cols)
+
+
+def test_blanking_skips_a_column_drop_empty_lookbacks_already_removed():
+    """
+    The two run in order on the same frame, and in vs FCI mode the cutoff means
+    drop_empty_lookbacks takes BOTH columns out first. A KeyError here would
+    take down the tab in exactly the mode the blanking was built for.
+    """
+    import pandas as pd
+    out, cfg = bb.blank_missing_lookbacks(
+        pd.DataFrame([{"Sale barn": "A"}]), "vs FCI")
+    assert cfg == {} and list(out.columns) == ["Sale barn"]
+
+
+def test_the_two_tabs_agree_on_what_a_gap_looks_like():
+    """
+    Cash Feeder Prices sits one tab over and builds the same lookback columns.
+    Two tabs disagreeing about whether a gap is blank or the word "None" is the
+    kind of difference a reader reads as data.
+    """
+    import pandas as pd
+    import cash_calves as cc
+    label = cc.LOOKBACKS[0][1]
+    out, cfg = cc.blank_missing_lookbacks(
+        pd.DataFrame([{label: 412.5}, {label: float("nan")}]))
+    assert _rendered(out[label]) == ["412.50", ""]
+    assert set(cfg) == {label}

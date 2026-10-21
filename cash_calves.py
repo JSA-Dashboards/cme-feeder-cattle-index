@@ -269,6 +269,41 @@ def _fmt_date(iso):
         return str(iso)
 
 
+
+def blank_missing_lookbacks(table):
+    """
+    Turn the lookback columns into TEXT, empty where the price is missing, and
+    hand back the column_config that keeps them right-aligned.
+
+    A NULL IS NOT A BLANK. Measured in a browser against this Streamlit, one
+    missing cell in a column of real numbers: float NaN prints "None", pandas
+    pd.NA prints "None", NumberColumn(format="%.2f") prints "None", and a
+    Styler carrying na_rep="" prints "None". Only a string column holding ""
+    renders empty.
+
+    THE COST IS THE SORT: the grid sorts text lexically, so these two headers
+    order "9.52" after "35.30". Prices here are positive, so the damage is
+    confined to column width rather than sign -- but it is a real loss, taken
+    because a bracket with no history in a band is commonplace and "None" down
+    a price column reads as a broken page.
+
+    Same measurement and same trade as barn_basis.blank_missing_lookbacks; the
+    two tabs sit beside each other and must not disagree about what a gap looks
+    like.
+    """
+    cfg = {}
+    for _centre, label in LOOKBACKS:
+        if label not in table.columns:
+            continue
+        table[label] = ["" if pd.isna(v) else "%.2f" % v for v in table[label]]
+        try:
+            cfg[label] = st.column_config.TextColumn(alignment="right")
+        except TypeError:
+            # alignment= is newer than this file's floor. Losing it costs
+            # alignment; raising here would cost the whole tab.
+            cfg[label] = st.column_config.TextColumn()
+    return table, cfg
+
 def render(tile, muted="#6b7280", key_prefix="cash"):
     """
     Draw the whole lookup. `tile` is the host page's tile helper, called as
@@ -403,19 +438,21 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
             # NaN, NOT 0.0 and not the current price. A zero would sort to the
             # bottom and read as a $427 collapse.
             #
-            # NaN rather than None because pandas keeps a column of None as
-            # dtype=object and st.dataframe then prints the word "None" in every
-            # cell. It only bites when EVERY value is absent -- a bracket with
-            # no history at all -- which is how barn_basis.py shipped a table
-            # reading "None" down both lookback columns on 2026-10-21.
+            # NaN rather than None so blank_missing_lookbacks can find the gaps
+            # with .isna(). NEITHER renders as blank by itself: a missing cell
+            # in a numeric column prints the word "None", on ANY row, not only
+            # when the whole column is absent -- which is what the note here
+            # used to claim, and what barn_basis.py shipped twice.
             p = prior.get(centre)
             out[label] = round(p, 2) if p is not None else float("nan")
         out["Prints"] = r["prints"]
         out["Last sale"] = _fmt_date(r["last"])
         return out
 
-    st.dataframe(pd.DataFrame([_row(r) for r in rows]),
-                 use_container_width=True, hide_index=True)
+    table, lookback_cfg = blank_missing_lookbacks(
+        pd.DataFrame([_row(r) for r in rows]))
+    st.dataframe(table, use_container_width=True, hide_index=True,
+                 column_config=lookback_cfg)
     if picked:
         st.caption(
             f"Showing **{len(rows)} of {summ_all['barns']} barns** — the "

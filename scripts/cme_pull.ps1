@@ -87,12 +87,29 @@ try {
     Log ("FATAL: could not start the CME pull - {0}" -f $_.Exception.Message)
     exit 3
 }
+# backfill_ftp.py prints exactly one CME_STATUS line, which is the only line
+# this script PARSES rather than echoes. It carries the series end date and
+# CME's own due-through date, so the verdict below can be a statement about
+# the published series instead of a statement about our push.
+$status = $null
 foreach ($f in @($o, $e)) {
     if (Test-Path $f) {
         $c = Get-Content $f | Where-Object { $_ -ne '' }
-        if ($c) { $c | ForEach-Object { Log $_ } }
+        if ($c) {
+            $c | ForEach-Object {
+                Log $_
+                if ($_ -match '^CME_STATUS\s') { $status = $_ }
+            }
+        }
         Remove-Item $f -Force
     }
+}
+
+function Field([string]$line, [string]$name) {
+    if ($line -and ($line -match ('{0}=(\S+)' -f [regex]::Escape($name)))) {
+        return $Matches[1]
+    }
+    return $null
 }
 
 if ($code -ne 0) {
@@ -140,7 +157,52 @@ foreach ($f in @($po, $pe)) {
 }
 
 if ($pushCode -eq 0) {
-    Log 'CME print pull OK - the published print and scorecard are current'
+    # THE OK LINE NAMES A DATE, AND "CURRENT" IS GATED ON A DUE-DATE TEST.
+    #
+    # It used to read 'CME print pull OK - the published print and scorecard
+    # are current' off $pushCode alone, which is 02_migrate_data.py's verdict
+    # that Snowflake matches local SQLite -- a claim about our push, with no
+    # notion of CME's publication clock in it. On 2026-10-20 this job caught a
+    # real print and on 2026-10-21 it caught nothing, because CME never
+    # published FC261020.txt at all; both logged that identical sentence with
+    # pull_exit=0 push_exit=0. One line, two opposite outcomes, and the only
+    # human-readable verdict asserting the false one.
+    #
+    # Now it says "current through <date>". On 2026-10-21 that would have read
+    # "current through 2026-10-19" -- self-evidently wrong to anyone reading
+    # it, even before the explicit BEHIND warning below.
+    $end      = Field $status 'series_end'
+    $due      = Field $status 'due_through'
+    $overdue  = Field $status 'overdue_days'
+    $fetchErr = Field $status 'fetch_failures'
+    $unread   = Field $status 'unreadable'
+
+    if (-not $status) {
+        # Absence is not consent. An older backfill_ftp.py, or one that died
+        # before its summary, leaves no status line -- and the one thing this
+        # branch must never do is fall back to the sentence it replaced.
+        Log ('WARN: the pull reported no CME_STATUS line, so whether the ' +
+             'published series is current could not be checked. The push ' +
+             'succeeded. Check backfill_ftp.py is the current version.')
+    } elseif ($overdue -ne '0') {
+        Log (("WARN: CME IS BEHIND - our published series ends {0}, and CME's " +
+              "own clock says {1} should be on the server by now ({2} business " +
+              "day(s) owed). NOTHING ON OUR SIDE FAILED: the fetch found no " +
+              "file because CME has not published one. The scorecard and the " +
+              "'Last CME Print' tile are correct and simply have nothing newer " +
+              "to show. Our own estimate is unaffected - it does not depend on " +
+              "this feed.") -f $end, $due, $overdue)
+    } elseif ($fetchErr -ne '0' -or $unread -ne '0') {
+        # OUR problem, and the opposite of the one above: here a file may well
+        # exist and we could not fetch or parse it. cme_ftp.py calls this the
+        # worst way to be wrong, because it looks like news about CME.
+        Log (("WARN: the published series ends {0} and could not be confirmed " +
+              "current - {1} date(s) failed to fetch and {2} file(s) were " +
+              "fetched but unreadable. See the lines above. This is OUR side, " +
+              "not CME's.") -f $end, $fetchErr, $unread)
+    } else {
+        Log ("CME print pull OK - published series current through {0}" -f $end)
+    }
 } elseif ($pushCode -eq 3) {
     # Exit 3 is "every table LOADED, but its contents do not match local
     # SQLite", and the generic message below is FALSE for it in the way that

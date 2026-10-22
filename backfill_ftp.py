@@ -159,6 +159,32 @@ def main():
             print(f"       {d}")
     print(f"cme_ftp_daily now has {n_rows} total rows, spanning {first_last[0]} to {first_last[1]}.")
 
+    # ONE MACHINE-READABLE LINE, for scripts/cme_pull.ps1 to judge rather than
+    # assume. Everything above is prose for a human; this is the only line a
+    # caller parses, and it exists so the word "current" in that job's log can
+    # be gated on a fact instead of on a push exit code.
+    #
+    # Printed on EVERY run, including failures, so a missing CME_STATUS means
+    # "this ran an older backfill_ftp.py" rather than "all clear" -- cme_pull
+    # treats its absence as a warning for exactly that reason.
+    end_date = date.fromisoformat(first_last[1]) if first_last[1] else None
+    status = cme_ftp.publication_status(end_date, datetime.now())
+    due = status["due_through"]
+    print("CME_STATUS series_end={} due_through={} overdue_days={} "
+          "fetch_failures={} unreadable={}".format(
+              first_last[1] or "none",
+              due.isoformat() if due else "none",
+              len(status["overdue"]), len(failed), len(unreadable)))
+    if status["overdue"]:
+        # Said plainly as well, because the status line is for a parser and
+        # this log is read by a person. NOT an error: CME being late is not
+        # our failure, and the exit code deliberately does not move for it.
+        print("  !! CME IS BEHIND: we hold through {}, and {} should have been "
+              "published by now ({} business day(s) owed: {}). Nothing on our "
+              "side failed -- there is no file to fetch.".format(
+                  first_last[1], due.isoformat(), len(status["overdue"]),
+                  ", ".join(d.isoformat() for d in status["overdue"][:5])))
+
     # EXIT NON-ZERO WHEN WE HOLD FILES WE CANNOT READ. This printed a warning
     # and exited 0 until 2026-09-17, which is how a CME layout change on 09-14
     # went unnoticed for three days: the daily job logged cme_exit=0, the

@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 os.environ["USE_SNOWFLAKE"] = "1"          # check what the dashboard sees
 
+import cme_ftp  # noqa: E402
 import snowflake_db as db  # noqa: E402
 
 run_date = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
@@ -82,8 +83,14 @@ if cme:
         head_note = " -- IDENTICAL window" if int(frozen[1]) == int(cme[1]) else ""
         print(f"   -> our miss {frozen[0] - cme[0]:+.4f}{head_note}")
 else:
-    print("   CME has not published this index date yet (posts 08:05-10:05 CT, "
-          "so the 13:00 run is what normally collects it)")
+    # THE BAND IS 13:04-14:04 CENTRAL, and this line said 08:05-10:05 until
+    # 2026-10-22 -- the same five-hour error CLAUDE.md records as fixed,
+    # surviving in a second file because the fix was applied where it was
+    # found rather than where it was repeated. It also named the 13:00 run as
+    # the collector, which loses the race by minutes; the 14:15 pull exists
+    # for precisely this.
+    print("   CME has not published this index date yet (posts 13:04-14:04 "
+          "Central, so the 14:15 pull is what normally collects it)")
 
 peers = cur.execute(
     f"SELECT source, fci_value FROM peer_estimates WHERE index_date = {ph} "
@@ -99,5 +106,18 @@ else:
 # --- did anything land that the morning run could not have seen? ------------
 newest = one("SELECT MAX(report_date) FROM cme_ftp_daily")
 if newest and newest[0]:
-    print(f"\n   CME series now runs through {db.iso(newest[0])}")
+    # A DATE WITH A VERDICT, not a date on its own. This printed the series
+    # end as bare information, which left the reader to know CME's publication
+    # clock by heart and do the business-day arithmetic at 07:00 -- so a
+    # missing print read exactly like a current one. On 2026-10-21 the series
+    # ended 10-19 with 10-20 already owed, and nothing anywhere said so.
+    end = db.iso(newest[0])
+    status = cme_ftp.publication_status(date.fromisoformat(end), datetime.now())
+    if status["overdue"]:
+        print(f"\n   CME series runs through {end} -- BEHIND: "
+              f"{status['due_through']} should be published by now "
+              f"({len(status['overdue'])} business day(s) owed). Nothing on "
+              f"our side failed; there is no file to fetch.")
+    else:
+        print(f"\n   CME series runs through {end} -- current")
 conn.close()

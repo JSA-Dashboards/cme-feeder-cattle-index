@@ -54,6 +54,21 @@ pytestmark = pytest.mark.skipif(
 
 REPO_LINE = re.compile(r"^\$repo\s*=\s*'.*'\s*$", re.M)
 
+# What backfill_ftp.py prints as its last line. Only CME_STATUS is parsed by
+# the script; every other line of its output is echoed to the log untouched.
+CLEAN_STATUS = ("CME_STATUS series_end=2026-10-19 due_through=2026-10-19 "
+                "overdue_days=0 fetch_failures=0 unreadable=0")
+# The live 2026-10-21 state: CME published no FC261020.txt, so our series ends
+# 10-19 while their own clock says 10-20 was due. The run that logged "the
+# published print and scorecard are current" saw exactly this.
+BEHIND_STATUS = ("CME_STATUS series_end=2026-10-19 due_through=2026-10-20 "
+                 "overdue_days=1 fetch_failures=0 unreadable=0")
+# Our side, not CME's: a file may well exist that we never read.
+FETCH_FAIL_STATUS = ("CME_STATUS series_end=2026-10-19 due_through=2026-10-19 "
+                     "overdue_days=0 fetch_failures=3 unreadable=0")
+UNREADABLE_STATUS = ("CME_STATUS series_end=2026-10-19 due_through=2026-10-19 "
+                     "overdue_days=0 fetch_failures=0 unreadable=2")
+
 WRAPPER = """\
 $ErrorActionPreference = 'Stop'
 
@@ -74,6 +89,13 @@ function Start-Process {{
     if ($joined -match '02_migrate_data') {{
         [pscustomobject]@{{ ExitCode = {push} }}
     }} else {{
+        # The pull's STDOUT, which the script parses for its CME_STATUS line.
+        # Without this the stub silenced the one thing the verdict depends on,
+        # which is why the clean-run test could not catch a due-date mistake.
+        $out = '{pullout}'
+        if ($RedirectStandardOutput -and $out) {{
+            Set-Content -Path $RedirectStandardOutput -Value $out -Encoding utf8
+        }}
         [pscustomobject]@{{ ExitCode = {pull} }}
     }}
 }}
@@ -87,8 +109,15 @@ exit $LASTEXITCODE
 """
 
 
-def run_pull(tmp_path, push_code, pull_code=0):
-    """(exit_code, log_text) from really executing the script."""
+def run_pull(tmp_path, push_code, pull_code=0, pull_stdout=CLEAN_STATUS):
+    """
+    (exit_code, log_text) from really executing the script.
+
+    `pull_stdout` is what backfill_ftp.py would have printed. It defaults
+    to a clean CME_STATUS line because most cases here are about the PUSH
+    branches and want the pull unremarkable; pass "" for a backfill that
+    printed no status at all.
+    """
     root = tmp_path / "repo"
     (root / ".venv" / "Scripts").mkdir(parents=True)
     # The script refuses to start without this; contents are never read.
@@ -115,6 +144,7 @@ def run_pull(tmp_path, push_code, pull_code=0):
     wrapper = tmp_path / "wrapper.ps1"
     wrapper.write_text(
         WRAPPER.format(push=push_code, pull=pull_code,
+                       pullout=pull_stdout.replace("'", "''"),
                        script=str(script).replace("'", "''")),
         encoding="utf-8")
 
@@ -189,12 +219,109 @@ def test_an_ordinary_load_failure_still_gets_the_reassuring_message(tmp_path):
     assert code == 5
 
 
+CURRENT = "published series current through"
+
+
 def test_a_clean_run_says_so_and_exits_0(tmp_path):
     """The other control: no false alarm on the happy path."""
-    code, log = run_pull(tmp_path, push_code=0)
+    code, log = run_pull(tmp_path, push_code=0, pull_stdout=CLEAN_STATUS)
     assert "CME print pull OK" in log
     assert "ERROR" not in log
+    assert "WARN" not in log
     assert code == 0
+
+
+def test_the_ok_line_NAMES_the_date_it_is_calling_current(tmp_path):
+    """
+    A verdict with no date in it cannot be checked by the person reading it.
+    "current through 2026-10-19" read on the 22nd is wrong on its face; "the
+    published print and scorecard are current" never was.
+    """
+    _code, log = run_pull(tmp_path, push_code=0, pull_stdout=CLEAN_STATUS)
+    assert CURRENT in log
+    assert "2026-10-19" in log, (
+        "the OK line does not name the date it calls current:\n" + log)
+
+
+def test_an_OVERDUE_series_is_not_reported_as_current(tmp_path):
+    """
+    THE GUARD, PROVEN AGAINST THE MORNING THAT PRODUCED IT.
+
+    This is the 2026-10-21 14:15 run exactly: CME published no FC261020.txt,
+    the pull fetched nothing, the push succeeded, and the job logged "CME
+    print pull OK - the published print and scorecard are current". The day
+    before, having caught a real print, it logged the same sentence. If this
+    test does not go red when the gate is removed, the sentence is back.
+    """
+    code, log = run_pull(tmp_path, push_code=0, pull_stdout=BEHIND_STATUS)
+
+    assert CURRENT not in log, (
+        "an overdue CME series is still being called current:\n" + log)
+    assert "CME IS BEHIND" in log, "the log never says CME is behind:\n" + log
+    assert "2026-10-19" in log and "2026-10-20" in log, (
+        "the warning names neither the date we hold nor the one owed:\n" + log)
+    assert "NOTHING ON OUR SIDE FAILED" in log, (
+        "a reader cannot tell this from a broken pull, which is the one "
+        "mistake that would send them hunting through our code:\n" + log)
+    assert "ERROR" not in log, (
+        "CME being late is not our error, and logging it as one trains the "
+        "reader to ignore the digest")
+    assert code == 0, (
+        "CME's lateness must not move our exit code -- daily_update.ps1 "
+        "reports any non-zero as 'CME pull failed', which would be false")
+
+
+@pytest.mark.parametrize("status,needle", [
+    (FETCH_FAIL_STATUS, "failed to fetch"),
+    (UNREADABLE_STATUS, "unreadable"),
+])
+def test_our_own_fetch_problems_are_not_reported_as_current(tmp_path, status, needle):
+    """
+    The opposite failure, and cme_ftp.py calls it the worst way to be wrong
+    "because it looks like news about CME". A blocked connection or a parser
+    gap means a file may well exist that we never read -- which must never be
+    logged as a current series, and must not be blamed on CME either.
+    """
+    _code, log = run_pull(tmp_path / "x", push_code=0, pull_stdout=status)
+    assert CURRENT not in log, "an unconfirmed series was called current:\n" + log
+    assert needle in log, "the warning does not say what went wrong:\n" + log
+    assert "OUR side" in log, (
+        "the log does not place the fault on our side, so a reader will go "
+        "looking at CME:\n" + log)
+
+
+def test_a_MISSING_status_line_is_not_reported_as_current(tmp_path):
+    """
+    Absence is not consent. An older backfill_ftp.py, or one that died before
+    its summary, prints no CME_STATUS -- and the one thing this branch must
+    never do is fall back to the sentence it replaced. This doubles as the
+    drift guard between the two files: rename the line and the job says so
+    rather than quietly resuming the old claim.
+    """
+    code, log = run_pull(tmp_path, push_code=0, pull_stdout="")
+    assert CURRENT not in log, (
+        "with no status line at all the job still called the series "
+        "current:\n" + log)
+    assert "no CME_STATUS line" in log
+    assert code == 0
+
+
+def test_backfill_ftp_still_prints_the_line_this_script_parses():
+    """
+    The two halves of the contract live in different languages and no import
+    can catch a rename. Pinned from both ends: the producer emits each field,
+    the consumer reads it.
+    """
+    producer = (REPO / "backfill_ftp.py").read_text(encoding="utf-8")
+    consumer = SCRIPT.read_text(encoding="utf-8")
+    assert "CME_STATUS series_end=" in producer, (
+        "backfill_ftp.py no longer prints the CME_STATUS line that "
+        "cme_pull.ps1 parses")
+    assert "CME_STATUS" in consumer
+    for field in ("series_end", "due_through", "overdue_days",
+                  "fetch_failures", "unreadable"):
+        assert field in producer, "backfill_ftp.py stopped emitting %s" % field
+        assert field in consumer, "cme_pull.ps1 stopped reading %s" % field
 
 
 def test_the_comment_counts_the_tables_a_bare_push_would_send():

@@ -51,6 +51,8 @@ import re
 import zlib
 from datetime import date, timedelta
 
+from index_dates import next_index_date
+
 import snowflake_db as db
 
 FTP_HOST = "ftp.cmegroup.com"
@@ -552,6 +554,74 @@ def location_slug_id(location: str) -> int:
     """Stable synthetic id (not a real MARS slug) -- only needed so the
     mars_sales table's PK stays unique; CME's own files don't expose one."""
     return zlib.crc32(location.encode("utf-8"))
+
+
+# CME's own publication clock, in one place so a guard can ask it a question
+# rather than assume an answer. The band is measured off their MDTM stamps and
+# is CENTRAL -- see the header of scripts/cme_pull.ps1 for the five-hour error
+# that reading it as UTC caused, and for why nothing here may be re-derived
+# from our own ingest logs, which record when we looked rather than when CME
+# published.
+PUBLISH_DEADLINE_HOUR = 14
+PUBLISH_DEADLINE_MINUTE = 5
+
+
+def due_through(now):
+    """
+    The most recent index date CME's clock says should be on the server by
+    `now` -- a naive CENTRAL datetime -- or None if nothing is due yet.
+
+    CME publishes index date D on the NEXT business day, observed between
+    13:04 and 14:04 Central. A date is due once that publication day has
+    passed, or once it has arrived and reached the deadline above.
+
+    Weekdays only, matching index_dates.next_index_date: CME publishes on
+    exchange holidays (2026-09-07, Labor Day, carries a value with same-day
+    head 0), so a holiday calendar would call a real date unpublishable.
+    """
+    d = now.date()
+    for _ in range(14):               # bounded; a fortnight of weekends
+        d -= timedelta(days=1)
+        if d.weekday() >= 5:
+            continue
+        pub_day = next_index_date(d)
+        if pub_day < now.date():
+            return d
+        if (pub_day == now.date()
+                and (now.hour, now.minute) >= (PUBLISH_DEADLINE_HOUR,
+                                               PUBLISH_DEADLINE_MINUTE)):
+            return d
+    return None
+
+
+def publication_status(series_end, now):
+    """
+    What CME still owes us: {series_end, due_through, overdue}.
+
+    `overdue` is every index date after the newest one we hold, up to and
+    including the newest one due -- oldest first, empty when CME is current.
+
+    THIS EXISTS BECAUSE ABSENCE WAS UNCONDITIONALLY NORMAL. backfill_ftp.py
+    counts a 550 from the server as "no file (weekend/holiday/not yet
+    published)" and exits 0, which is right for a Saturday and wrong for a
+    print that was due yesterday and never came. On 2026-10-21 the 14:15 pull
+    caught nothing and logged the same sentence it had logged on 2026-10-20
+    when it caught a real print -- one line, two opposite outcomes, no way to
+    tell them apart. Asking this function turns that into a statement that can
+    be false.
+    """
+    due = due_through(now)
+    out = {"series_end": series_end, "due_through": due, "overdue": []}
+    if due is None or series_end is None:
+        return out
+    d = series_end
+    while len(out["overdue"]) < 400:   # a decade of gap; stop rather than spin
+        d = next_index_date(d)
+        if d > due:
+            break
+        out["overdue"].append(d)
+    return out
+
 
 
 def daterange(start: date, end: date):

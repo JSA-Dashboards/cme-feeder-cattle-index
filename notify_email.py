@@ -469,7 +469,7 @@ text-transform:uppercase">JSA FCI Estimate · {label}</p>
 <p style="margin:2px 0 0;font-size:15px;color:{colour};font-weight:600">
 {dod} day over day</p>
 <p style="margin:6px 0 0">Index date <b>{_mdy(d['index_date'])}</b> ·
-{int(d['head'] or 0):,} head across {d['locs'] or 0} locations</p>
+{int(d['head'] or 0):,} head across {d['locs'] or 0} barns, 7-day window</p>
 {daily}
 {moved}
 {warn}

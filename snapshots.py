@@ -108,6 +108,19 @@ def capture_snapshots(conn, lookback_days: int = SNAPSHOT_LOOKBACK_DAYS,
         ).fetchall()
     }
 
+    # n_locations CHANGED MEANING ON 2026-10-22 AND THESE ROWS DID NOT.
+    # It was a count of mars_sales ROWS in the window -- one barn in one weight
+    # bracket per row, so a barn selling four brackets counted four times, and
+    # the figure ran about 4.7x the truth. It is a DISTINCT barn count from
+    # that date on. Snapshots are deliberately immutable (merge_ignore, first
+    # run of a slot wins), so every row frozen before then still carries the
+    # old meaning: 308 for index date 2026-10-21, against 66 under the rule
+    # that replaced it.
+    #
+    # Nothing renders this column today, which is why it was left alone rather
+    # than rewritten -- correcting history here would break the one promise
+    # the table makes, that a frozen call is what we actually said. Anything
+    # that starts charting it must not cross 2026-10-22 without saying so.
     n = 0
     for report_date, fci_value, total_head, n_locations in rows:
         index_date = db.iso(report_date)

@@ -609,12 +609,21 @@ def recompute_fci_daily(conn):
     # published_date is still recorded on mars_sales (see run_update) -- the
     # lag is genuinely useful, since it explains why a first print and a final
     # print differ -- but it must NOT filter the window.
-    by_day = {}  # report_date -> list of (weight_lbs, dollars, head)
+    # LOCATION IS CARRIED, and it is carried for one reason: n_locations was a
+    # ROW count. Each mars_sales row is one barn in one weight bracket, so a
+    # barn selling all four brackets counted four times, and the column read
+    # about 4.7x the truth -- 308 for the window ending 2026-10-21, where 65
+    # barns actually sold. notify_email.py prints it as "N head across N
+    # locations", so the daily mail went out saying 308 barns had reported
+    # when 65 had. Nothing could have caught it: the number is wrong by the
+    # same factor every day, so it never jumps, and the tuple had dropped the
+    # one field that could have proved it.
+    by_day = {}  # report_date -> list of (weight_lbs, dollars, head, location)
     for report_date, raw_date, head, wt, price, published_date, location in all_rows:
         # Bucket the way CME buckets -- see LOCATION_BUCKET_SHIFT_DAYS.
         report_date = shifted_bucket_date(location, report_date)
         w = head * wt
-        by_day.setdefault(report_date, []).append((w, w * price, head))
+        by_day.setdefault(report_date, []).append((w, w * price, head, location))
 
     all_dates = sorted(date.fromisoformat(d) for d in by_day)
     if not all_dates:
@@ -632,15 +641,20 @@ def recompute_fci_daily(conn):
             (window_start + timedelta(days=i)).isoformat() for i in range(7)
         ]
         den = num = 0.0
-        n_locs = 0
+        locs = set()
         total_head = 0
         d_iso = d.isoformat()
         for wd in window_days:
-            for w, dollars, head in by_day.get(wd, []):
+            for w, dollars, head, loc in by_day.get(wd, []):
                 den += w
                 num += dollars
-                n_locs += 1
+                if loc:
+                    locs.add(loc)
                 total_head += head
+        # DISTINCT barns over the whole 7-day window, which is what the name
+        # says and what the email prints. A barn selling on three days of the
+        # window still counts once.
+        n_locs = len(locs)
 
         # Same-day-only snapshot (not rolling) -- matches the "Daily: $X on Y
         # head and Z lbs average" figure CME's own subscriber reports quote
@@ -648,7 +662,7 @@ def recompute_fci_daily(conn):
         # (weekends etc.), same as the report showing no standalone row then.
         sd_den = sd_num = 0.0
         sd_head = 0
-        for w, dollars, head in by_day.get(d_iso, []):
+        for w, dollars, head, _loc in by_day.get(d_iso, []):
             sd_den += w
             sd_num += dollars
             sd_head += head

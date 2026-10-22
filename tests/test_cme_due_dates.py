@@ -169,3 +169,152 @@ def test_the_overdue_list_is_oldest_first_and_contiguous():
 ])
 def test_on_time_and_one_behind_across_a_week(series_end, now, expected):
     assert overdue(series_end, now) == expected
+
+
+# ---------------------------------------------------------------------------
+# What a scheduled run actually asks CME for.
+# ---------------------------------------------------------------------------
+
+REPO = __import__("pathlib").Path(__file__).resolve().parent.parent
+
+
+def business_days(lo, hi):
+    out, d = [], d_(lo)
+    while d <= d_(hi):
+        if d.weekday() < 5:
+            out.append(d)
+        d += __import__("datetime").timedelta(days=1)
+    return out
+
+
+def d_(s):
+    return date.fromisoformat(s)
+
+
+def old_window(now, days=4):
+    """
+    The rule this replaced: every date in a fixed span, held or not. Kept so
+    the tests can show what it loses rather than assert the survivor alone.
+    """
+    import datetime as _dt
+    start = now.date() - _dt.timedelta(days=days)
+    out, x = [], start
+    while x <= now.date():
+        out.append(x)
+        x += _dt.timedelta(days=1)
+    return out
+
+
+class TestCatchUpPicksTheGap:
+    def test_it_asks_only_for_what_is_missing(self):
+        have = [x.isoformat() for x in business_days("2026-07-01", "2026-10-19")]
+        got = cme_ftp.catch_up_dates(have, dt("2026-10-22T14:15"))
+        assert [x.isoformat() for x in got] == ["2026-10-20", "2026-10-21"]
+
+    def test_a_date_already_held_is_not_re_fetched(self):
+        """
+        The old window re-fetched everything in its span, which is why a
+        morning with no arrivals still logged "Ingested 6 days" -- six rows
+        rewritten with themselves, and a genuine miss indistinguishable from
+        a normal day.
+        """
+        have = [x.isoformat() for x in business_days("2026-07-01", "2026-10-21")]
+        assert cme_ftp.catch_up_dates(have, dt("2026-10-22T14:15")) == []
+
+    def test_weekends_are_never_asked_for(self):
+        got = cme_ftp.catch_up_dates([], dt("2026-10-26T14:15"))
+        assert got, "nothing was selected at all"
+        assert all(x.weekday() < 5 for x in got), (
+            "a weekend date was selected: CME publishes no weekend index, so "
+            "it is a guaranteed 550 on every run")
+
+    def test_nothing_past_the_due_date_is_asked_for(self):
+        """A date CME cannot have published yet is not a gap."""
+        got = cme_ftp.catch_up_dates([], dt("2026-10-22T09:00"))
+        assert max(got) == d_("2026-10-20"), (
+            "asked for a date that is not due yet: %s" % max(got))
+
+    def test_an_interior_hole_is_picked_up_not_just_the_tail(self):
+        """
+        The 23 prints that were missing on 2026-10-22 were interior holes, not
+        a tail gap -- dates CME had published, surrounded on both sides by
+        rows we held. A tail-anchored rule would never have asked again.
+        """
+        have = [x.isoformat() for x in business_days("2026-07-01", "2026-10-21")]
+        have.remove("2026-09-15")
+        got = cme_ftp.catch_up_dates(have, dt("2026-10-22T14:15"))
+        assert d_("2026-09-15") in got
+
+
+class TestTheOutageIsRecoverable:
+    def test_a_three_week_outage_is_still_asked_for_in_full(self):
+        """
+        THE POINT OF THE CHANGE. CME goes dark for three weeks. Every business
+        day in the gap must still be in scope on the day they come back, or
+        the oldest are lost for good.
+        """
+        have = [x.isoformat() for x in business_days("2026-07-01", "2026-09-30")]
+        got = cme_ftp.catch_up_dates(have, dt("2026-10-22T14:15"))
+        assert got == business_days("2026-10-01", "2026-10-21"), (
+            "the outage is not fully in scope: got %s..%s"
+            % (min(got), max(got)))
+
+    def test_THE_OLD_WINDOW_WOULD_HAVE_LOST_MOST_OF_IT(self):
+        """
+        THE GUARD PROVEN AGAINST WHAT IT REPLACED. If this comparison ever
+        stops showing a difference, the window has crept back and the test
+        above is passing for the wrong reason.
+        """
+        now = dt("2026-10-22T14:15")
+        have = [x.isoformat() for x in business_days("2026-07-01", "2026-09-30")]
+        new = set(cme_ftp.catch_up_dates(have, now))
+        old = set(old_window(now, days=4))
+        lost = sorted(new - old)
+        assert len(lost) >= 10, (
+            "the four-day window would have lost only %d date(s); this test "
+            "is no longer demonstrating anything" % len(lost))
+        assert d_("2026-10-01") in lost
+        assert min(lost) < d_("2026-10-18")
+
+    def test_the_horizon_bounds_a_run_rather_than_reaching_to_2015(self):
+        """
+        Fetching only what is missing is what makes a long reach affordable,
+        but it is not unbounded: a hole older than the horizon needs a
+        deliberate --start, which is how the 2017 one was recovered.
+        """
+        got = cme_ftp.catch_up_dates([], dt("2026-10-22T14:15"))
+        assert min(got) >= d_("2026-10-22") - __import__("datetime").timedelta(
+            days=cme_ftp.CATCHUP_HORIZON_DAYS + 1)
+        assert len(got) < 70
+
+    def test_the_horizon_survives_an_outage_longer_than_any_on_record(self):
+        assert cme_ftp.CATCHUP_HORIZON_DAYS >= 30, (
+            "the horizon no longer covers a month-long outage, which is the "
+            "condition this was widened for")
+
+    def test_an_empty_table_does_not_reach_back_forever(self):
+        got = cme_ftp.catch_up_dates([], dt("2026-10-22T14:15"))
+        assert got, "a fresh table asked for nothing at all"
+        assert len(got) <= cme_ftp.CATCHUP_HORIZON_DAYS
+
+
+def test_both_scheduled_jobs_ask_for_the_gap_rather_than_a_window():
+    """
+    The structural half: a window creeping back into either job is the
+    regression, and neither can be unit-tested from Python. Pinned on the
+    shipped scripts.
+    """
+    for name in ("cme_pull.ps1", "daily_update.ps1"):
+        p = REPO / "scripts" / name
+        if not p.exists():
+            pytest.skip("%s not present" % name)
+        src = p.read_text(encoding="utf-8")
+        call = [ln for ln in src.splitlines()
+                if "backfill_ftp.py" in ln and "Start-Process" in ln]
+        assert call, "%s no longer invokes backfill_ftp.py" % name
+        joined = " ".join(call)
+        assert "--catch-up" in joined, (
+            "%s is not using --catch-up: %s" % (name, joined))
+        assert "--start" not in joined, (
+            "%s is back on a fixed lookback window, which is what made a long "
+            "outage unrecoverable: %s" % (name, joined))

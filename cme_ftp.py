@@ -624,6 +624,54 @@ def publication_status(series_end, now):
 
 
 
+# How far back a routine run will reach for a print it does not hold. Not a
+# window of dates to re-fetch -- catch_up_dates() fetches only what is MISSING,
+# so a horizon costs nothing on a day when nothing is missing, and the number
+# is therefore set by the longest outage worth surviving rather than by
+# runtime. A fixed four-day window is what made a long outage unrecoverable:
+# when CME came back, anything older than four days had aged out and was never
+# asked for again.
+CATCHUP_HORIZON_DAYS = 90
+
+
+def catch_up_dates(have, now, horizon_days=CATCHUP_HORIZON_DAYS):
+    """
+    The index dates worth fetching now: business days we do NOT already hold,
+    from `horizon_days` back up to the newest date CME's clock says should
+    exist.
+
+    `have` is whatever we already have rows for -- dates or ISO strings.
+
+    MISSING, NOT RECENT, and that is the whole point. The old rule fetched
+    every date in a fixed window whether we held it or not, which re-wrote
+    rows we already had (the logs read "Ingested 6 days" on a morning when
+    nothing at all arrived) while silently giving up on anything older than
+    the window. Asking for the gap instead means a run costs one fetch per
+    genuinely missing print and none otherwise, so the reach can be months
+    without the daily cost of months.
+
+    WEEKENDS ARE EXCLUDED: CME publishes no Saturday or Sunday index, so
+    fetching them is a guaranteed 550 every single run, and counting those in
+    "N had no file" is what let a real missing print hide among them.
+
+    Nothing past due_through is attempted, because a date CME cannot have
+    published yet is not a gap.
+    """
+    due = due_through(now)
+    if due is None:
+        return []
+    held = {d if isinstance(d, str) else d.isoformat() for d in have}
+    start = due - timedelta(days=horizon_days)
+    out = []
+    d = start
+    while d <= due:
+        if d.weekday() < 5 and d.isoformat() not in held:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+
 def daterange(start: date, end: date):
     d = start
     while d <= end:

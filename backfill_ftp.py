@@ -4,7 +4,16 @@ Index files (see cme_ftp.py) for a date range and stores them in
 cme_ftp_daily / cme_ftp_locations. Idempotent -- INSERT OR REPLACE per date,
 safe to re-run or resume.
 
+    python backfill_ftp.py --catch-up                     # what a scheduled run does
     python backfill_ftp.py --start 2015-01-01 --end 2026-08-31
+    python backfill_ftp.py --start 2015-01-01 --only-missing   # fill historical holes
+
+--catch-up ASKS WHAT IS MISSING instead of re-fetching a fixed window. The
+window was four days in the 14:15 job and ten in the daily one, which made a
+long CME outage unrecoverable: when CME came back, every date older than the
+window had aged out and was never asked for again. Because the catch-up fetches
+only dates it does not already hold, reaching back ninety days costs nothing on
+a morning when nothing is missing.
 """
 import argparse
 import time
@@ -30,12 +39,18 @@ REQUEST_DELAY_S = 0.4
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--start", required=True)
+    ap.add_argument("--start", default=None)
     ap.add_argument("--end", default=None)
+    ap.add_argument("--catch-up", action="store_true",
+                    help="fetch every business day we do not hold, back to the "
+                         "catch-up horizon. What the scheduled jobs run.")
+    ap.add_argument("--only-missing", action="store_true",
+                    help="with --start: skip dates already held, and weekends")
     args = ap.parse_args()
+    if not args.start and not args.catch_up:
+        ap.error("one of --start or --catch-up is required")
 
-    start = datetime.strptime(args.start, "%Y-%m-%d").date()
-    end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else date.today()
+    now = datetime.now()
 
     conn = db.get_conn()
     if not db.use_snowflake():
@@ -46,9 +61,36 @@ def main():
         conn.execute("PRAGMA journal_mode=WAL")
     cme_ftp.init_official_tables(conn)
 
-    dates = list(cme_ftp.daterange(start, end))
-    print(f"Fetching {len(dates)} candidate dates ({start} to {end}), serially with a "
-          f"{REQUEST_DELAY_S}s pause between requests...")
+    def already_held():
+        cur0 = conn.cursor()
+        return {str(db.iso(r[0]))[:10] for r in
+                cur0.execute("SELECT report_date FROM cme_ftp_daily")}
+
+    if args.catch_up:
+        # THE GAP, NOT A WINDOW. See cme_ftp.catch_up_dates: business days we
+        # do not hold, up to the newest date CME's own clock says should
+        # exist. An outage of any length inside the horizon stays in scope for
+        # as long as it is still a gap, instead of ageing out after four days.
+        dates = cme_ftp.catch_up_dates(already_held(), now)
+        span = f"the {cme_ftp.CATCHUP_HORIZON_DAYS}-day catch-up horizon"
+    else:
+        start = datetime.strptime(args.start, "%Y-%m-%d").date()
+        end = (datetime.strptime(args.end, "%Y-%m-%d").date() if args.end
+               else date.today())
+        dates = list(cme_ftp.daterange(start, end))
+        span = f"{start} to {end}"
+        if args.only_missing:
+            held = already_held()
+            dates = [d for d in dates
+                     if d.weekday() < 5 and d.isoformat() not in held]
+            span += " (business days not already held)"
+
+    if dates:
+        print(f"Fetching {len(dates)} date(s) over {span}, serially with a "
+              f"{REQUEST_DELAY_S}s pause between requests...")
+    else:
+        print(f"Nothing to fetch over {span} -- every business day up to CME's "
+              f"own due date is already held.")
 
     t0 = time.time()
     results = {}
@@ -168,7 +210,7 @@ def main():
     # "this ran an older backfill_ftp.py" rather than "all clear" -- cme_pull
     # treats its absence as a warning for exactly that reason.
     end_date = date.fromisoformat(first_last[1]) if first_last[1] else None
-    status = cme_ftp.publication_status(end_date, datetime.now())
+    status = cme_ftp.publication_status(end_date, now)
     due = status["due_through"]
     print("CME_STATUS series_end={} due_through={} overdue_days={} "
           "fetch_failures={} unreadable={}".format(

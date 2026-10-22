@@ -57,8 +57,8 @@ Central. Do not re-derive it from our own ingest logs: those record when we
 looked, not when CME published, which is how the original error survived.
 
 It has **no healthcheck ping on purpose**. It is an accelerator, not a
-guarantee: if it fails, the 13:00 run pulls the same file with a wider lookback
-and the only cost is that the print appears when it always used to.
+guarantee: if it fails, the next scheduled run asks for the same gap and the
+only cost is that the print appears when it always used to.
 
 ## Two triggers, one script
 
@@ -155,8 +155,19 @@ would be: wake timers are disabled on battery by default.)
 
 ## What the CME step maintains
 
-`backfill_ftp.py` (run daily with a 10-day lookback) writes four tables from
-CME's own files, all idempotent per date:
+**No lookback window.** Both jobs pass `--catch-up`, which fetches the business
+days we do not already hold, back to a 90-day horizon, and nothing else. The
+windows it replaced -- 4 days in the 14:15 pull, 10 in the daily job -- made a
+long CME outage unrecoverable: when CME came back, anything older than the
+window had aged out and was never asked for again. On 2026-10-22 that had
+already cost 23 published prints, the oldest from 2017, every one of them still
+sitting on CME's server because they archive by year. They were recovered with
+`backfill_ftp.py --start 2015-01-01 --only-missing`, which is the tool for a
+hole older than the horizon.
+
+
+`backfill_ftp.py` (run with `--catch-up`) writes four tables from CME's own
+files, all idempotent per date:
 
 | Table | Contents |
 |---|---|

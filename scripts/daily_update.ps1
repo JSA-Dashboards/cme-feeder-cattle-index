@@ -192,12 +192,16 @@ if (Test-Path $errFile) {
 # a third party we do not control.
 $cmeCode = 0
 if ($code -eq 0) {
-    $cmeStart = (Get-Date).AddDays(-10).ToString('yyyy-MM-dd')
-    Log ("--- pulling CME published prints since {0} ---" -f $cmeStart)
+    # --catch-up, not a 10-day window: backfill_ftp.py fetches the business
+    # days we do not hold rather than re-fetching a fixed span. A window gave
+    # up on anything older than itself, which is what left 23 CME-published
+    # prints missing from cme_ftp_daily until 2026-10-22 -- all of them still
+    # on CME's server, which archives by year.
+    Log '--- pulling CME published prints: every business day we do not hold ---'
     $cOut = Join-Path $env:TEMP ('fci_cme_out_{0}.txt' -f $PID)
     $cErr = Join-Path $env:TEMP ('fci_cme_err_{0}.txt' -f $PID)
     try {
-        $cp = Start-Process -FilePath $py -ArgumentList '-u', 'backfill_ftp.py', '--start', $cmeStart `
+        $cp = Start-Process -FilePath $py -ArgumentList '-u', 'backfill_ftp.py', '--catch-up' `
                 -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
                 -RedirectStandardOutput $cOut -RedirectStandardError $cErr
         $cmeCode = $cp.ExitCode

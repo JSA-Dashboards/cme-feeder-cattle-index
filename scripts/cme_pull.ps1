@@ -71,15 +71,26 @@ Log ("CME print pull started  {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss K')
 
 if (-not (Test-Path $py)) { Log 'FATAL: venv python missing'; exit 2 }
 
-# A 4-day lookback, not 10: this runs daily and only needs to catch the print
-# that just landed plus anything from a long weekend. The main job keeps its
-# wider net for genuine gaps.
-$start = (Get-Date).AddDays(-4).ToString('yyyy-MM-dd')
+# NO LOOKBACK WINDOW. --catch-up asks backfill_ftp.py for the business days we
+# do not hold, back to its 90-day horizon, and fetches only those.
+#
+# This was a 4-day window, and the daily job's was 10. Both re-fetched dates
+# already held -- the log read "Ingested 6 days" on a morning when nothing
+# arrived -- while silently giving up on anything older. That made a long CME
+# outage UNRECOVERABLE: when CME came back, every date more than four days old
+# had aged out of the window and was never asked for again. It is not a
+# hypothetical; 23 prints CME had published were missing from cme_ftp_daily
+# when this was changed on 2026-10-22, the oldest from 2017, and every one of
+# them was still sitting on CME's server because they archive by year.
+#
+# Asking for the gap instead costs one fetch per genuinely missing print and
+# none otherwise, which is why the reach can be months without the daily cost
+# of months.
 
 $o = Join-Path $env:TEMP ('cme_o_{0}.txt' -f $PID)
 $e = Join-Path $env:TEMP ('cme_e_{0}.txt' -f $PID)
 try {
-    $p = Start-Process -FilePath $py -ArgumentList '-u', 'backfill_ftp.py', '--start', $start `
+    $p = Start-Process -FilePath $py -ArgumentList '-u', 'backfill_ftp.py', '--catch-up' `
             -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput $o -RedirectStandardError $e
     $code = $p.ExitCode

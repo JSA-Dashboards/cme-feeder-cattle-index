@@ -3,6 +3,7 @@ import re
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import openpyxl
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -2216,6 +2217,122 @@ with tab_index:
         )
     st.caption(" ".join(caption_bits))
 
+
+    # ── Daily Sale Price vs the Index ─────────────────────────────────────────────
+    #
+    # The index is a SEVEN-DAY POUND-WEIGHTED AVERAGE, so it cannot move as fast as
+    # the cattle underneath it. This chart is that gap: what one day's cattle
+    # actually brought, against the number that day was folded into.
+    #
+    # BOTH LINES ARE CME'S OWN, off the files in cme_ftp_daily, so the comparison is
+    # internal to their publication rather than ours against theirs -- the Index
+    # Trend chart above already does that one. fci_df carries cme_official for every
+    # date CME covers (2015 on) and that source wins over ours for those dates, so
+    # filtering to it is enough: no second loader, and no risk of the two lines
+    # coming from different derivations of the word "daily".
+    #
+    # ZERO IS NOT A PRICE, which is this repo's oldest display trap and the reason
+    # this needed measuring before it was drawn. 56 of CME's 3,072 rows carry a
+    # literal 0 daily price against 0 head -- Thanksgiving, Christmas Eve, Labor Day:
+    # days the index still rolls, because the week behind it has cattle in it, while
+    # no sale was held. Plotted, each one drops a spike of minus three hundred
+    # dollars and flattens everything else into a flat line. They are DROPPED rather
+    # than zeroed, and the caption says how many and why.
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="sec-header">Daily Sale Price vs the Index</div>',
+                unsafe_allow_html=True)
+
+    _cme_rows = fci_df[fci_df["source"] == "cme_official"]
+    _dvi = _cme_rows[(_cme_rows["same_day_head"].fillna(0) > 0)
+                     & (_cme_rows["same_day_price"].fillna(0) > 100)][
+        ["date", "fci_value", "same_day_price"]].copy()
+
+    if len(_dvi) < 30:
+        st.caption("CME's own daily figures are not available on this backend, so "
+                   "there is nothing to draw.")
+    else:
+        _sp = _dvi["same_day_price"] - _dvi["fci_value"]
+        # TWO PANELS SHARING ONE X AXIS, and the lower one is the reason.
+        #
+        # Plotly's range selector relayouts the X axis only; Y keeps the range it was
+        # given at load. Over eleven years that is roughly 100 to 400, so zooming to a
+        # single year leaves both lines crushed into the top quarter of the plot and
+        # the gap between them -- a couple of dollars, and the whole point of the
+        # chart -- invisible. The top panel is still the honest picture at "All"; the
+        # gap panel is centred on zero, so it reads at every range the selector offers.
+        fig_dv = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                               row_heights=[0.72, 0.28], vertical_spacing=0.06)
+        fig_dv.add_trace(go.Scatter(
+            x=_dvi["date"], y=_dvi["same_day_price"],
+            name="That day's own sales", mode="lines",
+            line=dict(color="#e67e22", width=1), opacity=0.8,
+            hovertemplate="Daily: $%{y:.2f}<extra></extra>",
+        ), row=1, col=1)
+        fig_dv.add_trace(go.Scatter(
+            x=_dvi["date"], y=_dvi["fci_value"],
+            name="CME Feeder Cattle Index (7-day)", mode="lines",
+            line=dict(color=JPSI_BLUE, width=2),
+            hovertemplate="Index: $%{y:.2f}<extra></extra>",
+        ), row=1, col=1)
+        fig_dv.add_trace(go.Scatter(
+            x=_dvi["date"], y=_sp,
+            name="Daily minus index", mode="lines",
+            line=dict(color=MUTED, width=1), showlegend=False,
+            hovertemplate="Gap: $%{y:+.2f}<extra></extra>",
+        ), row=2, col=1)
+        fig_dv.add_hline(y=0, line=dict(color="#c9d2da", width=1), row=2, col=1)
+        fig_dv.update_yaxes(title="$/cwt", tickprefix="$", row=1, col=1, **AXIS)
+        fig_dv.update_yaxes(title="gap", tickprefix="$", row=2, col=1, **AXIS)
+        fig_dv.update_xaxes(row=1, col=1, **AXIS)
+        fig_dv.update_layout(
+            paper_bgcolor=BG, plot_bgcolor=BG,
+            font=dict(color=TEXT, size=11),
+            hovermode="x unified",
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                        font=dict(color=MUTED, size=10), bgcolor="rgba(0,0,0,0)"),
+            margin=dict(l=55, r=20, t=15, b=40),
+            xaxis2=dict(**AXIS, title="", rangeslider=dict(visible=False), type="date"),
+            xaxis=dict(
+                rangeselector=dict(
+                    buttons=[
+                        dict(count=6, label="6M", step="month", stepmode="backward"),
+                        dict(count=1, label="YTD", step="year", stepmode="todate"),
+                        dict(count=1, label="1Y", step="year", stepmode="backward"),
+                        dict(count=3, label="3Y", step="year", stepmode="backward"),
+                        dict(count=5, label="5Y", step="year", stepmode="backward"),
+                        dict(step="all", label="All"),
+                    ],
+                    bgcolor="#f6f8fa", activecolor=JPSI_BLUE,
+                    font=dict(color=TEXT, size=10), bordercolor=BORDER,
+                ),
+                type="date",
+            ),
+            height=470,
+        )
+        add_watermark(fig_dv, size=0.34, opacity=0.055)
+        st.plotly_chart(fig_dv, use_container_width=True)
+
+        _recent = _sp[_dvi["date"] >= _dvi["date"].max() - pd.Timedelta(days=365)]
+        _dropped = len(_cme_rows) - len(_dvi)
+        # Dollar signs escaped: st.caption renders markdown and a $...$ pair is
+        # LaTeX math there, which eats the sentence between them.
+        st.caption(
+            f"Both lines are CME's own, off their published files. Orange is what "
+            f"that day's cattle actually brought; blue is the seven-day "
+            f"pound-weighted index those sales were folded into, which is why it "
+            f"cannot turn as sharply. "
+            f"{len(_dvi):,} sale days, "
+            f"{_dvi['date'].min():%b %Y} to {_dvi['date'].max():%b %Y}. The daily "
+            f"runs above the index on {(_sp > 0).mean() * 100:.0f}% of them and the "
+            f"typical gap is \\${_sp.abs().median():.2f}/cwt, but that gap tracks the "
+            f"market rather than being a constant: over the last twelve months it "
+            f"has been \\${_recent.abs().median():.2f}. "
+            + (f"{_dropped} no-sale days — Thanksgiving, Christmas Eve, Labor Day — "
+               f"are left out rather than drawn as zero; the index still rolls on "
+               f"those days because the week behind it has cattle in it."
+               if _dropped else "")
+        )
 
     # ── Seasonal Pattern ──────────────────────────────────────────────────────────
 

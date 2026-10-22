@@ -272,6 +272,59 @@ def test_both_dashboards_explain_the_peer_tables_OTHER_number():
             f"headline tile reads as an error")
 
 
+def test_the_daily_vs_index_chart_drops_no_sale_days_in_both_copies():
+    """
+    ZERO IS NOT A PRICE. CME writes a file on Thanksgiving, Christmas Eve and
+    Labor Day: the index still rolls, because the week behind it has cattle in
+    it, but no sale was held, so the daily price is a literal 0 against 0 head.
+
+    Plot one and it draws a spike of minus three hundred dollars, flattening
+    every real day into a line. The rows must be DROPPED, not zeroed -- the
+    same rule this repo already carries for Direct Hay's 0 ask prices.
+
+    Pinned structurally because a chart cannot be unit-tested here, and in both
+    copies because app.py is deliberately not byte-identical.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert '<div class="sec-header">Daily Sale Price vs the Index</div>' in src, \
+            f"{app} has no daily-vs-index chart"
+        assert 'same_day_head"].fillna(0) > 0' in src, \
+            f"{app} no longer drops the no-sale days by head"
+        assert 'same_day_price"].fillna(0) > 100' in src, \
+            f"{app} no longer drops the zero daily price, which plots as a "
+        assert '"source"] == "cme_official"' in src, \
+            f"{app} is no longer taking both lines from CME's own files, so the "
+        assert "make_subplots" in src, \
+            f"{app} lost the gap panel, which is the only part of this chart "
+
+
+def test_the_rows_that_filter_removes_really_are_in_the_data():
+    """
+    The other half: a filter nobody needs is dead code that will be deleted by
+    the next reader. Confirms CME's own table really does carry zero-price rows,
+    so the guard above is load-bearing rather than decorative.
+    """
+    import sqlite3
+    live = HERE / "data" / "mars_history.db"
+    if not live.exists():
+        pytest.skip("no local database")
+    c = sqlite3.connect("file:%s?mode=ro" % live.as_posix(), uri=True)
+    try:
+        bad = c.execute(
+            "SELECT COUNT(*) FROM cme_ftp_daily "
+            "WHERE same_day_price = 0 OR same_day_head = 0").fetchone()[0]
+        good = c.execute(
+            "SELECT COUNT(*) FROM cme_ftp_daily "
+            "WHERE same_day_head > 0 AND same_day_price > 100").fetchone()[0]
+    finally:
+        c.close()
+    assert bad > 0, (
+        "cme_ftp_daily no longer holds any zero-price day, so the chart's "
+        "filter is now untested by real data -- check before removing it")
+    assert good > 1000, "too few usable days to draw a multi-year chart: %d" % good
+
+
 # ---------------------------------------------------------------------------
 # The barn report on the dashboards. barn_report.py itself is in SHARED above,
 # so the two copies of the MODULE cannot drift. These three properties are the

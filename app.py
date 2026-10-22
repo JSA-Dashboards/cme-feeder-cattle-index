@@ -2676,8 +2676,26 @@ with tab_index:
         st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
         st.markdown('<div class="sec-header">Versus CIH &amp; Compass</div>',
                     unsafe_allow_html=True)
+        # SAYS WHOSE NUMBER OURS IS, and it has to be here rather than only in
+        # the accuracy line below, because that one renders for SCORED dates --
+        # dates CME has printed -- and the rows a reader actually compares
+        # against the tile at the top of the page are the unscored ones at the
+        # top of this table.
+        #
+        # Measured 2026-10-22: the tile read 342.78 for index date 10/20 and this
+        # table read 342.77, because reports landed after the 07:45 freeze on
+        # 10/21. A cent is the usual size and not the limit -- 23 of the 47 dates
+        # holding both figures show different cents, and 2026-10-02 differs by
+        # 1.79. It was reported as a rounding bug; it is not. Both paths round
+        # identically, and the values going into them are different on purpose.
         st.caption(
             "Their published estimate against ours for the same CME index date. "
+            "**Ours is the frozen morning call** wherever we have one — not the "
+            "revised figure in the tile at the top of this page. CIH and Compass "
+            "publish in the morning, so scoring our later number against their "
+            "earlier one would flatter us with data their sheets had not seen. "
+            "Where late reports have moved the index since 07:45 the two will "
+            "differ, sometimes by more than a dollar. "
             "*Miss* columns appear once CME prints that date; before then all three "
             "are open forecasts."
         )

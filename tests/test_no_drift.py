@@ -236,6 +236,42 @@ def test_both_dashboards_say_when_CME_IS_BEHIND():
             f"late, so the banner would report on the wrong series")
 
 
+def test_both_dashboards_explain_the_peer_tables_OTHER_number():
+    """
+    The page shows two different figures for one index date, on purpose, and
+    for a while said nothing about it. The tile at the top is the current
+    revised index; the JSA column of the peer table is the FROZEN morning
+    call, because CIH and Compass publish in the morning and scoring our later
+    number against their earlier one would flatter us with data their sheets
+    had not seen.
+
+    Measured 2026-10-22: the tile read 342.78 for index date 10/20 and the
+    table read 342.77, because reports landed after the 07:45 freeze on 10/21.
+    23 of the 47 dates holding both figures show different cents, and
+    2026-10-02 differs by 1.79, so this is not a corner case.
+
+    It was reported as a rounding bug. It is not -- round() and an f-string
+    agree on every one of these values; the inputs differ, deliberately.
+
+    THE EXPLANATION MUST BE IN THE CAPTION THAT ALWAYS RENDERS. There is a
+    provenance sentence further down, but it only appears for SCORED dates --
+    ones CME has printed -- and the rows a reader compares against the tile
+    are the unscored ones at the top of the table, which is exactly where it
+    was silent.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        start = src.find("Their published estimate against ours")
+        assert start != -1, f"{app} has no peer-table caption"
+        end = src.find("are open forecasts.", start)
+        assert end != -1, f"{app}'s peer-table caption is not the expected one"
+        caption = src[start:end]
+        assert "frozen morning call" in caption, (
+            f"{app} no longer says in its always-rendered caption that the JSA "
+            f"column is the frozen morning call, so the difference from the "
+            f"headline tile reads as an error")
+
+
 # ---------------------------------------------------------------------------
 # The barn report on the dashboards. barn_report.py itself is in SHARED above,
 # so the two copies of the MODULE cannot drift. These three properties are the

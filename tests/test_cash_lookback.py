@@ -15,6 +15,7 @@ question nobody asked.
 So the lookback is a pound-weighted average over a 30-day band CENTRED on the
 date, computed the same way as the live reading so the two are comparable.
 """
+import pathlib
 import sqlite3
 import sys
 import types
@@ -249,3 +250,114 @@ def test_the_offsets_are_roughly_six_and_twelve_months():
     assert centres == sorted(centres), "render reads LOOKBACKS in order"
     assert 170 <= centres[0] <= 195, centres
     assert 355 <= centres[1] <= 380, centres
+
+
+# ---------------------------------------------------------------------------
+# The bracket-vs-index chart. A sale day of two head is one pen, not a market.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def chart_db(monkeypatch):
+    """calf_sales AND fci_daily: load_daily_series inner-joins the two."""
+    monkeypatch.delenv("USE_SNOWFLAKE", raising=False)
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(SCHEMA)
+    conn.executescript(
+        "CREATE TABLE fci_daily (report_date TEXT PRIMARY KEY, fci_value REAL)")
+    monkeypatch.setattr(cc, "_conn", lambda: (FakeDb(), conn))
+    return conn
+
+
+def _day(conn, iso, head, price, fci=340.0, weight_low=550):
+    conn.execute(
+        "INSERT INTO calf_sales (report_date, slug_id, location, state, "
+        "weight_low, weight_high, muscle_grade, head_count, avg_weight, "
+        "avg_price) VALUES (?,1,'Joplin','MO',?,?, '1',?,?,?)",
+        (iso, weight_low, weight_low + 50, head, 575.0, price))
+    conn.execute("INSERT OR IGNORE INTO fci_daily VALUES (?,?)", (iso, fci))
+    conn.commit()
+
+
+def test_a_thin_sale_day_is_not_a_point_on_the_chart(chart_db):
+    """
+    THE GUARD, AS BEHAVIOUR. load_daily_series() plots one point per sale day,
+    and a day of a couple of head is a single pen whose price says nothing
+    about the market.
+
+    Measured on 600-649 lb over 292 real sale days: the five worst gaps on
+    record came from days of 2, 3, 7, 8 and 8 head, one dragging the line
+    twelve dollars BELOW an index it otherwise sits sixty above. Those five
+    were every visible extreme in the lower panel.
+
+    A FIRST VERSION OF THIS TEST ASSERTED THAT THE SOURCE MENTIONED
+    MIN_DAY_HEAD, and passed with the filter deleted -- the docstring still
+    said the words. That is this repo's catalogued mistake, banning a string in
+    a comment rather than in the code, and it is why this one calls the
+    function.
+    """
+    _day(chart_db, "2026-10-01", head=500, price=420.0)
+    _day(chart_db, "2026-10-02", head=5, price=312.0)
+    got = cc.load_daily_series(550, cc.ALL_STATES)
+    dates = [r["date"] for r in got]
+    assert dates == ["2026-10-01"], (
+        "a %d-head sale day reached the chart: %s" % (5, dates))
+
+
+def test_a_day_on_the_threshold_is_kept(chart_db):
+    """
+    The control. A floor that also dropped ordinary days would quietly thin the
+    series rather than clean it -- 275 of 292 days survive on the live data.
+    """
+    _day(chart_db, "2026-10-01", head=cc.MIN_DAY_HEAD, price=420.0)
+    _day(chart_db, "2026-10-02", head=cc.MIN_DAY_HEAD - 1, price=312.0)
+    got = [r["date"] for r in cc.load_daily_series(550, cc.ALL_STATES)]
+    assert got == ["2026-10-01"], got
+
+
+def test_the_series_is_pound_weighted_like_the_table_above_it(chart_db):
+    """
+    The chart sits directly under a $/cwt tile built by load_rows(), which is
+    pound-weighted. Head-weighting here would put a line on the page that
+    disagrees with the number above it for no visible reason.
+    """
+    conn = chart_db
+    conn.execute(
+        "INSERT INTO calf_sales (report_date, slug_id, location, state, "
+        "weight_low, weight_high, muscle_grade, head_count, avg_weight, "
+        "avg_price) VALUES ('2026-10-01',1,'A','MO',550,600,'1',100,500.0,400.0)")
+    conn.execute(
+        "INSERT INTO calf_sales (report_date, slug_id, location, state, "
+        "weight_low, weight_high, muscle_grade, head_count, avg_weight, "
+        "avg_price) VALUES ('2026-10-01',1,'B','MO',550,600,'1',100,700.0,300.0)")
+    conn.execute("INSERT INTO fci_daily VALUES ('2026-10-01',340.0)")
+    conn.commit()
+    got = cc.load_daily_series(550, cc.ALL_STATES)
+    # pound-weighted: (100*500*400 + 100*700*300) / (100*500 + 100*700)
+    assert abs(got[0]["price"] - 341.666666) < 1e-4, got[0]["price"]
+    # head-weighted would be a flat 350.0
+    assert abs(got[0]["price"] - 350.0) > 1.0
+
+
+def test_the_thin_days_the_floor_removes_are_really_in_the_data():
+    """
+    The other half: a filter nothing triggers is dead code the next reader
+    deletes. Confirms calf_sales really does carry sale days of a few head, so
+    the floor above is load-bearing rather than decorative.
+    """
+    live = pathlib.Path(cc.__file__).resolve().parent / "data" / "mars_history.db"
+    if not live.exists():
+        pytest.skip("no local database")
+    conn = sqlite3.connect("file:%s?mode=ro" % live.as_posix(), uri=True)
+    try:
+        thin, fat = conn.execute(
+            "SELECT SUM(hd < ?), SUM(hd >= ?) FROM ("
+            "  SELECT SUM(head_count) hd FROM calf_sales"
+            "  WHERE weight_low = 600 GROUP BY report_date)",
+            (cc.MIN_DAY_HEAD, cc.MIN_DAY_HEAD)).fetchone()
+    finally:
+        conn.close()
+    assert thin and thin > 0, (
+        "calf_sales no longer holds a sale day under %d head, so the chart's "
+        "floor is untested by real data -- check before removing it"
+        % cc.MIN_DAY_HEAD)
+    assert fat > 100, "only %d usable sale days, too few to chart" % fat

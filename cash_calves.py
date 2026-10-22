@@ -25,9 +25,28 @@ repo. That table deliberately spans 400-900 lb, wider than the index's own
 recompute_fci_daily() reads it.
 """
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 ALL_STATES = "All states"
+# Same values as barn_basis.PALETTE, so the two tabs draw alike. Kept here
+# rather than taken from the host because render() is called identically from
+# all three pages and none of them passes a palette -- adding a parameter
+# nobody fills would be a worse kind of coupling than a shared constant.
+# A SALE DAY UNDER THIS IS ONE PEN, NOT A MARKET, and it is only the chart
+# that needs saying so -- the table above is already an average over a window
+# of many days. Matches barn_basis.MIN_HEAD, which draws the same line for the
+# same reason ("One or two pens is not a ...").
+#
+# Measured on 600-649 lb, 292 sale days: the five worst gaps on record came
+# from days of 2, 3, 7, 8 and 8 head, one of them pulling the line 12 dollars
+# BELOW an index it otherwise sits 60 above. At 100 head 275 of the 292 days
+# survive and those five are gone; at 200 the standard deviation barely moves
+# again (18.25 against 18.03), so 100 is the knee rather than a round number.
+MIN_DAY_HEAD = 100
+PALETTE = {"bg": "#ffffff", "border": "#e6eaee", "muted": "#6b7280",
+           "text": "#1f2328", "index": "#0693e3", "cash": "#e67e22"}
 CASH_BRACKETS = [400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900]
 WINDOWS = [14, 30, 60, 90, 180, 365]
 # 180/365 match barn_basis.py's window lengths, which is the established
@@ -304,6 +323,60 @@ def blank_missing_lookbacks(table):
             cfg[label] = st.column_config.TextColumn()
     return table, cfg
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_daily_series(weight_low: int, state: str):
+    """
+    [{date, price, head, fci}] for every sale day on record at this weight, the
+    WHOLE history rather than the selected window.
+
+    The window control above drives the table, which answers "what is this
+    bracket bringing now". This answers a different question -- what it has run
+    against the index over time -- and a chart cut to 14 days would answer
+    neither.
+
+    POUND-WEIGHTED, the same formula load_rows() uses, or the line would
+    disagree with the $/cwt tile directly above it. (barn_basis.py is
+    head-weighted for its own reasons; the two are not interchangeable.)
+
+    An inner join to fci_daily, so a day only appears when there is an index to
+    compare it against -- the same join barn_basis.py already makes, and the
+    reason cash_calves.py is in READ_ONLY_MODULES rather than banned from
+    fci_daily outright.
+
+    Sale days under MIN_DAY_HEAD are dropped: see the constant for the five
+    two-and-three-head days that were driving every extreme on the chart.
+    """
+    try:
+        _db, conn = _conn()
+    except Exception:
+        return []
+    try:
+        where = f"cs.weight_low = {int(weight_low)}"
+        if state != ALL_STATES:
+            where += f" AND cs.state = '{state}'"
+        rows = conn.cursor().execute(
+            "SELECT cs.report_date, "
+            "       SUM(cs.head_count*cs.avg_weight*cs.avg_price)"
+            "         / NULLIF(SUM(cs.head_count*cs.avg_weight),0), "
+            "       SUM(cs.head_count), f.fci_value "
+            "FROM calf_sales cs "
+            "JOIN fci_daily f ON f.report_date = cs.report_date "
+            f"WHERE {where} "
+            "GROUP BY cs.report_date, f.fci_value "
+            "ORDER BY cs.report_date").fetchall()
+        return [{"date": str(_db.iso(a)), "price": float(b),
+                 "head": int(c or 0), "fci": float(d)}
+                for a, b, c, d in rows
+                if b and d and c and int(c) >= MIN_DAY_HEAD]
+    except Exception:
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def render(tile, muted="#6b7280", key_prefix="cash"):
     """
     Draw the whole lookup. `tile` is the host page's tile helper, called as
@@ -497,3 +570,100 @@ def render(tile, muted="#6b7280", key_prefix="cash"):
         f"qualifying prints then: barns open, close and move sale days, and an "
         f"absent comparison is left absent rather than filled in."
     )
+
+
+    # ── This bracket against the index ────────────────────────────────────────
+    #
+    # The same pair as the Index tab's "Daily Sale Price vs the Index", asked of
+    # the bracket selected above: what these cattle actually brought on each
+    # sale day, against the 700-899 lb index they are not in.
+    #
+    # FOR ANY BRACKET BUT 700-749 THE GAP IS MOSTLY THE WEIGHT RAMP, not a
+    # market signal -- lighter cattle bring more per hundredweight, so a 500 lb
+    # line sits far above the index and stays there. What is worth watching is
+    # whether the gap MOVES, which is why the lower panel scales to the gap
+    # rather than being pinned around zero.
+    #
+    # FOURTEEN MONTHS, NOT ELEVEN YEARS. calf_sales starts 2025-09-01; the Index
+    # tab reaches to 2015 only because CME publishes that history themselves and
+    # we ingest their files. The caption says the span rather than implying one.
+    _series = load_daily_series(wt, state)
+    if len(_series) >= 20:
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+        st.markdown('<div class="sec-header">This Bracket vs the Index</div>',
+                    unsafe_allow_html=True)
+        _d = [r["date"] for r in _series]
+        _p = [r["price"] for r in _series]
+        _i = [r["fci"] for r in _series]
+        _g = [a - b for a, b in zip(_p, _i)]
+
+        _ax = dict(gridcolor=PALETTE["border"], linecolor=PALETTE["border"],
+                   showgrid=True, zeroline=False,
+                   tickfont=dict(color=PALETTE["muted"], size=11),
+                   title_font=dict(color=PALETTE["muted"], size=11))
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            row_heights=[0.72, 0.28], vertical_spacing=0.06)
+        fig.add_trace(go.Scatter(
+            x=_d, y=_p, name=f"{wt}-{wt + 49} lb, that day's sales",
+            mode="lines", line=dict(color=PALETTE["cash"], width=1.4),
+            hovertemplate="Cash: $%{y:.2f}<extra></extra>"), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=_d, y=_i, name="CME Feeder Cattle Index (7-day)", mode="lines",
+            line=dict(color=PALETTE["index"], width=2),
+            hovertemplate="Index: $%{y:.2f}<extra></extra>"), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=_d, y=_g, name="gap", mode="lines", showlegend=False,
+            line=dict(color=PALETTE["muted"], width=1),
+            hovertemplate="Gap: $%{y:+.2f}<extra></extra>"), row=2, col=1)
+        fig.update_yaxes(title="$/cwt", tickprefix="$", row=1, col=1, **_ax)
+        fig.update_yaxes(title="gap", tickprefix="$", row=2, col=1, **_ax)
+        fig.update_xaxes(row=1, col=1, **_ax)
+        fig.update_layout(
+            paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"],
+            font=dict(color=PALETTE["text"], size=11),
+            hovermode="x unified", showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=PALETTE["muted"], size=10)),
+            margin=dict(l=55, r=20, t=15, b=40),
+            xaxis2=dict(**_ax, title="", type="date"),
+            xaxis=dict(
+                rangeselector=dict(
+                    buttons=[
+                        dict(count=1, label="1M", step="month", stepmode="backward"),
+                        dict(count=3, label="3M", step="month", stepmode="backward"),
+                        dict(count=6, label="6M", step="month", stepmode="backward"),
+                        dict(count=1, label="YTD", step="year", stepmode="todate"),
+                        dict(step="all", label="All"),
+                    ],
+                    bgcolor="#f6f8fa", activecolor=PALETTE["index"],
+                    font=dict(color=PALETTE["text"], size=10),
+                    bordercolor=PALETTE["border"]),
+                type="date"),
+            height=440,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        _above = sum(1 for g in _g if g > 0)
+        _med = sorted(_g)[len(_g) // 2]
+        _last = _g[-1]
+        # Dollar signs escaped: st.caption renders markdown and a $...$ pair is
+        # LaTeX there, which would eat the sentence between two amounts.
+        st.caption(
+            f"Orange is the {wt}-{wt + 49} lb pound-weighted average for each "
+            f"sale day"
+            + ("" if state == ALL_STATES else f" in {state}")
+            + f", on the same basis as the table above; blue is the CME Feeder "
+            f"Cattle Index, which is 700-899 lb steers. {len(_series):,} sale "
+            f"days, {_d[0]} to {_d[-1]} — calf_sales does not reach further "
+            f"back, so this is not the eleven-year view the Index tab carries. "
+            f"The bracket ran above the index on {100 * _above // len(_g)}% of "
+            f"those days, typically by \\${_med:+.2f}/cwt, and \\${_last:+.2f} "
+            f"on the most recent. For anything but 700-749 lb most of that gap "
+            f"is the weight ramp rather than a signal — lighter cattle bring "
+            f"more per hundredweight — so it is the MOVEMENT of the lower panel "
+            f"that is worth reading, not its level. "
+            f"Sale days under {MIN_DAY_HEAD} head are left out: a two-head day "
+            f"is one pen rather than a market, and the handful on record were "
+            f"driving every extreme on this chart."
+        )

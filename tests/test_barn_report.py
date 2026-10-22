@@ -66,6 +66,7 @@ from pathlib import Path
 import pytest
 
 import barn_report as br
+import index_dates
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -515,14 +516,20 @@ def test_a_day_with_no_sales_is_reported_not_skipped():
     assert "2 barns that usually sell on a Monday have not:" in lines[0]
 
 
-def test_the_index_date_is_cmes_publication_clock_not_the_newest_row():
+def test_the_index_date_is_the_freshest_COMPLETE_day_not_the_newest_row(monkeypatch):
     """
-    CME published through Friday, so Monday is the date being estimated -- even
-    though Tuesday already holds a row. See index_dates.py.
+    Read on Tuesday morning, the report answers about Monday -- even though
+    Tuesday already holds a row, because Tuesday's own barns cannot have
+    reported yet. See index_dates.py.
+
+    The rule changed on 2026-10-22: Tuesday is now excluded for being TODAY
+    rather than for being a print CME has not reached. Same answer here, and
+    the same mutation still kills it.
 
     MUTATION: MAX(report_date). The report answers about a day whose barns
     cannot have reported yet, every single morning.
     """
+    monkeypatch.setattr(index_dates, "central_today", lambda: date(2026, 9, 22))
     rows = _full_weeks([(1, "Carthage")])
     rows += rows_for(1, "Carthage", ["2026-09-22"])
     lines = br.report_lines(make_conn(rows, published="2026-09-18",
@@ -530,16 +537,44 @@ def test_the_index_date_is_cmes_publication_clock_not_the_newest_row():
     assert lines[0].startswith("Barn report -- index date 2026-09-21 (Mon):")
 
 
-def test_the_index_date_is_cmes_newest_file_not_its_oldest():
+def test_the_index_date_does_not_wait_on_a_late_CME(monkeypatch):
+    """
+    The 2026-10-22 case, in the barn report rather than the dashboard. CME is
+    stuck on 09-18 and our own data runs to 09-23; read on 09-24 the report
+    must answer about 09-23, not about the print CME owes next.
+
+    The two must agree, because the page prints the barn-report line directly
+    under the headline figure -- a report answering about a different day than
+    the tile above it is a page contradicting itself.
+    """
+    monkeypatch.setattr(index_dates, "central_today", lambda: date(2026, 9, 24))
+    rows = _full_weeks([(1, "Carthage")])
+    rows += rows_for(1, "Carthage", ["2026-09-22", "2026-09-23"])
+    lines = br.report_lines(make_conn(
+        rows, published="2026-09-18",
+        extra_index_dates=["2026-09-22", "2026-09-23", MONDAY.isoformat()]))
+    assert lines[0].startswith("Barn report -- index date 2026-09-23 (Wed):")
+
+
+def test_the_index_date_is_cmes_newest_file_not_its_oldest(monkeypatch):
     """
     Five CME files, not one. Every other fixture here gives cme_ftp_daily a
     single row, which leaves MAX(report_date) and MIN(report_date) the same
     value in all of them; the live table is years deep.
 
+    EXERCISED THROUGH THE FALLBACK, and that is the whole reason this test
+    still earns its place. Since 2026-10-22 the index date comes from the
+    calendar, so `published` no longer reaches the answer on an ordinary
+    morning -- and this test went on passing under its own stated mutation,
+    measured, which made it a check that could not fail. Forcing today to be
+    unknown puts the old rule back in play, which is the one path where MIN
+    against MAX still decides anything.
+
     MUTATION: MIN(report_date). CME's OLDEST file dates the report. Here that
     is Monday 09-14, whose next business day 09-15 is also a candidate, so the
     report quietly answers about the wrong day rather than failing loudly.
     """
+    monkeypatch.setattr(index_dates, "central_today", lambda: None)
     rows = _full_weeks([(1, "Carthage")])
     lines = br.report_lines(make_conn(
         rows,

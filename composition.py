@@ -70,6 +70,37 @@ def window_composition(conn, index_date_iso, days=7):
     return cells
 
 
+def window_totals(rows):
+    """
+    (total head, head-weighted average weight) for the rows a 7-day window
+    table DISPLAYS.
+
+    SEPARATE FROM window_composition ABOVE ON PURPOSE. That one answers the
+    database; this answers the table on the page, and the two differ in exactly
+    the way that has already bitten. The page used to sum its total out of the
+    per-LOCATION frame, which carries no row for direct trade and video sales
+    -- cattle that ARE in the index and have no auction to belong to. On the
+    window ending 2026-10-20 that printed 17,538 head beneath a column of rows
+    adding to 19,503, and pulled the weight to 802 lb from 804. Compass
+    published 19,504 and 804 lb for that same window the same morning, and
+    fci_daily.total_head held 19,503, so the rows were right and the total
+    alone was wrong. The price never showed it, because the price shown is the
+    index value rather than anything re-derived.
+
+    `rows` is an iterable of (head, avg_weight). Either may be None for a day
+    that contributed nothing -- a Saturday, or a day whose reports have not
+    landed -- and such a day counts as ZERO rather than being skipped, so this
+    total is the one a reader gets by adding the column up by eye. That is the
+    property worth having: a total that disagrees with its own column is the
+    defect, whichever number happens to be closer to the truth.
+    """
+    pairs = [(float(h or 0), float(w or 0)) for h, w in rows]
+    total = sum(h for h, _w in pairs)
+    if not total:
+        return 0, None
+    return int(round(total)), sum(h * w for h, w in pairs) / total
+
+
 def grade_totals(cells):
     """{grade: {head, lbs, dollars, price}} summed across all brackets."""
     out = {g: {"head": 0, "lbs": 0.0, "dollars": 0.0} for g in GRADES}

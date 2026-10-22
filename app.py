@@ -43,7 +43,7 @@ from bucketing import shifted_bucket_date
 from snapshots import opening_calls
 from composition import (BRACKETS as COMP_BRACKETS, grade_totals as comp_grade_totals,
                          mix_effect, next_index_date, span_contributions,
-                         window_composition)
+                         window_composition, window_totals)
 from volumes import (compare as volume_compare, history as volume_history,
                      ytd as volume_ytd)
 
@@ -1627,10 +1627,22 @@ with tab_index:
         axis=1,
     )
 
-    window_loc = loc_df[(loc_df["date"] >= window_start) & (loc_df["date"] <= head_date)]
-    window_w = window_loc["head"] * window_loc["avg_weight"]
-    window_total_head = window_loc["head"].sum()
-    window_total_weight = (window_w.sum() / window_total_head) if window_total_head else None
+    # THE TOTAL COMES FROM THE ROWS ABOVE IT, never from loc_df.
+    #
+    # loc_df is the per-AUCTION-LOCATION table, so it holds no row for direct
+    # trade and video sales -- cattle that ARE in the index and have no auction
+    # to belong to. Summing it put 17,538 head under a column of rows adding to
+    # 19,503 on the window ending 2026-10-20, and dragged the weight to 802 lb
+    # from 804. Compass published 19,504 and 804 lb for the same window that
+    # morning, and fci_daily.total_head held 19,503 -- so the rows were right
+    # and only this total was wrong. Price never showed it, because price is
+    # the index value rather than anything re-derived here.
+    #
+    # A total that disagrees with its own column is the defect. Deriving it
+    # from the displayed rows makes the table add up by construction, which is
+    # a property a reader can check by eye -- and did.
+    window_total_head, window_total_weight = window_totals(
+        zip(window_fci["same_day_head"], window_fci["same_day_avg_weight"]))
 
     window_totals_row = pd.DataFrame([{
         "Day": "7-DAY TOTAL",

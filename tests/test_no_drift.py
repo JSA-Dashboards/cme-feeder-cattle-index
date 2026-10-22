@@ -207,6 +207,35 @@ def test_both_dashboards_use_the_tested_headline_rule():
             f"{app} no longer derives its headline from the rule"
 
 
+def test_both_dashboards_say_when_CME_IS_BEHIND():
+    """
+    The freshness banner times OUR pipeline and stays green while CME's feed
+    stops. On 2026-10-22 the page was current to the minute and CME had not
+    published the 10/20 print at all; nothing on the page said so, and the only
+    way to notice was that CIH's sheet was dated a day ahead of our own Last
+    CME Print tile.
+
+    The wiring is pinned rather than the wording, with one exception: it must
+    read CME'S OWN series end. _last_pub counts the workbook rows too -- Ross's
+    spreadsheet, which cannot be late -- so pointing the banner at that would
+    measure lateness against a series CME does not publish.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert "def _render_cme_lag(" in src, \
+            f"{app} has no CME-lateness banner"
+        assert "publication_status" in src, \
+            f"{app} does not import the tested due-date rule"
+        assert '_official = fci_df[fci_df["source"] == "cme_official"]' in src, \
+            f"{app} no longer derives CME's own series end"
+        assert "_render_cme_lag(_cme_last)" in src, \
+            f"{app} does not render the banner from CME's own series end"
+        assert "_render_cme_lag(_last_pub)" not in src, (
+            f"{app} measures CME's lateness against _last_pub, which includes "
+            f"the workbook rows -- those are Ross's spreadsheet and cannot be "
+            f"late, so the banner would report on the wrong series")
+
+
 # ---------------------------------------------------------------------------
 # The barn report on the dashboards. barn_report.py itself is in SHARED above,
 # so the two copies of the MODULE cannot drift. These three properties are the

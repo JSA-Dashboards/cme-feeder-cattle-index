@@ -39,6 +39,10 @@ import cash_calves
 import barn_basis
 import six_state
 from index_dates import headline_index_date
+# A SECOND import line from the same module, deliberately. tests/test_no_drift.py
+# pins the literal string above as proof both copies use the tested headline
+# rule, and folding another name into it would quietly defeat that check.
+from index_dates import publication_status
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
 from composition import (BRACKETS as COMP_BRACKETS, grade_totals as comp_grade_totals,
@@ -752,6 +756,53 @@ def _render_freshness():
         st.caption(f"Last refreshed {stamp} Central ({hours:.1f}h ago).")
 
 
+# CME's lag is a DIFFERENT failure from the pipeline's, and the banner above
+# cannot see it. _render_freshness() times OUR run; this times CME's.
+#
+# On 2026-10-22 the pipeline was green and current to the minute while CME had
+# not published the 10/20 print at all -- no FC261020.txt on their server. The
+# page said nothing about it, and the only way to notice was that CIH's sheet
+# was dated a day ahead of our own Last CME Print tile. That is the whole
+# reason this exists: a reader comparing us to CIH has to be able to tell
+# "CME is late" from "JSA is stale", and until now the page offered no way to.
+#
+# NOT AN ERROR, AND NOT OUR FAULT -- the wording has to carry that or it sends
+# somebody hunting through our logs for a break that is not there. The estimate
+# above is reconstructed from USDA AMS auction data and does not read this feed
+# at all. What is actually affected is the Last CME Print tile and the forecast
+# scorecard, which have nothing newer to score against.
+#
+# Silent when CME is current, which is almost every day: publication_status()
+# counts a date owed only once its next-business-day window has passed, so a
+# weekend, an evening before 14:05, and a print landing on time all produce
+# nothing here.
+def _render_cme_lag(last_published):
+    now = _central_now()
+    if last_published is None or now is None:
+        return
+    owed = publication_status(last_published, now)["overdue"]
+    if not owed:
+        return
+
+    def _fmt(d):
+        # M/D/YY, the style CIH and CME's own sheets use. Built by hand because
+        # %-d is glibc-only and raises on Windows.
+        return "%d/%d/%s" % (d.month, d.day, d.strftime("%y"))
+
+    which = (" and ".join(_fmt(d) for d in owed) if len(owed) <= 2
+             else "%s through %s" % (_fmt(owed[0]), _fmt(owed[-1])))
+    st.warning(
+        f"**CME is {len(owed)} print{'s' if len(owed) > 1 else ''} behind.** "
+        f"Their last published index is {_fmt(last_published)}; {which} "
+        f"{'are' if len(owed) > 1 else 'is'} overdue \u2014 CME publishes each "
+        f"index date on the next business day, between 13:04 and 14:04 Central, "
+        f"and that window has passed. **Nothing here has failed:** the estimate "
+        f"below is reconstructed from USDA AMS auction data and does not use "
+        f"CME's feed. It is *Last CME Print* and the forecast scorecard that "
+        f"have nothing newer to show."
+    )
+
+
 # ── Is the headline day COMPLETE? ─────────────────────────────────────────────
 # Freshness above says when the pipeline last ran. This says whether the day it
 # ran on is whole, which is a different failure and the one that costs money.
@@ -1187,6 +1238,11 @@ first_date = fci_df["date"].min()
 # headlined. It measures the number, never the choice of number.
 _published = fci_df[fci_df["source"].isin(("workbook", "cme_official"))]
 _last_pub = _published.iloc[-1]["date"].date() if len(_published) else None
+# CME'S OWN SERIES END, which is not _last_pub: that one also counts the
+# workbook rows, and the workbook is Ross's spreadsheet rather than a CME
+# file. Only cme_official can be late, so only cme_official can say so.
+_official = fci_df[fci_df["source"] == "cme_official"]
+_cme_last = _official.iloc[-1]["date"].date() if len(_official) else None
 _head = headline_index_date(_last_pub, {t.date() for t in fci_df["date"]})
 _hit = fci_df.index[fci_df["date"] == pd.Timestamp(_head)] if _head else []
 head_pos = fci_df.index.get_loc(_hit[0]) if len(_hit) else len(fci_df) - 1
@@ -1298,6 +1354,11 @@ st.markdown("<hr style='margin:10px 0 18px;'>", unsafe_allow_html=True)
 # identically whether the pipeline ran twenty minutes ago or failed days ago,
 # and the numbers are traded on -- so say how old they are before showing them.
 _render_freshness()
+
+# Immediately after it, because the two answer the same question for a
+# reader -- "is what I am looking at current?" -- about two different
+# clocks, and splitting them would let one be read as covering both.
+_render_cme_lag(_cme_last)
 
 # Directly beneath it, and ABOVE the tabs on purpose. Ross reads this page each
 # morning and snips the top of it to clients by hand, so the one thing that has

@@ -592,15 +592,22 @@ def load_barn_history(barn: str, state: str, weight_low: int):
                 "GROUP BY report_date").fetchall():
             if p:
                 bracket[str(_db.iso(d))] = float(p)
+        # INTERPOLATED, NOT BOUND, and that is the module's convention rather
+        # than laziness: this runs on SQLite locally and Snowflake in
+        # production, and the two take different placeholder styles -- "?"
+        # against "%s". A bound "?" works in every local test and raises on
+        # the deployed backend, where the except below swallows it and the
+        # chart simply never appears. It cost two reboots to find.
+        _barn = str(barn).replace("'", "''")
+        _st = str(state).replace("'", "''")
         rows = cur.execute(
             "SELECT report_date, "
             "       SUM(avg_price*head_count)/NULLIF(SUM(head_count),0), "
             "       SUM(head_count) "
             "FROM calf_sales "
             f"WHERE weight_low = {int(weight_low)} "
-            "  AND location = ? AND state = ? "
-            "GROUP BY report_date ORDER BY report_date",
-            (barn, state)).fetchall()
+            f"  AND location = '{_barn}' AND state = '{_st}' "
+            "GROUP BY report_date ORDER BY report_date").fetchall()
         for d, p, h in rows:
             iso = str(_db.iso(d))
             if not p or not h or int(h) < MIN_PRINT_HEAD or iso not in bracket:

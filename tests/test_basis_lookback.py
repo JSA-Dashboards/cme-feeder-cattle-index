@@ -740,3 +740,58 @@ def test_the_stats_in_the_caption_ignore_the_drawing_breaks():
         "the median premium is no longer taken from the unbroken list")
     assert "sum(1 for g in _gp if g > 0)" in tail, (
         "the share above the bracket is no longer taken from the unbroken list")
+
+
+@pytest.mark.parametrize("name", ["barn_basis.py", "cash_calves.py"])
+def test_no_raw_placeholder_survives_into_a_dual_backend_query(name):
+    """
+    A LITERAL "?" IS A BUG THAT ONLY APPEARS IN PRODUCTION.
+
+    These modules run on SQLite locally and Snowflake on the deployed app, and
+    the two take different placeholder styles -- "?" against "%s". A bound "?"
+    passes every test here, works in every local preview, and raises on the
+    deployed backend, where the module's own `except Exception: return []`
+    swallows it and the feature simply never appears.
+
+    That is exactly what happened to load_barn_history on 2026-10-23: two
+    reboots and a verified-live check before the cause was found, because the
+    page looked identical to one where the chart had not been written yet.
+
+    Both modules interpolate instead -- `f"WHERE weight_low = {int(wt)}"` --
+    which is why neither needs a placeholder at all. Where binding IS wanted,
+    snowflake_db.placeholders(n) returns the right style per backend, as
+    composition.py and snapshots.py do.
+
+    This checks the SQL, not the prose: a "?" inside a docstring is fine and
+    barn_basis has one.
+    """
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent / name).read_text(
+        encoding="utf-8")
+    tree = ast.parse(src)
+
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            d = ast.get_docstring(node, clean=False)
+            if d:
+                docstrings.add(d)
+
+    bad = [(n.lineno, n.value) for n in ast.walk(tree)
+           if isinstance(n, ast.Constant) and isinstance(n.value, str)
+           and "?" in n.value and n.value not in docstrings]
+    assert not bad, (
+        "%s has a raw '?' placeholder in a query string: %s. It will work "
+        "locally and return nothing on Snowflake. Interpolate the value or "
+        "use snowflake_db.placeholders()." % (name, bad))
+
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "execute" and len(n.args) > 1]
+    assert not calls, (
+        "%s binds parameters at line(s) %s. Neither module does this "
+        "elsewhere; if it is wanted, the placeholder string must come from "
+        "snowflake_db.placeholders() so it is right on both backends."
+        % (name, [c.lineno for c in calls]))

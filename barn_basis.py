@@ -54,6 +54,7 @@ import datetime as _dt
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 BRACKETS = [400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900]
 WINDOWS = [90, 180, 365]
@@ -84,6 +85,21 @@ WINDOW_LABEL = {90: "last 3 months", 180: "last 6 months", 365: "last year"}
 # windows keep 65-79 of 80-81. Net across all 33 it drops 100 rows against the
 # old print floor (2,053 against 2,153) while removing every 31-head leader.
 MIN_HEAD = 100
+# A SEPARATE, MUCH LOWER FLOOR, and it has to be: MIN_HEAD above gates a BARN
+# over a whole window, while this gates one barn on one DAY. At 700-749 lb the
+# median barn-day is 41 head and 72% are under 100, so reusing MIN_HEAD here
+# would throw away about three quarters of the series.
+#
+# What actually poisons a per-barn line is single animals. The five most
+# extreme premiums on record came from barn-days of 1, 7, 5, 7 and 1 head;
+# at a floor of 10 the worst goes from -120.75 to -70.26 and 82% of barn-days
+# survive, against 28% at a floor of 100.
+MIN_PRINT_HEAD = 10
+# Fewer sale days than this and a line reads as a scatter rather than a
+# series. At 700-749 lb, 74 of 84 barns clear 10 days and 67 clear 20, so
+# 12 charts nearly every barn while keeping the genuinely sparse ones --
+# Belen has 8 over ten months -- out of a shape they cannot support.
+MIN_CHART_DAYS = 12
 
 # How many barns the chart shows from each end of the ranking before pinned
 # barns are added. Named rather than written twice as a literal 10, because the
@@ -525,6 +541,74 @@ def load_basis_lookbacks(weight_low: int):
     return out
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_barn_history(barn: str, state: str, weight_low: int):
+    """
+    [{date, price, bracket, head}] per sale day for ONE barn, the whole history
+    rather than the selected window, with the bracket's price on each of those
+    same days beside it.
+
+    AGAINST THE BRACKET, NOT AGAINST THE INDEX, and that is a data constraint
+    rather than a preference. INDEX_TRUSTWORTHY_FROM is 2026-08-28; calf_sales
+    begins 2025-09-01, so a basis-vs-FCI line here would have to throw away
+    thirteen of its fourteen months -- 39 sale days survive the cutoff in all,
+    and the best-covered barn has 13 of them. That is not a line. The bracket
+    comparison has no such problem: it prices a barn against its own bracket on
+    the same sale days, so the index error very largely cancels, which is the
+    same reasoning the lookback columns already use to blank themselves in
+    vs FCI mode.
+
+    HEAD-WEIGHTED, matching the tiles and the table on this page. cash_calves.py
+    is pound-weighted for its own good reasons and the two are not
+    interchangeable; using its formula here would put a line on the page that
+    disagrees with the $/cwt directly above it.
+
+    Days where this barn sold fewer than MIN_PRINT_HEAD are dropped -- see the
+    constant for the one-head prints that were otherwise the extremes of it.
+    Empty list on any failure, the same quiet degradation as the rest of the
+    module.
+    """
+    out = []
+    try:
+        _db, conn = _conn()
+    except Exception:
+        return out
+    try:
+        cur = conn.cursor()
+        bracket = {}
+        for d, p in cur.execute(
+                "SELECT report_date, "
+                "       SUM(avg_price*head_count)/NULLIF(SUM(head_count),0) "
+                "FROM calf_sales "
+                f"WHERE weight_low = {int(weight_low)} "
+                "GROUP BY report_date").fetchall():
+            if p:
+                bracket[str(_db.iso(d))] = float(p)
+        rows = cur.execute(
+            "SELECT report_date, "
+            "       SUM(avg_price*head_count)/NULLIF(SUM(head_count),0), "
+            "       SUM(head_count) "
+            "FROM calf_sales "
+            f"WHERE weight_low = {int(weight_low)} "
+            "  AND location = ? AND state = ? "
+            "GROUP BY report_date ORDER BY report_date",
+            (barn, state)).fetchall()
+        for d, p, h in rows:
+            iso = str(_db.iso(d))
+            if not p or not h or int(h) < MIN_PRINT_HEAD or iso not in bracket:
+                continue
+            out.append({"date": iso, "price": float(p),
+                        "bracket": bracket[iso], "head": int(h)})
+    except Exception:
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
+
+
 def render(tile, muted="#6b7280", colors=None, watermark=None,
            key_prefix="basis"):
     """
@@ -860,3 +944,94 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
         f"in two lots and 900 in twenty are different kinds of evidence, which "
         f"is why the count is still shown even though it no longer gates a row."
     )
+
+
+    # ── One barn, against its bracket, over time ──────────────────────────────
+    #
+    # The third of the three charts added on 2026-10-22, and the one that could
+    # not simply copy the other two.
+    #
+    # ONE BARN, because that is this tab's unit. With several picked or none,
+    # `subject` falls back to the bracket, and charting the bracket against
+    # itself says nothing -- so the chart appears exactly when `focus` does.
+    # Pooling the picked barns was the other option and is the one the tiles
+    # above already refuse, for the reason written there: it would invent a
+    # composite barn nobody trades.
+    #
+    # AGAINST THE BRACKET RATHER THAN THE INDEX, and not to duplicate the Cash
+    # Feeder Prices tab -- see load_barn_history for the dates. vs FCI would
+    # have 13 points at best.
+    #
+    # It does NOT follow the vs FCI / vs bracket toggle above. A toggle whose
+    # other position draws a near-empty chart is a control that looks broken,
+    # and the caption says which comparison this is rather than leaving the
+    # reader to assume it tracks the radio.
+    if focus is not None:
+        _hist = load_barn_history(focus["barn"], focus["state"], wt)
+        if len(_hist) >= MIN_CHART_DAYS:
+            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+            st.markdown(f'<div class="sec-header">{_label(focus)} vs the '
+                        f'{wt}-{wt + 49} lb Bracket</div>',
+                        unsafe_allow_html=True)
+            _x = [r["date"] for r in _hist]
+            _bp = [r["price"] for r in _hist]
+            _kp = [r["bracket"] for r in _hist]
+            _gp = [a - b for a, b in zip(_bp, _kp)]
+
+            hfig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                 row_heights=[0.72, 0.28], vertical_spacing=0.06)
+            hfig.add_trace(go.Scatter(
+                x=_x, y=_bp, name=_label(focus), mode="lines+markers",
+                line=dict(color=C["neg"], width=1.6),
+                marker=dict(size=4),
+                hovertemplate="Barn: $%{y:.2f}<extra></extra>"), row=1, col=1)
+            hfig.add_trace(go.Scatter(
+                x=_x, y=_kp, name=f"{wt}-{wt + 49} lb bracket", mode="lines",
+                line=dict(color=C["text"], width=2),
+                hovertemplate="Bracket: $%{y:.2f}<extra></extra>"), row=1, col=1)
+            hfig.add_trace(go.Scatter(
+                x=_x, y=_gp, name="premium", mode="lines", showlegend=False,
+                line=dict(color=C["muted"], width=1),
+                hovertemplate="Premium: $%{y:+.2f}<extra></extra>"), row=2, col=1)
+            hfig.update_yaxes(title="$/cwt", tickprefix="$", row=1, col=1, **AXIS)
+            hfig.update_yaxes(title="premium", tickprefix="$", row=2, col=1, **AXIS)
+            hfig.update_xaxes(row=1, col=1, **AXIS)
+            hfig.update_layout(
+                paper_bgcolor=C["bg"], plot_bgcolor=C["bg"],
+                font=dict(color=C["text"], size=11),
+                hovermode="x unified", showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
+                            font=dict(color=C["muted"], size=10)),
+                margin=dict(l=55, r=20, t=15, b=40),
+                xaxis2=dict(**AXIS, title="", type="date"),
+                xaxis=dict(type="date"),
+                height=420)
+            if watermark:
+                watermark(hfig, size=0.3, opacity=0.06)
+            st.plotly_chart(hfig, use_container_width=True)
+
+            _above = sum(1 for g in _gp if g > 0)
+            _med = sorted(_gp)[len(_gp) // 2]
+            st.caption(_md(
+                f"Every sale day {_label(focus)} reported at {wt}-{wt + 49} lb, "
+                f"head-weighted like the table above, against the whole "
+                f"bracket on those same days. {len(_hist)} sale days, "
+                f"{_x[0]} to {_x[-1]}. It came in above the bracket on "
+                f"{100 * _above // len(_gp)}% of them; across all of them its "
+                f"median premium was ${_med:+.2f}/cwt. "
+                f"**Against the bracket, not the index, whichever way the "
+                f"toggle above is set** — the reconstruction only carries "
+                f"direct trade from {_cutoff_text()}, so a line against the "
+                f"index could honestly start no earlier than that and would "
+                f"have a handful of points. The bracket comparison prices this "
+                f"barn against its peers on the same days, so the index error "
+                f"very largely cancels. "
+                f"Days under {MIN_PRINT_HEAD} head are left out: a one-head "
+                f"print is not a market, and those were the extremes of this "
+                f"line."
+            ))
+        elif _hist:
+            st.caption(
+                f"{_label(focus)} has only {len(_hist)} qualifying sale "
+                f"day(s) at {wt}-{wt + 49} lb, too few to chart a history.")

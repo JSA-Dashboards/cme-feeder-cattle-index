@@ -550,3 +550,138 @@ def test_the_two_tabs_agree_on_what_a_gap_looks_like():
         pd.DataFrame([{label: 412.5}, {label: float("nan")}]))
     assert _rendered(out[label]) == ["412.50", ""]
     assert set(cfg) == {label}
+
+
+# ---------------------------------------------------------------------------
+# One barn against its bracket, over time. load_barn_history().
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def hist_db(tmp_path, monkeypatch):
+    """
+    calf_sales only -- load_barn_history never touches fci_daily, which is the
+    point of it. File-backed, because the loader closes the connection it is
+    handed and a shared :memory: would vanish under the second call.
+    """
+    path = tmp_path / "hist.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE calf_sales (report_date TEXT, location TEXT, state TEXT,"
+        " weight_low INTEGER, head_count INTEGER, avg_weight REAL,"
+        " avg_price REAL)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        bb, "_conn", lambda: (FakeDb(), sqlite3.connect(path)))
+    return path
+
+
+def _sold(path, iso, barn, head, price, state="MO", weight_low=700):
+    c = sqlite3.connect(path)
+    c.execute("INSERT INTO calf_sales VALUES (?,?,?,?,?,?,?)",
+              (iso, barn, state, weight_low, head, 725.0, price))
+    c.commit()
+    c.close()
+
+
+def test_the_bracket_line_is_every_barn_not_just_this_one(hist_db):
+    """
+    The comparison is the barn against its PEERS. If the bracket were computed
+    from the selected barn alone the premium would be zero on every day, and
+    the lower panel would be a flat line nobody could read anything from.
+    """
+    _sold(hist_db, "2026-10-01", "Joplin", 100, 400.0)
+    _sold(hist_db, "2026-10-01", "Carthage", 100, 300.0)
+    got = bb.load_barn_history("Joplin", "MO", 700)
+    assert len(got) == 1
+    assert got[0]["price"] == 400.0
+    assert got[0]["bracket"] == 350.0, (
+        "the bracket is not being taken over every barn: %r" % got[0])
+
+
+def test_a_ONE_HEAD_PRINT_is_not_a_point_on_the_line(hist_db):
+    """
+    THE GUARD. The five most extreme premiums in the live data came from
+    barn-days of 1, 7, 5, 7 and 1 head -- one of them -120.75 against a bracket
+    the barn normally tracks within a few dollars. They were the extremes of
+    the chart.
+
+    MIN_PRINT_HEAD is deliberately NOT MIN_HEAD: that one gates a barn over a
+    whole window, this gates one barn on one day, and at 700-749 lb the median
+    barn-day is 41 head.
+    """
+    _sold(hist_db, "2026-10-01", "Joplin", 100, 400.0)
+    _sold(hist_db, "2026-10-01", "Carthage", 100, 400.0)
+    _sold(hist_db, "2026-10-02", "Joplin", 1, 250.0)
+    _sold(hist_db, "2026-10-02", "Carthage", 100, 400.0)
+    got = bb.load_barn_history("Joplin", "MO", 700)
+    assert [r["date"] for r in got] == ["2026-10-01"], (
+        "a one-head print reached the line: %r" % [r["date"] for r in got])
+
+
+def test_a_day_on_the_threshold_is_kept(hist_db):
+    """The control: a floor that also dropped ordinary days would thin the
+    series rather than clean it."""
+    _sold(hist_db, "2026-10-01", "Joplin", bb.MIN_PRINT_HEAD, 400.0)
+    _sold(hist_db, "2026-10-01", "Carthage", 100, 400.0)
+    _sold(hist_db, "2026-10-02", "Joplin", bb.MIN_PRINT_HEAD - 1, 400.0)
+    _sold(hist_db, "2026-10-02", "Carthage", 100, 400.0)
+    got = [r["date"] for r in bb.load_barn_history("Joplin", "MO", 700)]
+    assert got == ["2026-10-01"], got
+
+
+def test_it_is_HEAD_weighted_like_the_rest_of_this_page(hist_db):
+    """
+    The tiles and the table on this tab are head-weighted and say so.
+    cash_calves.py is pound-weighted for its own reasons; borrowing that
+    formula here would draw a line that disagrees with the number directly
+    above it.
+
+    Two lots at the same barn, equal head, very different weights: pound
+    weighting would pull the average toward the heavier lot.
+    """
+    c = sqlite3.connect(hist_db)
+    c.executemany("INSERT INTO calf_sales VALUES (?,?,?,?,?,?,?)", [
+        ("2026-10-01", "Joplin", "MO", 700, 100, 500.0, 400.0),
+        ("2026-10-01", "Joplin", "MO", 700, 100, 900.0, 300.0),
+        ("2026-10-01", "Carthage", "MO", 700, 100, 725.0, 350.0)])
+    c.commit()
+    c.close()
+    got = bb.load_barn_history("Joplin", "MO", 700)
+    assert abs(got[0]["price"] - 350.0) < 1e-9, (
+        "head-weighting gives a flat 350; got %r" % got[0]["price"])
+    # pound-weighted would be (500*400 + 900*300) / (500+900) = 335.71
+    assert abs(got[0]["price"] - 335.714) > 1.0
+
+
+def test_a_barn_that_never_sold_at_this_weight_returns_nothing(hist_db):
+    _sold(hist_db, "2026-10-01", "Carthage", 100, 400.0)
+    assert bb.load_barn_history("Joplin", "MO", 700) == []
+
+
+def test_a_missing_table_degrades_quietly(monkeypatch):
+    """The rest of this module returns empty rather than raising on a backend
+    without the table; a chart must not be the one thing that breaks the tab."""
+    monkeypatch.setattr(bb, "_conn", lambda: (_ for _ in ()).throw(RuntimeError))
+    assert bb.load_barn_history("Joplin", "MO", 700) == []
+
+
+def test_the_chart_does_not_follow_the_vs_FCI_toggle():
+    """
+    A DELIBERATE ASYMMETRY, pinned so it is not "fixed" later.
+
+    calf_sales starts 2025-09-01 and INDEX_TRUSTWORTHY_FROM is 2026-08-28, so a
+    line against the index could honestly begin no earlier than the cutoff --
+    39 sale days exist on or after it, and the best-covered barn has 13. The
+    chart is therefore always barn-against-bracket, and the caption says so
+    rather than letting the radio above imply it switched.
+    """
+    import pathlib
+    src = pathlib.Path(bb.__file__).read_text(encoding="utf-8")
+    body = src[src.index("def load_barn_history"):]
+    body = body[:body.index("\ndef ")]
+    assert "fci_daily" not in body, (
+        "load_barn_history now reads fci_daily; if the chart is being pointed "
+        "at the index, check how many sale days survive INDEX_TRUSTWORTHY_FROM "
+        "before trusting the line")
+    assert bb.INDEX_TRUSTWORTHY_FROM.isoformat() == "2026-08-28"

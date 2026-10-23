@@ -685,3 +685,58 @@ def test_the_chart_does_not_follow_the_vs_FCI_toggle():
         "at the index, check how many sale days survive INDEX_TRUSTWORTHY_FROM "
         "before trusting the line")
     assert bb.INDEX_TRUSTWORTHY_FROM.isoformat() == "2026-08-28"
+
+
+def test_the_line_BREAKS_where_the_barn_stopped_selling():
+    """
+    A line drawn straight across a gap invents trades that did not happen.
+
+    A barn sells weekly -- the median spacing between one barn's sale days at a
+    bracket is 7 days. Billings MT has a gap of 105 days in the live data,
+    2026-05-28 to 2026-09-10, and joining it would draw three and a half months
+    of continuous trading that never occurred. El Reno and Beaver have no gap
+    over 21 days at all, so their lines must stay unbroken -- a rule that
+    chopped every series would be as wrong in the other direction.
+
+    This pins the rule, not the rendering: the chart passes connectgaps=False
+    and a None at each break, which is only meaningful if the breaks are in the
+    right places.
+    """
+    import datetime as dt
+    gap = bb.MAX_LINE_GAP_DAYS
+
+    def breaks(days):
+        x = [dt.date.fromisoformat(d) for d in days]
+        return [i for i in range(1, len(x)) if (x[i] - x[i - 1]).days > gap]
+
+    weekly = ["2026-09-%02d" % d for d in (1, 8, 15, 22, 29)]
+    assert breaks(weekly) == [], "a weekly seller was chopped up"
+
+    # the Billings shape: weekly, then a 105-day silence, then weekly again
+    stopped = ["2026-05-21", "2026-05-28", "2026-09-10", "2026-09-17"]
+    assert breaks(stopped) == [2], (
+        "the 105-day silence is still being drawn as a straight line")
+
+    # exactly on the threshold is not a break; one day past it is
+    assert breaks(["2026-09-01", "2026-09-01"]) == []
+    on = dt.date(2026, 9, 1) + dt.timedelta(days=gap)
+    past = dt.date(2026, 9, 1) + dt.timedelta(days=gap + 1)
+    assert breaks(["2026-09-01", on.isoformat()]) == []
+    assert breaks(["2026-09-01", past.isoformat()]) == [1]
+
+
+def test_the_stats_in_the_caption_ignore_the_drawing_breaks():
+    """
+    The breaks are a drawing decision, not missing observations. If the None
+    placeholders leaked into the premium list the median and the percentage
+    above the bracket would both be computed over a different population than
+    the one the caption claims.
+    """
+    import pathlib
+    src = pathlib.Path(bb.__file__).read_text(encoding="utf-8")
+    i = src.index("_gp = [a - b for a, b in zip(_bp, _kp)]")
+    tail = src[i:i + 4000]
+    assert "_med = sorted(_gp)[len(_gp) // 2]" in tail, (
+        "the median premium is no longer taken from the unbroken list")
+    assert "sum(1 for g in _gp if g > 0)" in tail, (
+        "the share above the bracket is no longer taken from the unbroken list")

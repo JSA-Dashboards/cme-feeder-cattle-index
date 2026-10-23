@@ -100,6 +100,14 @@ MIN_PRINT_HEAD = 10
 # 12 charts nearly every barn while keeping the genuinely sparse ones --
 # Belen has 8 over ten months -- out of a shape they cannot support.
 MIN_CHART_DAYS = 12
+# A LINE ACROSS A LONGER GAP THAN THIS INVENTS TRADES THAT DID NOT HAPPEN.
+# A barn sells weekly: the median spacing between one barn's sale days at a
+# bracket is 7 days. Three missed weeks is a barn that stopped, not a barn
+# between sales, and joining across it draws a straight line through months
+# of nothing. Measured at 700-749 lb: El Reno and Beaver have no gap over 21
+# days at all, so their lines are untouched; Billings has one of 105 days,
+# which is the case this exists for.
+MAX_LINE_GAP_DAYS = 21
 
 # How many barns the chart shows from each end of the ranking before pinned
 # barns are added. Named rather than written twice as a literal 10, because the
@@ -978,19 +986,51 @@ def render(tile, muted="#6b7280", colors=None, watermark=None,
             _kp = [r["bracket"] for r in _hist]
             _gp = [a - b for a, b in zip(_bp, _kp)]
 
+            # None at every gap longer than MAX_LINE_GAP_DAYS, with
+            # connectgaps=False below, so the line breaks where the barn did
+            # rather than running straight through the months it did not sell.
+            # The STATS above and below stay on the unbroken lists: a break is
+            # a drawing decision, not a missing observation.
+            _brk = [0] + [i for i in range(1, len(_x))
+                          if (_dt.date.fromisoformat(_x[i])
+                              - _dt.date.fromisoformat(_x[i - 1])).days
+                          > MAX_LINE_GAP_DAYS]
+
+            def _split(vals):
+                out = []
+                for i, v in enumerate(vals):
+                    if i and i in _brk:
+                        out.append(None)
+                    out.append(v)
+                return out
+
+            def _splitx(vals):
+                out = []
+                for i, v in enumerate(vals):
+                    if i and i in _brk:
+                        out.append(v)
+                    out.append(v)
+                return out
+
+            _xd, _bpd, _kpd, _gpd = (_splitx(_x), _split(_bp),
+                                     _split(_kp), _split(_gp))
+
             hfig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                                  row_heights=[0.72, 0.28], vertical_spacing=0.06)
             hfig.add_trace(go.Scatter(
-                x=_x, y=_bp, name=_label(focus), mode="lines+markers",
+                x=_xd, y=_bpd, name=_label(focus), mode="lines+markers",
+                connectgaps=False,
                 line=dict(color=C["neg"], width=1.6),
                 marker=dict(size=4),
                 hovertemplate="Barn: $%{y:.2f}<extra></extra>"), row=1, col=1)
             hfig.add_trace(go.Scatter(
-                x=_x, y=_kp, name=f"{wt}-{wt + 49} lb bracket", mode="lines",
+                x=_xd, y=_kpd, name=f"{wt}-{wt + 49} lb bracket",
+                mode="lines", connectgaps=False,
                 line=dict(color=C["text"], width=2),
                 hovertemplate="Bracket: $%{y:.2f}<extra></extra>"), row=1, col=1)
             hfig.add_trace(go.Scatter(
-                x=_x, y=_gp, name="premium", mode="lines", showlegend=False,
+                x=_xd, y=_gpd, name="premium", mode="lines",
+                showlegend=False, connectgaps=False,
                 line=dict(color=C["muted"], width=1),
                 hovertemplate="Premium: $%{y:+.2f}<extra></extra>"), row=2, col=1)
             hfig.update_yaxes(title="$/cwt", tickprefix="$", row=1, col=1, **AXIS)

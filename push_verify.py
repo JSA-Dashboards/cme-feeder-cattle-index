@@ -243,12 +243,46 @@ of completeness, so:
     0.49999999999999994 + 0.5 is exactly 1.0 as a double, so SQLite's
     ROUND(0.49999999999999994) is 1.0 where Snowflake's, on a FLOAT, is 0.0.
 
-    MEASURED EXPOSURE IN THE REAL DATA, re-derived read-only 2026-10-05 across
-    all 35 float columns: ZERO values sit within 1e-6 of a .5 boundary. The
-    closest approach in the whole database is 9.08e-4, at fci_daily.fci_value
-    = 262.21194990916575.
+    MEASURED EXPOSURE IN THE REAL DATA, re-derived read-only 2026-10-26 over
+    all 35 float columns: the two engines were asked for the pushed expression
+    CAST(ROUND(v * 10000) AS INTEGER) on every one of the 879,309 non-null
+    values -- the real SQLite for its side, half-away-from-zero for
+    Snowflake's -- and they agree on all of them. ZERO divergences.
 
-    THAT NUMBER USED TO BE THREE, AND WHY IT IS NOW ZERO MATTERS. On 2026-09-30
+    THAT IS A DIFFERENT CLAIM FROM THE ONE THIS PARAGRAPH USED TO MAKE, and
+    the swap is the point. It used to say that ZERO values sit within 1e-6 of
+    a .5 boundary. Nearness to a boundary is a PROXY for divergence, and the
+    proxy has now been wrong in both directions.
+
+    Too narrow, first. It stopped being true on 2026-10-26, when
+    fci_daily.same_day_avg_weight came in at 833.65625 -> 8336562.5, an exact
+    half. That is the SAFE case by this paragraph's own argument, and the two
+    engines do read it alike, so nothing was at risk -- but a census of
+    boundary-adjacent values now has to chase LIVE DATA. same_day_avg_weight
+    is pounds over head and lands on a dyadic fraction whenever the head count
+    carries enough factors of two; 224 is 2^5 x 7. That row is today's, still
+    filling, and one row in 677 has ever done it. Enumerating values like that
+    is the same mistake as pinning the row-level counts above, which are dated
+    rather than pinned for exactly this reason.
+
+    Too wide, second, and this is the more useful half. SWEPT AGAINST THE
+    LINKED SQLITE (3.49.1) RATHER THAN REASONED ABOUT: of the two million
+    halves k+0.5 for k in 0..2e6, positive and negative, exactly ONE has a
+    one-ULP-below neighbour the two engines read differently, and it is k = 0.
+    The add-0.5 carries only when the sum lands on a representable midpoint,
+    which at this data's magnitudes it does not -- 8336562.4999999991 and
+    8388607.4999999991 both come back 8336562 and 8388607 on both sides, and
+    8388608 is a power of two, so not even crossing a binade does it.
+
+    So the hazard is not "near any half". It is |scaled| < 1: a column value
+    within one ULP of +/-5e-05. The smallest |scaled| anywhere in this schema
+    is an exact 0.0 in cme_ftp_daily.reported_change, which is not near
+    anything. tests/test_push_verify_claims.py checks the engines against each
+    other value by value instead of checking the proxy, so it neither goes red
+    when a live row lands on a harmless half nor stays green if a genuine
+    divergence appears somewhere this prose did not predict.
+
+    THE CENSUS USED TO LIST THREE, AND WHY THEY WENT AWAY MATTERS. On 2026-09-30
     this paragraph listed 878.00155, 764.26255 and 782.93365, all three in
     cme_ftp_brackets.avg_weight, and singled out the last (El Reno, 2026-05-13,
     750 lb bracket) as sitting ONE ULP BELOW a half -- exactly the shape the
@@ -267,9 +301,14 @@ of completeness, so:
     within 1e-6 of a boundary.
 
     So a one-unit mismatch on a single float column and nothing else should be
-    investigated as arithmetic before corruption -- but that is a measurement
-    of the data as it stands, not a property of the schema, and it has already
-    changed once. Re-run it before leaning on it.
+    investigated as CORRUPTION BEFORE ARITHMETIC. That is the opposite of what
+    this sentence said until 2026-10-26, and the direct engine-against-engine
+    measurement above is what turned it round: arithmetic divergence needs
+    |scaled| < 1 and no value in this schema is within six orders of magnitude
+    of that, while the glue bug put three values on a boundary without anyone
+    noticing. Both halves are measurements of the data as it stands rather
+    than properties of the schema, and both have already changed once. Re-run
+    them before leaning on either.
 
 Placement: called from snowflake/02_migrate_data.py immediately after each
 table's COMMIT. Kept here, standalone and importable, because a guard that can

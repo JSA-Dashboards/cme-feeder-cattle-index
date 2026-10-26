@@ -83,13 +83,29 @@ each proof called uncovered() directly and none routed through the assertion.
 A KNOWN LIMIT, written down because it is invisible by design. This answers
 yes or no about a NAME, never about a slug, so when two slugs print one name
 (Torrington 2101/2103, Billings 1774/1777, La Junta 1901/1903, Brush
-1906/3090) losing one of the pair is silent -- the survivor still makes the
-name reachable. That is the right answer for a location-level check and it is
-not free. Measured on mars_sales since 2024-09-24, the largest single slug
-that could vanish this way is Torrington 2103 at 71 sale dates and 28,154
-head; La Junta 1901 is 47 dates and 12,838 head, Billings 1777 is 77 dates and
-7,785 head. Nothing in this file would notice any of them. Catching it needs a
-slug-level comparison against mars_sales, which is a different check.
+1906/3090, St. Onge 2019/2012) losing one of the pair is silent -- the
+survivor still makes the name reachable. That is the right answer for a
+location-level check and it is not free. Measured on mars_sales since
+2024-09-24, the largest single slug that could vanish this way is Torrington
+2103 at 71 sale dates and 28,154 head; La Junta 1901 is 47 dates and 12,838
+head, Billings 1777 is 77 dates and 7,785 head. Nothing in this file would
+notice any of them. Catching it needs a slug-level comparison against
+mars_sales, which is a different check.
+
+THAT LIMIT STOPPED BEING HYPOTHETICAL ON 2026-10-23, which is why the
+paragraph above now reads as a cost rather than a caveat. Our index printed
+$348.56 against $348.55 from both CIH and Compass. The whole gap was ONE LOT:
+14 head at $339.00 from the St. Onge Calf Auction (Wed-Seasonal), MARS slug
+2012, a second sale in a town the roster already covered through slug 2019.
+CME prints both as "Saint Onge", so the name was reachable, every Friday sale
+came through, and this file was green on the morning the number was wrong.
+
+It is the Humeston incident in the one shape this check was always going to
+miss, and the difference is instructive: Humeston was a town nobody had, which
+a name comparison finds, and St. Onge was a second sale day in a town
+everybody had, which only a slug comparison finds. A penny is also not the
+ceiling -- 14 head is the smallest the fault can be, and the sale is seasonal,
+so the same blind spot is sitting under a barn that will print bigger lots.
 """
 import ast
 import json

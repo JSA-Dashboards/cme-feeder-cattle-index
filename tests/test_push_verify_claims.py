@@ -25,8 +25,18 @@ red is the failure this prevents.
 WHAT IS PINNED AND WHAT IS DELIBERATELY NOT. Only figures that are properties
 of the SCHEMA or of the two engines' ARITHMETIC are pinned -- how many float
 columns there are, how many of them the outer ROUND changes, which way the
-error leans, and the .5-boundary census. Those move when something real
-changes, which is exactly when a human should re-read the paragraph.
+error leans, and whether the two engines read any float value differently.
+Those move when something real changes, which is exactly when a human should
+re-read the paragraph.
+
+The .5-boundary census WAS on that list and was taken off on 2026-10-26. It
+turned out not to be a property of the schema at all: fci_daily's
+same_day_avg_weight lands on an exact half whenever the day's head count
+carries enough factors of two, so the census was pinning a figure that
+changes with the morning's sales -- a row-level count wearing a schema
+claim's clothes. It is replaced by the question it was standing in for,
+which is whether SQLite and Snowflake round any value differently, and that
+one is stable.
 
 Row-level counts ("2,710 of 72,641 rows diverge") are NOT pinned. They grow
 every day the pipeline runs, so a test on them would fail every morning for a
@@ -140,6 +150,12 @@ def round_effect(conn, float_columns):
 
 
 DOC = pv.__doc__
+
+# The .5-boundary sentence that was withdrawn on 2026-10-26. Kept as a
+# constant so the guard and its own mutation test below are looking for
+# the identical string -- two copies of a banned phrase is how a ban
+# quietly stops covering the thing it names.
+CENSUS_CLAIM = "ZERO values sit within 1e-6 of a .5 boundary"
 CAST_DOC = pv._int_cast.__doc__
 
 
@@ -152,17 +168,6 @@ def flat(s: str) -> str:
 
 FLAT_DOC = flat(DOC)
 FLAT_CAST = flat(CAST_DOC)
-
-
-def census_block() -> str:
-    """Just the boundary table -- the indented 'value -> scaled  LABEL' lines.
-
-    Counting labels over the whole docstring would also count the section
-    heading that uses the same words, which is how the first draft of this
-    file managed to fail on correct prose.
-    """
-    return "\n".join(ln for ln in DOC.splitlines()
-                     if "->" in ln and "both engines" in ln)
 
 
 # ---------------------------------------------------------------------------
@@ -192,16 +197,129 @@ def test_the_float_column_count_in_the_prose_is_the_schemas_own(float_columns):
         "the stale '26 float columns' figure is back")
 
 
-def test_the_boundary_census_matches_the_data(conn, float_columns):
+def sqlite_pushed_int(conn, table, column):
+    """What the REAL SQLite returns for the expression the push actually uses.
+
+    Not modelled. push_verify builds CAST(ROUND(v * FLOAT_SCALE) AS INTEGER)
+    for this side, so that is what is asked, in one query per column rather
+    than one per value -- 879,309 values in about 1.4s, which is cheap enough
+    that the check can cover the whole schema instead of a sample.
     """
-    Every value within 1e-6 of a .5 boundary, which are exact halves and which
-    are not. The paragraph called all three exact halves; one is a single ULP
-    BELOW the boundary, which is the precise shape the same paragraph warns
-    about, so the error emptied the warning of its only real example.
+    return conn.execute(
+        f'SELECT "{column}", '
+        f'       CAST(ROUND("{column}" * {pv.FLOAT_SCALE}) AS INTEGER) '
+        f'FROM {table} WHERE "{column}" IS NOT NULL')
+
+
+def test_the_two_engines_agree_on_every_float_value_in_the_database(
+        conn, float_columns):
+    """
+    THE CHECK THE .5-BOUNDARY PARAGRAPH IS ACTUALLY ABOUT, asked directly.
+
+    What replaced what, and why. This used to count values sitting within
+    1e-6 of a .5 boundary and compare that count against a census typed into
+    the docstring. Nearness to a boundary is a PROXY for the two engines
+    disagreeing, and on 2026-10-26 the proxy failed in both directions at
+    once:
+
+      * too narrow -- fci_daily.same_day_avg_weight for that day scaled to
+        8336562.5, a dead-exact half, so the census went red over a value both
+        engines round identically. It is also LIVE DATA, today's row, still
+        filling. A test that has to be re-typed whenever a head count happens
+        to carry five factors of two is a test that gets deleted;
+
+      * too wide -- swept against this SQLite, only ONE of the two million
+        halves k+0.5 over k in 0..2e6 has a one-ULP-below neighbour the
+        engines read differently, and it is k = 0. Everything else the old
+        census would have flagged was never a hazard.
+
+    So ask the question instead of its proxy: run the pushed expression on
+    both sides for every float value and compare. That is the same method
+    CLAUDE.md prescribes -- "comparing a number against an independently
+    derived number" -- and it is insensitive to which harmless halves today's
+    data happens to contain.
+
+    SQLite is real and Snowflake is modelled, which is the one weakness here.
+    half_away() is checked against the live engine (see its docstring) and
+    this suite deliberately needs no credentials; a model that drifted from
+    Snowflake would make this quiet rather than loud, which is why the model
+    lives in one place with its verification date on it.
+    """
+    compared = 0
+    bad = []
+    for t, c in float_columns:
+        for v, got in sqlite_pushed_int(conn, t, c):
+            try:
+                s = float(v) * pv.FLOAT_SCALE
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(s):
+                continue
+            compared += 1
+            want = half_away(s)
+            if got != want:
+                bad.append((t, c, float(v), s, got, want))
+
+    assert compared > 100_000, (
+        f"only {compared} float values were compared; the schema holds far "
+        f"more, so something filtered them out and this passed vacuously")
+    assert not bad, (
+        f"{len(bad)} value(s) round differently on the two engines under the "
+        f"pushed expression, so the push will mismatch on them: {bad[:5]}")
+
+
+def test_that_check_can_still_fail(conn):
+    """
+    THE MUTATION. The test above is a wall of agreement; a wall of agreement
+    is indistinguishable from a comparison that stopped comparing.
+
+    0.49999999999999994 is the real divergence and the one the docstring
+    names. SQLite's ROUND adds 0.5 and truncates the magnitude, and that
+    addition carries here because the sum lands on a representable midpoint
+    just under 1.0; Snowflake, rounding half away from zero on a FLOAT, reads
+    it as 0. Fed through the identical code path as a one-row table, the
+    assertion above must go red.
+    """
+    mem = sqlite3.connect(":memory:")
+    try:
+        mem.execute("CREATE TABLE t (v REAL)")
+        # Stored pre-scaled: the column value is this over FLOAT_SCALE, and
+        # that quotient is not itself representable, so planting the quotient
+        # would not reproduce the scaled float.
+        mem.execute("INSERT INTO t VALUES (?)",
+                    (0.49999999999999994 / pv.FLOAT_SCALE,))
+        (v, got), = sqlite_pushed_int(mem, "t", "v")
+        s = float(v) * pv.FLOAT_SCALE
+        assert s == 0.49999999999999994, (
+            f"the planted value did not scale back to the hazard: {s!r}")
+        assert got != half_away(s), (
+            "SQLite and the Snowflake model AGREE on the one value the "
+            "docstring says they do not. Either SQLite's ROUND changed under "
+            "us or half_away() is no longer modelling Snowflake -- in both "
+            "cases the test above has stopped being able to fail, and the "
+            "docstring paragraph needs re-deriving, not patching.")
+    finally:
+        mem.close()
+
+
+def test_the_paragraph_does_not_claim_a_clean_boundary_census_again(
+        conn, float_columns):
+    """
+    What the prose is allowed to say. The old sentence -- "ZERO values sit
+    within 1e-6 of a .5 boundary" -- was a standing claim about data that
+    moves daily, and it went false the first day a head count was divisible
+    by 32.
+
+    So two things are pinned, both re-derived rather than typed: the engines'
+    verdict, which is stable, and an admission in the prose that the boundary
+    population is not. The near-boundary count is reported in the failure
+    message instead of asserted, which is the same treatment the row-level
+    counts get for the same reason.
     """
     near = []
     for t, c in float_columns:
-        for (v,) in conn.execute(f'SELECT "{c}" FROM {t} WHERE "{c}" IS NOT NULL'):
+        for (v,) in conn.execute(
+                f'SELECT "{c}" FROM {t} WHERE "{c}" IS NOT NULL'):
             try:
                 s = float(v) * pv.FLOAT_SCALE
             except (TypeError, ValueError):
@@ -209,44 +327,80 @@ def test_the_boundary_census_matches_the_data(conn, float_columns):
             if math.isfinite(s) and abs(s - math.floor(s) - 0.5) <= 1e-6:
                 near.append((t, c, float(v), s))
 
-    halves = [n for n in near if n[3] == math.floor(n[3]) + 0.5]
-    others = [n for n in near if n not in halves]
-    block = census_block()
+    assert flat("ZERO divergences") in FLAT_DOC, (
+        "the paragraph no longer states the engine-against-engine result, "
+        "which is the only standing claim it is entitled to make")
+    # The old sentence is still in the prose, because the paragraph explains
+    # what it replaced and why -- so BANNING the string outright would fail on
+    # correct text, the exact trap the order-dependence test below documents.
+    # What is banned is the sentence standing as a CLAIM: it may appear only
+    # as the thing being withdrawn, immediately after "used to say".
+    hits = [i for i in range(len(FLAT_DOC))
+            if FLAT_DOC.startswith(CENSUS_CLAIM, i)]
+    assert len(hits) == 1, (
+        f"the withdrawn boundary-count claim appears {len(hits)} times in the "
+        f"prose; it is allowed once, as history")
+    lead = FLAT_DOC[max(0, hits[0] - 60):hits[0]]
+    assert "used to say" in lead, (
+        f"the boundary-count claim is being stated as fact again rather than "
+        f"as the withdrawn one -- it reads {lead!r}. {len(near)} value(s) sit "
+        f"within 1e-6 of a .5 boundary right now, on live data: "
+        f"{[(t, c, v) for t, c, v, _ in near][:5]}")
+    assert flat("LIVE DATA") in FLAT_DOC, (
+        "the warning that the boundary population moves has been dropped; "
+        "without it the next reader re-pins it")
 
-    # Every such value must appear in the census, with its scaled form.
-    for t, c, v, s in near:
-        assert repr(v) in block, (
-            f"{t}.{c} = {v!r} sits within 1e-6 of a .5 boundary and the "
-            f"docstring's census does not list it")
-        assert repr(s) in block, (
-            f"{v!r} scales to {s!r}, which the docstring's census omits")
 
-    assert len(block.splitlines()) == len(near), (
-        f"{len(near)} values sit within 1e-6 of a .5 boundary; the census "
-        f"lists {len(block.splitlines())}")
-    assert block.count("exact half") == len(halves), (
-        f"{len(halves)} of the boundary values are exact halves; the "
-        f"census labels {block.count('exact half')}")
-    assert block.count("ONE ULP BELOW") == len(others), (
-        f"{len(others)} boundary value(s) are NOT exact halves; the census "
-        f"labels {block.count('ONE ULP BELOW')}. Calling a near-miss an exact "
-        f"half is what made this paragraph reassuring and wrong.")
+def test_that_prose_guard_can_fail():
+    """
+    THE MUTATION for the guard above, which is a string check and so the
+    easiest kind to write unfalsifiably. Three checks in this project turned
+    out to be incapable of failing; CLAUDE.md's rule is to prove otherwise.
 
-    # ZERO is now the expected count, and the assertion below must tolerate it.
-    # On 2026-09-30 three values sat near a boundary, all in
-    # cme_ftp_brackets.avg_weight. All three turned out to be PARSER ARTEFACTS:
-    # cme_ftp.py's token path glued two columns, so "782.93 365..." became the
-    # single value 782.93365, and the five-decimal precision that put them on a
-    # boundary was never in CME's file. The 2026-10-05 slice-first fix removed
-    # them. Asserting "exactly one column" was right about the data and wrong as
-    # an invariant -- it fails the moment the data gets CLEANER, which is the
-    # worst time for a test to go red.
-    tables = {f"{t}.{c}" for t, c, _, _ in near}
-    if not near:
-        return
-    assert len(tables) == 1 and "cme_ftp_brackets.avg_weight" in tables, (
-        f"the boundary values are no longer confined to "
-        f"cme_ftp_brackets.avg_weight: {sorted(tables)}")
+    The same assertion, run against prose that asserts the withdrawn claim
+    instead of withdrawing it, must reject.
+    """
+    restated = flat(
+        "MEASURED EXPOSURE IN THE REAL DATA: ZERO values sit within 1e-6 of a "
+        ".5 boundary, so the push is safe.")
+    hits = [i for i in range(len(restated))
+            if restated.startswith(CENSUS_CLAIM, i)]
+    assert len(hits) == 1
+    assert "used to say" not in restated[max(0, hits[0] - 60):hits[0]], (
+        "the guard would pass on prose that re-asserts the withdrawn claim, "
+        "so it is not checking anything")
+
+
+def test_the_hazard_the_paragraph_names_is_the_one_that_exists(conn,
+                                                               float_columns):
+    """
+    The docstring narrows the hazard from "near any half" to |scaled| < 1.
+    That is a claim about this schema's RANGE, not about rounding, and it is
+    the reason a live exact half can be waved through -- so it is re-derived
+    here rather than trusted.
+
+    If a float column ever does carry a value that tiny, this goes red and the
+    paragraph's reasoning has to be re-read before the next push, even though
+    the engines may still agree on it today.
+    """
+    smallest = None
+    for t, c in float_columns:
+        for (v,) in conn.execute(
+                f'SELECT "{c}" FROM {t} '
+                f'WHERE "{c}" IS NOT NULL AND "{c}" <> 0'):
+            try:
+                s = abs(float(v) * pv.FLOAT_SCALE)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(s) and (smallest is None or s < smallest[0]):
+                smallest = (s, t, c, float(v))
+    assert smallest is not None, "no non-zero float values at all"
+    assert smallest[0] >= 1.0, (
+        f"{smallest[1]}.{smallest[2]} = {smallest[3]!r} scales to "
+        f"{smallest[0]!r}, inside the |scaled| < 1 band the docstring says "
+        f"this schema stays out of")
+    assert flat("|scaled| < 1") in FLAT_DOC
+
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,39 @@ committing, not after.
 
     .venv/Scripts/python.exe -m pytest tests/ -q      # all must pass
 
+### When a date will NOT match, and it is not a bug
+
+**AMS revises a report after CME has printed, and CME does not go back.**
+2026-10-06 through 2026-10-19 ran 1-2 cents ABOVE CME while both sides of the
+run were exact. Nothing in this repo was wrong. McAlester OK (slug 1827) was
+published with 26 qualifying head on 10/06 and USDA later cut it to 21 — the
+800 lot (2 head @ $260.19) and the 850 lot (2 head @ $255.91) withdrawn, and
+the 750 lot corrected from 5 head @ $310.16 to 4 @ $313.97. Same barn on
+10/13, 8 head cut to 6. CME's file still carries the originals.
+
+The proof is our own git history, not a code reading: `data/mars_history.db`
+at 3a0d264 (2026-10-09) holds those four lots, and they aggregate to
+26 head / 749.62 lb / $321.62 — which is CME's published McAlester row to the
+cent. Restore them and the whole run collapses, worst |diff| 0.0223 -> 0.0048,
+i.e. exact everywhere at CME's 2dp. Dropping them is `store_slug_rows()`
+working as designed (1952483), so "fixing" this means re-adding lots USDA has
+withdrawn.
+
+CLAUDE.md already said this reconstruction tracks CME's FINAL value and
+differs from CME's FIRST print by whatever had not landed yet. This is the
+mirror image: CME's first print can be SHORT of the truth, and its final print
+can be LONG of it. What is actually established is that CME had not restated
+10/06 as of the 2026-10-23 pull, 17 days after the sale and well after the AMS
+revision — not that CME never restates. Re-pull before assuming a date is
+still off.
+
+**Read the window boundaries before believing any other story.** A wrong sale
+day shows up on exactly the five index dates whose 7-day window contains it.
+Here sale day 10-06 covers index 10-06..10-12 and sale day 10-13 covers
+10-13..10-19 — which is the run, split at exactly the right place, with the
+two sub-runs sized by their own head (5 head -> ~2.0 cents, 2 head -> ~0.7).
+That alignment identified the two sale days before any barn was named.
+
 ## The index, per CME Rule 10203 (verified against the rulebook, not inferred)
 
 - **7 calendar days ending on the index date.** Not business days.
@@ -280,6 +313,15 @@ Every one of these failed **silently**. None raised.
 - **Zero is not a price.** 37% of Direct Hay rows carry a literal `0` on
   Ask/Offer lines. Store NULL. Texas and Missouri are 100% zero and have no
   usable hay price at all.
+- **A date offset in `mars_sales` is NOT an offset in the index.** El Reno is
+  stored on Tuesday and Clovis on Wednesday, one day earlier than CME files
+  each, every week — and it is already corrected. `recompute_fci_daily()`
+  buckets through `shifted_bucket_date()`, not the raw `report_date` column,
+  so a diff of `mars_sales.report_date` against `cme_ftp_locations` prints a
+  standing offset that the index never sees. Diffed raw, 2026-10-06 is 1,147
+  head out; diffed through `bucketing`, it is 5. Cost most of a session
+  chasing El Reno, and the giveaway was there from the start: the offset is
+  present every week including the ones that match CME exactly.
 - **As-fed is not dry matter.** Wet distillers at $52/ton is 65-70% water —
   $160/ton of actual feed, near parity with dry at $166. Mixing bases is a 3x
   error. Use `feed_bids.dm_price()`.

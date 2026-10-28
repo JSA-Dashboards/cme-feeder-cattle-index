@@ -147,9 +147,45 @@ identical (this one calls `set_page_config`, loads `.env`, uses its own
 palette), **but a logic fix belongs in both**. Shared modules must stay
 byte-identical; `tests/test_no_drift.py` compares them.
 
-Deployment is Streamlit **Community Cloud** at jsa-livestock.streamlit.app, not
-Streamlit in Snowflake. The webhook returns 200 and does nothing — Ross must
-reboot the app by hand for a change to go live.
+Deployment is Streamlit **Community Cloud**, not Streamlit in Snowflake. The
+webhook returns 200 and does nothing — Ross must reboot the app by hand for a
+change to go live.
+
+**THERE ARE TWO DEPLOYMENTS, AND THIS LINE SAID ONE UNTIL 2026-10-28.** Both
+run the same repo on `master` and differ only in the main file the console is
+pointed at:
+
+| main file | URL | who |
+|---|---|---|
+| `Home.py` | jsa-livestock.streamlit.app | staff |
+| `Client.py` | jsa-livestock-client.streamlit.app | clients |
+
+`Client.py` is six lines: it calls `portal_view.set_client()` and then
+`runpy.run_path`s `Home.py`. Same fifteen dashboards, same CME Feeder Cattle
+Index page, same Snowflake data, with the working tools and raw-data tabs
+taken out. So **a correction to a published number is stale on both** until
+each one restarts, and "reboot the dashboard" is ambiguous unless somebody
+says which. The portal's own CLAUDE.md has the deploy mechanics and puts it
+as "a key rotation is now two consoles, and a push is two reboots".
+
+**But a sleeping app needs no reboot, which is the part that is easy to get
+backwards.** Checked on 2026-10-28 rather than assumed: the client app was
+serving "This app has gone to sleep due to inactivity", so it had no process
+and no warm caches, and it cold-starts on whatever Snowflake holds the next
+time a client opens it. Rebooting it would have achieved nothing, and waking
+it to prove the point would have left a process idling. The staff app was
+awake and did need the reboot. **Read the moon icon in the console, or just
+open the URL — do not reboot both on principle.**
+
+Caches are the whole reason a reboot matters here: the page's loaders are
+`@st.cache_data(ttl=300)` and `ttl=3600`, so an awake app serves the old
+number for up to an hour on its own. That is also the honest answer to "is a
+reboot even needed" — it is a question of how long, not whether.
+
+**"Delete app" sits directly below "Reboot app"** in the ⋮ menu. Click by
+element reference, never by coordinate. The confirm dialog reads "This will
+disrupt all current users". The portal's CLAUDE.md adds: ask before rebooting,
+because Ross writes the daily letter on the staff app.
 
 ### The 6 State tab, and the one thing it changed about this process
 

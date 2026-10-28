@@ -106,6 +106,39 @@ a name comparison finds, and St. Onge was a second sale day in a town
 everybody had, which only a slug comparison finds. A penny is also not the
 ceiling -- 14 head is the smallest the fault can be, and the sale is seasonal,
 so the same blind spot is sitting under a barn that will print bigger lots.
+
+IT DID NOT TAKE A WEEK. On 2026-10-28, CIH's 10/27 sheet carried "Mobridge
+Calf Auction (Tue-Seasonal) - Mobridge, SD" at 376 head and $362.30, and we
+held none of it: slug 2010, a Tuesday sale in a town the roster covered
+through 2025, the Thursday exchange. Ours read $350.54 against CIH's $350.82
+and the slug brings it to $350.8167 -> $350.82, to the cent. 28 cents, which
+is the bigger lots arriving two paragraphs after they were predicted.
+
+And CME had already told us, which is the part worth sitting with: it printed
+Mobridge on TUESDAY 2024-10-29 at 134 head while we held nothing, and this
+file was green through all of it, because 2025 kept the name reachable the
+whole time. Two years of a standing answer to a question nobody could ask
+here.
+
+THE SWEEP THAT FINDS THESE, and the trap inside it. AMS's own catalogue
+(GET /reports, 1,051 reports) has 191 whose title ends in one of the 12 index
+states; 96 are now rostered and 95 are not. That diff is the slug-level check
+this docstring keeps calling "a different check", and it is preemptive in a
+way both the name comparison and a weekday comparison are not -- it found
+Mobridge from AMS's catalogue before CME had printed the day at all.
+
+But a slug in that diff is NOT automatically a slug to add. Ft. Pierre Calf
+Auction (Wed-Seasonal), slug 2009, looks identical to Mobridge 2010 -- same
+family, same naming, same unrostered town-with-a-sibling -- and rostering it
+would have DOUBLE-COUNTED 1,065 head into 2026-05-22, because AMS republishes
+that Friday sale under the seasonal slug and we already hold it through 2021.
+CME printed 1,065, not 2,130. The dry run showed it as six May dates swinging
+up to 2.1 and it read like an improvement on three of them.
+
+So the rule for anything this sweep turns up: before adding a slug, ask
+whether its qualifying sale days already have head under another slug in the
+same town, and what CME printed for that town that day. Mobridge passed
+(nothing held, CME printed 134 where we held none); Ft. Pierre failed.
 """
 import ast
 import json
@@ -755,8 +788,14 @@ def test_known_good_barn_removed_from_the_roster_is_named(conn, tmp_path):
 
 
 @pytest.mark.parametrize("slug_id,newly_reported", [
-    # the other four barns added on 2026-09-24
-    (2025, {"Mobridge"}),
+    # Mobridge was a one-slug town until 2026-10-28 and this case read
+    # (2025, {"Mobridge"}). It is a PAIR now -- 2025 is the Thursday exchange,
+    # 2010 the Tue-Seasonal calf auction -- so dropping either one leaves the
+    # name reachable through the other, exactly as Brush does below. The
+    # expectation moved because the data moved, not because the check softened:
+    # the both-dropped case is parametrised in the next test.
+    (2025, set()),
+    (2010, set()),
     # Fort Collins comes back under BOTH spellings, which is the regression
     # pin for norm()'s ft -> fort rule: before it, "Ft. Collins" was reported
     # as a missing barn while slug 1863 was sitting in the roster.
@@ -789,6 +828,13 @@ def test_removing_any_one_barn_names_exactly_that_barn(conn, tmp_path,
 
 @pytest.mark.parametrize("slug_ids,newly_reported", [
     ([1906, 3090], {"Brush"}),
+    # Mobridge, as of 2026-10-28. 2010 is the Tue-Seasonal calf auction, added
+    # after CIH's 10/27 sheet showed 376 head of it that we held none of --
+    # and after CME's own file turned out to have printed Mobridge on Tuesday
+    # 2024-10-29 at 134 head while this suite stayed green, because 2025 kept
+    # the NAME reachable the whole time. That is the limit in this file's
+    # docstring, caught in the wild for the second time in six days.
+    ([2025, 2010], {"Mobridge"}),
     # the lajunta -> la junta pin: five spellings, THREE slugs since 2026-10-21,
     # and the roster has to lose all of them before any spelling is reported.
     # 1902 is the Winter Livestock SEASONAL Monday sale, added after CME printed
@@ -818,8 +864,11 @@ def test_the_biggest_gap_is_named_first(conn, tmp_path):
     barn that costs the most, not the one that sorts first alphabetically.
     Drop Mobridge (90,869 hd all-time) and Fort Collins (6,135) together:
     alphabetical order would put Fort Collins first.
+
+    BOTH Mobridge slugs go, since 2026-10-28: 2010 would otherwise keep the
+    name reachable and the test would be asserting an ordering over one item.
     """
-    sandbox = _sandbox_roster(tmp_path, [2025, 1863])
+    sandbox = _sandbox_roster(tmp_path, [2025, 2010, 1863])
     found = uncovered(conn, sandbox)
     assert [n for n in found if n in ("Mobridge", "Fort Collins")] == [
         "Mobridge", "Fort Collins"]

@@ -13,10 +13,25 @@ Every case below is therefore paired: a state where CME IS behind, and the
 neighbouring state where it is not, because a guard that fires on a Saturday
 morning is one that gets switched off.
 
-The clock is CENTRAL and the band (13:04-14:04) is measured off CME's own MDTM
+The clock is CENTRAL and the band (13:04-15:05) is measured off CME's own MDTM
 stamps. scripts/cme_pull.ps1 records the five-hour error that came of reading
 those as UTC; nothing here may be re-derived from our ingest logs, which record
 when we looked rather than when CME published.
+
+TWO GATES, AND THE AFTERNOON MOVED. index_dates carries PUBLISH_EARLIEST
+(13:04, "could exist" -- what catch_up_dates will ASK for) and PUBLISH_OVERDUE
+(16:05, "should exist" -- what publication_status calls LATE). They were one
+constant at 14:05 until 2026-10-30, which is how its value drifted: moving it
+to fix either job silently broke the other.
+
+So a 14:15 in this file used to mean "past the deadline" and now means an
+ordinary afternoon. That is not the tests being bent to fit the code -- it is
+the correction. Measured over 159 business-day index dates, 42.1% of CME's
+prints land after 14:04, so the old clock called two afternoons in five late.
+The cost, stated rather than hidden: no scheduled run falls after 16:05, so a
+genuinely missing print is now reported by the next morning's 07:45 rather
+than the same afternoon's pull. CME's file is a scorecard and not an input to
+the index, which is what makes that trade payable.
 """
 from datetime import date, datetime
 
@@ -39,13 +54,21 @@ def overdue(series_end, now):
 
 
 class TestTheMorningThatProducedThis:
-    def test_the_2026_10_21_pull_that_called_itself_current(self):
+    def test_the_2026_10_21_pull_at_1415_cannot_yet_call_it_late(self):
         """
-        The live state at 14:15 on 2026-10-21. We held through 10-19; CME's own
-        clock says 10-20 was due at 14:05 that afternoon and no FC261020.txt
-        ever appeared.
+        The live state at 14:15 on 2026-10-21. We held through 10-19 and no
+        FC261020.txt ever appeared -- but at 14:15 that is not yet news, and
+        saying so would be the false alarm that gets a guard switched off.
+
+        MDTM says 10-20 was eventually posted on 10-22 at 20:48, so CME really
+        was late. The point is that 14:15 could not know it: 42.1% of ordinary
+        prints land after 14:04.
         """
-        assert overdue("2026-10-19", "2026-10-21T14:15") == ["2026-10-20"]
+        assert overdue("2026-10-19", "2026-10-21T14:15") == []
+
+    def test_but_by_1615_the_same_day_it_is_owed(self):
+        """The other half of the pair -- the hour at which absence is news."""
+        assert overdue("2026-10-19", "2026-10-21T16:15") == ["2026-10-20"]
 
     def test_the_2026_10_20_pull_the_day_before_was_genuinely_current(self):
         """
@@ -55,25 +78,32 @@ class TestTheMorningThatProducedThis:
         assert overdue("2026-10-19", "2026-10-20T14:15") == []
 
     def test_by_the_next_afternoon_two_prints_are_owed(self):
-        assert overdue("2026-10-19", "2026-10-22T14:15") == ["2026-10-20",
+        assert overdue("2026-10-19", "2026-10-22T16:15") == ["2026-10-20",
                                                              "2026-10-21"]
 
 
 class TestTheDeadlineWithinTheDay:
     """
-    CME publishes index date D on the next business day between 13:04 and
-    14:04. Before 14:05 on that day, D is not late -- it is pending.
+    CME publishes index date D on the next business day, between 13:04 and
+    15:05 Central for an ordinary print. Before PUBLISH_OVERDUE on that day,
+    D is not late -- it is pending.
     """
 
     def test_before_the_deadline_todays_due_print_is_not_yet_owed(self):
         assert overdue("2026-10-20", "2026-10-22T13:00") == []
 
-    def test_after_the_deadline_it_is(self):
-        assert overdue("2026-10-20", "2026-10-22T14:15") == ["2026-10-21"]
+    def test_a_mid_afternoon_print_is_still_merely_pending(self):
+        """15:00 is INSIDE the measured band -- p90 is 15:05. The old 14:05
+        clock called this late, and it is the commonest way the banner was
+        wrong."""
+        assert overdue("2026-10-20", "2026-10-22T15:00") == []
 
-    def test_the_boundary_is_1405_exactly(self):
-        assert overdue("2026-10-20", "2026-10-22T14:04") == []
-        assert overdue("2026-10-20", "2026-10-22T14:05") == ["2026-10-21"]
+    def test_after_the_deadline_it_is(self):
+        assert overdue("2026-10-20", "2026-10-22T16:15") == ["2026-10-21"]
+
+    def test_the_boundary_is_1605_exactly(self):
+        assert overdue("2026-10-20", "2026-10-22T16:04") == []
+        assert overdue("2026-10-20", "2026-10-22T16:05") == ["2026-10-21"]
 
 
 class TestWeekendsAndHolidays:
@@ -89,7 +119,7 @@ class TestWeekendsAndHolidays:
         assert overdue("2026-10-22", "2026-10-25T09:00") == []
 
     def test_monday_afternoon_owes_fridays_print_and_no_weekend_dates(self):
-        got = overdue("2026-10-22", "2026-10-26T14:15")
+        got = overdue("2026-10-22", "2026-10-26T16:15")
         assert got == ["2026-10-23"], (
             "a weekend date was counted as owed, or Friday's was missed: %s"
             % got)
@@ -100,7 +130,7 @@ class TestWeekendsAndHolidays:
         their file carries an index value with same-day head 0. A holiday
         calendar here would quietly forgive a genuinely missing print.
         """
-        assert overdue("2026-09-04", "2026-09-08T14:15") == ["2026-09-07"]
+        assert overdue("2026-09-04", "2026-09-08T16:15") == ["2026-09-07"]
 
 
 class TestDueThroughItself:
@@ -128,7 +158,7 @@ class TestDegradation:
         as owed would be true and useless, and would bury the one line that
         matters on the morning it appears.
         """
-        s = cme_ftp.publication_status(None, dt("2026-10-22T14:15"))
+        s = cme_ftp.publication_status(None, dt("2026-10-22T16:15"))
         assert s["overdue"] == []
         assert s["due_through"] == d("2026-10-21")
 
@@ -153,7 +183,7 @@ def test_the_overdue_list_is_oldest_first_and_contiguous():
     The log prints the first few, so the first one named must be the oldest
     missing print -- the one at risk of ageing out of the pull's lookback.
     """
-    got = cme_ftp.publication_status(d("2026-10-14"), dt("2026-10-22T14:15"))["overdue"]
+    got = cme_ftp.publication_status(d("2026-10-14"), dt("2026-10-22T16:15"))["overdue"]
     assert got == [d(x) for x in ("2026-10-15", "2026-10-16", "2026-10-19",
                                   "2026-10-20", "2026-10-21")]
 
@@ -318,3 +348,67 @@ def test_both_scheduled_jobs_ask_for_the_gap_rather_than_a_window():
         assert "--start" not in joined, (
             "%s is back on a fixed lookback window, which is what made a long "
             "outage unrecoverable: %s" % (name, joined))
+
+
+# ---------------------------------------------------------------------------
+# The two gates, and the regression the split exists to prevent.
+# ---------------------------------------------------------------------------
+
+import index_dates  # noqa: E402
+
+
+class TestTheTwoGates:
+    def test_the_fetch_gate_is_strictly_earlier_than_the_overdue_gate(self):
+        """
+        THE INVARIANT THE WHOLE SPLIT RESTS ON. Fetching must start before
+        warning does. Reversed, the pull would stop asking for a print at the
+        same moment the page started calling it missing -- a dashboard
+        complaining about a file nothing is fetching any more.
+        """
+        early = (index_dates.PUBLISH_EARLIEST_HOUR,
+                 index_dates.PUBLISH_EARLIEST_MINUTE)
+        late = (index_dates.PUBLISH_OVERDUE_HOUR,
+                index_dates.PUBLISH_OVERDUE_MINUTE)
+        assert early < late, (
+            "PUBLISH_EARLIEST %s is not before PUBLISH_OVERDUE %s" % (early, late))
+
+    def test_the_fetch_gate_opens_at_1304(self):
+        before = cme_ftp.fetchable_through(dt("2026-10-22T13:03"))
+        after = cme_ftp.fetchable_through(dt("2026-10-22T13:04"))
+        assert before == d("2026-10-20")
+        assert after == d("2026-10-21")
+
+    def test_an_ordinary_afternoon_is_fetchable_but_not_yet_overdue(self):
+        """
+        The gap between the gates is the whole point: between 13:04 and 16:05
+        the pull asks for today's print and the page says nothing about it.
+        """
+        now = dt("2026-10-22T14:15")
+        assert cme_ftp.fetchable_through(now) == d("2026-10-21")
+        assert cme_ftp.due_through(now) == d("2026-10-20")
+
+
+class TestTheAfternoonPullStillAsks:
+    """
+    THE REGRESSION THIS SPLIT EXISTS TO PREVENT. catch_up_dates bounds itself
+    by fetchable_through. Point it at due_through instead -- the obvious
+    "simplification" -- and the 14:15 scheduled pull stops requesting the
+    print CME posted at 13:35, every single day, silently.
+    """
+
+    def test_the_1415_pull_asks_for_todays_expected_print(self):
+        have = [x.isoformat() for x in business_days("2026-07-01", "2026-10-20")]
+        got = cme_ftp.catch_up_dates(have, dt("2026-10-22T14:15"))
+        assert d_("2026-10-21") in got, (
+            "the afternoon pull no longer asks for the print due today: %s" % got)
+
+    def test_that_regression_check_can_actually_fail(self):
+        """
+        Bound the same call by the OVERDUE gate and 10-21 must drop out --
+        proof the test above is asserting something that can be false.
+        """
+        have = {x.isoformat() for x in business_days("2026-07-01", "2026-10-20")}
+        now = dt("2026-10-22T14:15")
+        due = cme_ftp.due_through(now)
+        would_ask = [x for x in cme_ftp.catch_up_dates(have, now) if x <= due]
+        assert d_("2026-10-21") not in would_ask

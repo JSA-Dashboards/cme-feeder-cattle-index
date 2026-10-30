@@ -57,8 +57,8 @@ from datetime import date, timedelta
 # this module, with its ftplib and its database, is not. Imported here
 # rather than re-homed at the call sites so cme_ftp.due_through() keeps
 # working for backfill_ftp.py, check_run.py and their tests.
-from index_dates import (due_through, next_index_date,  # noqa: F401
-                         publication_status)
+from index_dates import (due_through, fetchable_through,  # noqa: F401
+                         next_index_date, publication_status)
 
 import snowflake_db as db
 
@@ -593,10 +593,15 @@ def catch_up_dates(have, now, horizon_days=CATCHUP_HORIZON_DAYS):
     fetching them is a guaranteed 550 every single run, and counting those in
     "N had no file" is what let a real missing print hide among them.
 
-    Nothing past due_through is attempted, because a date CME cannot have
-    published yet is not a gap.
+    Nothing past fetchable_through is attempted, because a date CME cannot
+    have published yet is not a gap.
+
+    FETCHABLE, NOT DUE. These are different gates and this call wants the
+    early one: `due_through` is the hour at which a MISSING print becomes
+    news, and bounding fetches by it would stop the afternoon pull from even
+    asking for a file CME posted at 13:35.
     """
-    due = due_through(now)
+    due = fetchable_through(now)
     if due is None:
         return []
     held = {d if isinstance(d, str) else d.isoformat() for d in have}

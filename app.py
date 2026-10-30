@@ -51,6 +51,7 @@ from index_dates import headline_index_date
 # pins the literal string above as proof both copies use the tested headline
 # rule, and folding another name into it would quietly defeat that check.
 from index_dates import publication_status
+from index_dates import PUBLISH_OVERDUE_HOUR, PUBLISH_OVERDUE_MINUTE
 from bucketing import shifted_bucket_date
 from snapshots import opening_calls
 from composition import (BRACKETS as COMP_BRACKETS, grade_totals as comp_grade_totals,
@@ -177,7 +178,14 @@ def render_futures_basis(bundle):
     ))
     bars.add_hline(y=0, line_width=1, line_color=MUTED)
     bars.update_layout(
-        margin=dict(l=0, r=0, t=6, b=0), height=240,
+        # b=80 keeps the x labels clear of Streamlit Cloud's "Manage app"
+        # control, which is pinned to the bottom-right of the VIEWPORT and
+        # lands on the newest dates when this chart is expanded. 80 and not
+        # 48 because the tick labels are drawn INSIDE the margin and ate 26
+        # of it -- measured on the rendered chart, where b=48 left only 22px
+        # of clearance under a control about 40px tall. Height rises by the
+        # same amount, so the plot area is unchanged and only the card grows.
+        margin=dict(l=0, r=0, t=6, b=80), height=320,
         paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
         xaxis=dict(**FUT_AXIS, type="date"),
         yaxis=dict(**FUT_AXIS, title="Futures − Index ($/cwt)"),
@@ -349,7 +357,9 @@ def render_futures_tab():
         hovertemplate="<b>%{x|%b %d, %Y}</b>: $%{y:.3f}<extra></extra>",
     ))
     fig.update_layout(
-        margin=dict(l=0, r=0, t=10, b=0), height=430,
+        # b=80 keeps the x labels clear of Streamlit Cloud's "Manage app"
+        # control -- see the measured note on the basis chart below.
+        margin=dict(l=0, r=0, t=10, b=80), height=510,
         paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, font=dict(size=10)),
@@ -1014,8 +1024,16 @@ def _render_cme_lag(last_published):
         f"**CME is {len(owed)} print{'s' if len(owed) > 1 else ''} behind.** "
         f"Their last published index is {_fmt(last_published)}; {which} "
         f"{'are' if len(owed) > 1 else 'is'} overdue \u2014 CME publishes each "
-        f"index date on the next business day, between 13:04 and 14:04 Central, "
-        f"and that window has passed. **Nothing here has failed:** the estimate "
+        # THE TIME IS FORMATTED FROM THE CONSTANT, NEVER TYPED AS A LITERAL.
+        # This sentence used to read "between 13:04 and 14:04 Central", a pair
+        # that had drifted away from both the code and the server: measured
+        # over 159 business-day index dates, 42.1% of prints land after 14:04,
+        # so clients were being told CME was late on two afternoons in five. A
+        # sentence that RESTATES a constant can disagree with it; one that
+        # formats it cannot.
+        f"index date on the next business day, and had not by "
+        f"{PUBLISH_OVERDUE_HOUR}:{PUBLISH_OVERDUE_MINUTE:02d} Central. "
+        f"**Nothing here has failed:** the estimate "
         f"below is reconstructed from USDA AMS auction data and does not use "
         f"CME's feed. It is *Last CME Print* and the forecast scorecard that "
         f"have nothing newer to show."

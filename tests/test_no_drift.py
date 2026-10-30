@@ -853,3 +853,41 @@ def test_that_lazy_name_check_can_actually_fail():
             "    fig = go.Figure()\n"
             "    fig.update_layout(xaxis=dict(**AXIS))\n")
     assert _names_only_a_nested_block_defines(good, FUTURES_RENDERERS) == {}
+
+
+def test_both_dashboards_word_the_CME_LAG_BANNER_identically():
+    """
+    The banner is CLIENT-VISIBLE on two live deployments, and app.py is
+    deliberately not in SHARED, so nothing compared its wording -- only its
+    wiring (see test_both_dashboards_say_when_CME_IS_BEHIND above). Edit one
+    copy and not the other and the two apps tell clients different things
+    about CME, with no test and no reader able to see it from either page.
+
+    Compared through ast.unparse so indentation and comments cannot make two
+    identical sentences look different -- the portal copy nests its tab bodies
+    one level deeper.
+    """
+    bodies = {}
+    for label, app in (("standalone", HERE / "app.py"), ("portal", PORTAL / "app.py")):
+        tree = ast.parse(app.read_text(encoding="utf-8"))
+        fn = [n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_render_cme_lag"]
+        assert fn, f"{app} no longer defines _render_cme_lag"
+        warns = [ast.unparse(n) for n in ast.walk(fn[0])
+                 if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) in ("st.warning", "st.info", "st.error")]
+        assert warns, f"{app}: _render_cme_lag renders no warning"
+        bodies[label] = warns
+    assert bodies["standalone"] == bodies["portal"], (
+        "the two dashboards word the CME-lag banner differently:\n  standalone: "
+        + "\n  ".join(bodies["standalone"]) + "\n  portal: "
+        + "\n  ".join(bodies["portal"]))
+
+
+def test_that_banner_wording_guard_can_fail():
+    """Two different sentences must be rejected, or the check above is decoration."""
+    a = ast.parse('import streamlit as st\ndef _render_cme_lag(x):\n    st.warning("CME is behind")\n')
+    b = ast.parse('import streamlit as st\ndef _render_cme_lag(x):\n    st.warning("CME is late")\n')
+    grab = lambda tree: [ast.unparse(n) for n in ast.walk(tree)
+                         if isinstance(n, ast.Call) and ast.unparse(n.func) == "st.warning"]
+    assert grab(a) != grab(b)

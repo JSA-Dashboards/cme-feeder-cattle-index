@@ -6,12 +6,14 @@
 # CME publishes each index date's file on the NEXT business day. Measured from
 # their own FTP MDTM timestamps:
 #
-#     earliest 13:04    latest 14:04    (all Central)
+#     earliest 13:04    median 13:35    latest 15:05    (all Central)
+#
+# Re-measured 2026-10-30 off 159 business-day index dates: min 08:05, p10 13:04, median 13:35, p90 15:05, p99 16:04, max 20:48.
 #
 # THIS SAID 08:35 / 09:05 / 10:05 UNTIL 2026-10-07 AND WAS WRONG BY FIVE HOURS.
 # Raw MDTM reads like 20261007133437; the original measurement took that for UTC
 # and subtracted five. The server already returns Central. So the trigger was set
-# to 10:15 to "clear the 10:05 worst case", against a worst case of 14:04 -- and
+# to 10:15 to "clear the 10:05 worst case", against a worst case of 15:05 -- and
 # the job NEVER ONCE caught a print in its entire logged history. It exited 0 and
 # logged "not yet published" every day, which reads as CME being slow rather than
 # as the job looking three hours too early.
@@ -26,7 +28,15 @@
 # but it loses it. That left the dashboard's "Last CME Print" tile and the whole
 # forecast scorecard running a full business day behind CME.
 #
-# 14:15 clears the 14:04 worst case with eleven minutes to spare.
+# 14:15 DOES NOT CLEAR THE WORST CASE, and the line here said it did until
+# 2026-10-30: "14:15 clears the 14:04 worst case with eleven minutes to spare",
+# against a ceiling that is really 15:05. On the 159-day sample 26 prints (16.4%)
+# were still unwritten at 14:35 and 6 (3.8%) at 15:05, and MDTM is the WRITE time
+# -- a file took 17 minutes to become readable on 2026-10-28. So this job catches
+# the bulk and misses a tail, and the tail is collected by the next morning's
+# 07:45 run. Moving or adding a pull is a live option and is NOT done here;
+# this comment exists so the next person does not re-derive "it clears the worst
+# case" from a number that no longer says so.
 #
 # If this band is ever re-measured, read MDTM off the server and treat it as
 # CENTRAL, and do not re-derive it from our own ingest logs -- those record when
@@ -38,11 +48,17 @@
 # work is only: fetch the file, store it, push those tables. About 15 seconds
 # against the main pipeline's 12 minutes.
 #
-# NO HEALTHCHECK PING, on purpose. This run is an accelerator, not a guarantee:
-# if it FAILS TO LOAD, the 13:00 run pulls the same file with a 10-day lookback
-# and the only cost is that the print appears at 13:05 as it always used to.
-# Monitoring that would add an alert for a condition that self-heals within
-# three hours.
+# NO HEALTHCHECK PING, on purpose. This run is an accelerator, not a
+# guarantee: if it FAILS TO LOAD, --catch-up asks for the same date on the next
+# scheduled run and nothing is lost but a day's freshness on a scorecard.
+#
+# THIS SAID "the print appears at 13:05 as it always used to ... self-heals
+# within three hours" UNTIL 2026-10-30, and all three numbers were from the
+# dead pre-correction model. The 13:00 run comes BEFORE this one, so a failed
+# pull is collected by the NEXT MORNING's 07:45, not three hours later; and
+# the lookback is the 90-day catch-up horizon, not ten days. The conclusion
+# still stands -- a day-late scorecard is not worth an alert -- but it now
+# stands on the right reasons.
 #
 # THAT REASONING DOES NOT COVER PUSH EXIT 3, and saying it did was the same
 # untruth the log line below used to carry. Exit 3 is "the push COMMITTED and

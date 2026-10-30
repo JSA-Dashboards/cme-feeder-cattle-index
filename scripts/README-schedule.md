@@ -13,14 +13,20 @@ Scheduler as **`JSA FCI daily update`**.
 CME publishes each index date's file the NEXT business day. Measured from their
 own FTP `MDTM` timestamps:
 
-    earliest 13:04    latest 14:04    (Central)
+    earliest 13:04    median 13:35    latest 15:05    (Central)
 
 **THIS SAID 08:35 / 09:05 / 10:05 UNTIL 2026-10-07, AND IT WAS WRONG BY FIVE
 HOURS.** The raw `MDTM` for a file reads like `20261007133437`, and the original
 measurement treated that as UTC and subtracted five to get 08:34 Central. The
 server returns it in Central already. Everything downstream inherited the error:
 the pull was scheduled for 10:15 to "clear the 10:05 worst case by ten minutes",
-against a worst case that is really 14:04.
+against a worst case that is really 15:05.
+
+**AND THE CEILING WAS STILL WRONG AFTER THAT FIX, UNTIL 2026-10-30.** This
+section said `latest 14:04` -- which is the old MEDIAN (09:04) plus five, not
+the old worst case (10:05) plus five. The floor was carried across correctly
+and the ceiling was not, so half the correction landed. Re-measured 2026-10-30 off 159 business-day index dates: min 08:05, p10 13:04, median 13:35, p90 15:05, p99 16:04, max 20:48. The old
+13:04-14:04 held 50.3% of prints and called 42.1% of them late.
 
 **The 10:15 job therefore never once caught a print.** Not an occasional miss --
 zero, across every run in the logs. After each 10:15 pull the newest CME date
@@ -47,7 +53,12 @@ comparing CME's own `MDTM` against our own logs. Two independently derived
 numbers that disagreed. A clock that is wrong by exactly five hours looks
 perfectly plausible on its own.
 
-14:15 clears the 14:04 worst case by eleven minutes. The job fetches, stores, and
+14:15 does NOT clear the worst case, and this line said it did until
+2026-10-30. Against the real 15:05 ceiling, 16.4% of prints are still unwritten
+at 14:35 and 3.8% at 15:05 -- and `MDTM` is the WRITE time, not the readable
+time, which cost a further 17 minutes on 2026-10-28. The job catches the bulk;
+the tail is collected by the next morning's 07:45 run. Whether to move it or
+add a second pull is open and deliberately not decided here. The job fetches, stores, and
 pushes only `cme_ftp_daily`, `cme_ftp_locations` and `cme_ftp_brackets` -- about
 25 seconds, against the main pipeline's 12 minutes. It recomputes nothing: CME's
 value does not feed the estimate, it is what the estimate is scored against.
@@ -74,15 +85,28 @@ it being misfiled as the afternoon pass.
 
 ### Why an afternoon run exists
 
-Two measurements, both taken 2026-09-09:
+One measurement taken 2026-09-09 and re-taken 2026-10-30; one taken
+2026-09-09 and still standing:
 
-- **CME posts its own file between 08:05 and 10:05 Central** (median 09:04,
-  n=17, from the FTP server's `MDTM` timestamps). The 07:30 run therefore
-  *structurally could not* see the file published that morning, so "Last CME
-  Print" was always a day stale. The 07:45 run clears 08:05 only once its own
-  CME step is reached, several minutes in, so it may occasionally catch an
-  early file -- unlikely, but not the structural impossibility 07:30 was. It is
-  less likely than at 08:00, by exactly the fifteen minutes the trigger moved.
+- **CME posts its own file between 13:04 and 15:05 Central** (median 13:35,
+  n=159, from the FTP server's `MDTM` timestamps, re-measured 2026-10-30).
+  THIS BULLET READ "between 08:05 and 10:05 Central (median 09:04, n=17)"
+  until then -- the raw, five-hours-early reading, left behind when the
+  2026-10-07 correction was applied to the section above and not to this one.
+
+  **AND ITS CONCLUSION DID NOT SURVIVE THE CORRECTION.** The bullet used to go
+  on: "the 07:45 run clears 08:05 only once its own CME step is reached, so it
+  may occasionally catch an early file -- unlikely, but not the structural
+  impossibility 07:30 was." Against a floor of 13:04 that is simply false. NO
+  MORNING RUN CAN EVER SEE A SAME-DAY PRINT; 07:30 and 07:45 are equally
+  impossible, and the fifteen minutes between them buy nothing here. That is
+  the stronger argument for an afternoon run, not a weaker one -- but it is a
+  different argument, and the first pass at this correction updated the figures
+  while leaving the inference drawn from the old ones, which is how a stale
+  claim gets a fresh date on it.
+
+  What the morning runs are for is USDA's auction data, below; CME's own print
+  is collected at 14:15 or the next morning, never the same morning.
 - **USDA publication is only slightly unfinished at 07:30** — less than it
   first appears. Measured against the date a sale is BUCKETED into (not its
   USDA sale date, which is the framing that made El Reno look like a timing

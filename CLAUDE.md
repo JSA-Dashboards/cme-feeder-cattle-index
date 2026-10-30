@@ -88,10 +88,30 @@ That alignment identified the two sale days before any barn was named.
 publishes its previous-day sale at a median +1 day 11:13.
 
 The CME pull was at **10:15 until 2026-10-07 and never once caught a print**:
-CME's files become fetchable 13:04–14:04 Central, not 08:35–10:05 as
+CME's files are written 13:04–15:05 Central, not 08:35–10:05 as
 `README-schedule.md` claimed. The FTP `MDTM` timestamp is already Central and
 had been read as UTC, so every derived time was five hours early. See
 "The 14:15 CME print pull" there.
+
+**THE CEILING SAID 14:04 UNTIL 2026-10-30 AND THAT WAS THE SAME ERROR, HALF
+CORRECTED.** The pre-correction band was 08:05 / 09:04 / 10:05, and +5h gives
+13:05 / 14:04 / **15:05** -- but 14:04 is the old MEDIAN plus five, not the old
+worst case plus five, and that is the number that got written down as the
+latest. Re-measured 2026-10-30 off 159 business-day index dates: min 08:05, p10 13:04, median 13:35, p90 15:05, p99 16:04, max 20:48. So 13:04–14:04 held only 50.3% of prints and called
+42.1% of them late.
+
+**`MDTM` IS WHEN CME WROTE THE FILE, NOT WHEN IT CAN BE READ.** Measured
+2026-10-28: stamped 14:34:46, first successfully fetched 14:51:49, with the
+path 550-ing as though absent in between. One observation, so treat the gap as
+real but unquantified.
+
+**ONE CONSTANT WAS DOING TWO JOBS**, which is how its value drifted unnoticed:
+`PUBLISH_DEADLINE` gated both what `catch_up_dates()` will ASK CME for and what
+the dashboard calls LATE, and those want opposite values -- early so the
+afternoon pull still requests a 13:35 print, late so the page does not accuse
+CME on an ordinary afternoon. Split on 2026-10-30 into `PUBLISH_EARLIEST`
+(13:04) and `PUBLISH_OVERDUE` (16:05) in `index_dates.py`. Fetching is
+unchanged; only the banner moved.
 
 **Step order in the daily job is load-bearing.** Index first, then optional
 ingests, then their push:

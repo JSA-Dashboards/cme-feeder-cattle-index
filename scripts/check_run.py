@@ -83,14 +83,18 @@ if cme:
         head_note = " -- IDENTICAL window" if int(frozen[1]) == int(cme[1]) else ""
         print(f"   -> our miss {frozen[0] - cme[0]:+.4f}{head_note}")
 else:
-    # THE BAND IS 13:04-14:04 CENTRAL, and this line said 08:05-10:05 until
+    # THE BAND IS 13:04-15:05 CENTRAL, and this line said 08:05-10:05 until
     # 2026-10-22 -- the same five-hour error CLAUDE.md records as fixed,
     # surviving in a second file because the fix was applied where it was
     # found rather than where it was repeated. It also named the 13:00 run as
     # the collector, which loses the race by minutes; the 14:15 pull exists
     # for precisely this.
-    print("   CME has not published this index date yet (posts 13:04-14:04 "
-          "Central, so the 14:15 pull is what normally collects it)")
+    #
+    # THE CEILING SAID 14:04 UNTIL 2026-10-30, which was that same error only
+    # half corrected: the old worst case 10:05 plus five is 15:05, and 14:04
+    # is the old MEDIAN plus five. Re-measured 2026-10-30 off 159 business-day index dates: min 08:05, p10 13:04, median 13:35, p90 15:05, p99 16:04, max 20:48.
+    print("   CME has not published this index date yet (posts 13:04-15:05 "
+          "Central, so the 14:15 pull catches most but not all of them)")
 
 peers = cur.execute(
     f"SELECT source, fci_value FROM peer_estimates WHERE index_date = {ph} "

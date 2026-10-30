@@ -549,3 +549,53 @@ what silently turned +5 into +35 at the 08:00 move.
 
   Event 107 means triggered on schedule, 118 triggered by boot, 110 triggered
   by a user — that distinction is the one worth having.
+
+## The 21:00 border-crossings pass — added 2026-10-30
+
+Ross: *"the usda updates every afternoon. you should look at what time they
+update and we need to update when they update so our data is always fresh."*
+
+**THE SAME BUG AS THE 10:15 CME PULL ABOVE, on a different source, and nobody
+had measured it either.** `daily_update.ps1` also runs `update_imports.py`,
+which ingests the AMS border reports behind the portal's Mexican Feeder
+Crossings page. Measured off MARS's own `published_date` on slug 3486, all 47
+reports of 2026:
+
+    earliest 12:34    median 15:21    p90 18:30    latest 20:14
+    published on the report's OWN day, 47 of 47 -- never next-day
+
+Against triggers of 07:45 and 13:00, the same-day capture is:
+
+    07:45  ->  0 / 47
+    13:00  ->  1 / 47
+
+So the crossings were structurally a full day behind: each morning's run
+collected *yesterday's* report. Exactly the shape of the 10:15 pull — it
+exited 0 every time and looked like AMS being slow.
+
+**A third trigger at 21:00 catches 47 of 47.** That is the whole reason for
+the hour, and it is later than it needs to be on purpose:
+
+**THE TIMEZONE OF THE MARS STAMP IS NOT ESTABLISHED.** This file already
+records five hours lost to assuming one on CME's `MDTM`, so it is not assumed
+again here. 21:00 local is 100% under BOTH readings — 47/47 if the stamp is
+Central, 47/47 if it is Eastern — so the question does not have to be settled
+for the schedule to be right. A 17:30 trigger would catch 36/47 or 43/47
+depending on the answer, which is precisely the kind of figure that needs it.
+
+Settle the timezone and 17:30 becomes defensible; until then the later hour
+costs nothing but a few hours of latency on a page nobody reads at night.
+
+The 07:45 run stays and is now the backstop rather than the primary: it
+guarantees completeness by the next morning if the 21:00 pass is missed.
+
+**It needs no new guard against overlap or a sleeping desktop** — the task
+already carries `MultipleInstancesPolicy=IgnoreNew`, `WakeToRun=true` and
+`StartWhenAvailable=true`, so it wakes the machine, skips if a run is in
+flight, and catches up if the box was off.
+
+**The border half of this job runs ONLY from this desktop.** The droplet cron
+(`deploy/run_update.sh`) runs `backfill_ftp.py` and `update_index.py` and does
+not call `update_imports.py` — checked rather than assumed. So a desktop that
+is off all evening still leaves the crossings a day late until morning, and
+moving that ingest to the droplet is the real fix if it ever matters enough.

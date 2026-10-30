@@ -155,11 +155,21 @@ def load_futures_basis():
 def render_futures_basis(bundle):
     """The basis panel that sits under the index chart when the toggle is on."""
     rows, s = bundle["rows"], bundle["summary"]
+    st.markdown(
+        "**Every basis figure below is front-month futures MINUS the published "
+        "index.** A positive number means futures are trading ABOVE cash (a "
+        "premium); a negative number means futures are BELOW cash (a discount)."
+    )
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"Basis, {s['end']:%b %d}", f"{s['latest']:+.2f}")
-    c2.metric(f"Mean, {s['start']:%Y}–{s['end']:%Y}", f"{s['mean']:+.2f}")
+    c1.metric(f"Basis, {s['end']:%b %d}", f"{s['latest']:+.2f}",
+              help="Front-month futures minus the published index on that "
+                   "day. Positive = futures above cash.")
+    c2.metric(f"Mean, {s['start']:%Y}–{s['end']:%Y}", f"{s['mean']:+.2f}",
+              help="Average of futures minus index across every session shown.")
     _this = [r["basis"] for r in rows if r["date"].year == s["end"].year]
-    c3.metric(f"Mean, {s['end']:%Y}", f"{sum(_this) / len(_this):+.2f}" if _this else "—")
+    c3.metric(f"Mean, {s['end']:%Y}",
+              f"{sum(_this) / len(_this):+.2f}" if _this else "—",
+              help="Average of futures minus index, this calendar year only.")
     c4.metric("At expiry", f"{s['convergence']:.2f}" if s["convergence"] is not None else "—",
               help="Mean absolute basis in each contract's final sessions. A "
                    "cash-settled contract must converge on the index, so this "
@@ -223,27 +233,32 @@ def render_futures_basis(bundle):
     _wt = pd.DataFrame([{
         "Window": w["label"],
         "Sessions": w["sessions"],
-        "Mean basis": w["mean"],
-        "Widest premium": _excursion(w["high"]),
-        "Widest discount": _excursion(w["low"]),
+        "Mean basis (futures minus index)": w["mean"],
+        "Widest premium (futures ABOVE index)": _excursion(w["high"]),
+        "Widest discount (futures BELOW index)": _excursion(w["low"]),
     } for w in _wins]).set_index("Window")
-    st.dataframe(_wt.style.format({"Mean basis": "{:+.2f}"}),
-                 use_container_width=True)
+    st.dataframe(
+        _wt.style.format({"Mean basis (futures minus index)": "{:+.2f}"}),
+        use_container_width=True)
     st.caption(
+        "**Premium is futures ABOVE the published index; discount is futures "
+        "BELOW it.** Both are measured the same way round as every other "
+        "figure on this tab: futures minus index. "
         "Trailing **calendar** days, anchored on the last session carrying both "
         "a settle and a published index rather than on today — CME prints on a "
         "lag and neither side trades at a weekend, so anchoring on today would "
         "quietly shorten every window and shorten it further after a holiday. "
-        "Premium is futures **over** the index, discount is **under**; each "
-        "window's extremes are the widest within that window, so a short window "
-        "can repeat a longer one's."
+        "Each window's extremes are the widest within that window, so a short "
+        "window can repeat a longer one's."
     )
 
     _years = pd.DataFrame(
-        [{"Year": y, "Mean basis": v} for y, v in s["by_year"].items()]
+        [{"Year": y, "Mean basis (futures minus index)": v}
+         for y, v in s["by_year"].items()]
     ).set_index("Year")
-    st.dataframe(_years.style.format({"Mean basis": "{:+.2f}"}),
-                 use_container_width=True)
+    st.dataframe(
+        _years.style.format({"Mean basis (futures minus index)": "{:+.2f}"}),
+        use_container_width=True)
     st.caption(
         "A partial year at either end covers only the sessions in it, so its mean is "
         "not comparable with a full year's."
@@ -370,7 +385,7 @@ def render_basis_study(bundle):
         st.markdown("**%s.** %s" % (title, blurb))
         cells = [c for c in study["cells"] if c["sign"] == sign]
         frame = pd.DataFrame([{
-            "Basis beyond": "%+d" % (sign * c["threshold"]),
+            "Basis beyond (futures minus index)": "%+d" % (sign * c["threshold"]),
             "Episodes": c["episodes"],
             "Days": c["days"],
             "Median sessions to expiry": c["median_dte"],
@@ -383,7 +398,7 @@ def render_basis_study(bundle):
             "10d index move": c["horizons"][10]["idx_median"],
             "20d windows usable": "%d of %d" % (c["horizons"][20]["usable"],
                                                 c["horizons"][20]["attempted"]),
-        } for c in cells]).set_index("Basis beyond")
+        } for c in cells]).set_index("Basis beyond (futures minus index)")
         st.dataframe(frame.style.format({
             "Median sessions to expiry": "{:.0f}",
             "5d move": "{:+.2f}", "10d move": "{:+.2f}", "20d move": "{:+.2f}",
@@ -394,7 +409,8 @@ def render_basis_study(bundle):
     st.markdown("---")
     st.markdown(
         "**What every column means.**\n"
-        "- **Basis beyond** \u2014 the threshold, in dollars per hundredweight. "
+        "- **Basis beyond (futures minus index)** \u2014 the threshold, in "
+        "dollars per hundredweight, always futures minus index. "
         "`-8` means futures were at least 8.00 under the index.\n"
         "- **Episodes** \u2014 how many separate times basis crossed that line. "
         "**This is the sample size.**\n"
@@ -1062,6 +1078,12 @@ def _load_last_refresh():
 _STALE_WARN_HOURS = 20
 _STALE_ALERT_HOURS = 30
 
+# The morning trigger plus its grace, as a (hour, minute) pair. Past this with
+# nothing recorded today, a run that was DUE has been skipped -- which is a
+# different statement from "the data is N hours old" and the one the hour-count
+# structurally cannot make. See _render_freshness for the measurement.
+_MISSED_RUN_AFTER = (8, 30)
+
 
 def _central_now():
     """Now, in Central, as a naive datetime -- or None if the zone is unavailable."""
@@ -1106,6 +1128,27 @@ def _render_freshness():
             f"recorded was {stamp} Central; at least two scheduled runs (07:45 and "
             f"13:00) have not reached the database behind this page. Treat every "
             f"figure below as historical until this clears."
+        )
+    elif (last.date() < now.date()
+            and (now.hour, now.minute) >= _MISSED_RUN_AFTER):
+        # SKIPPED, NOT MERELY OLD. Nothing has been recorded today and the
+        # morning run is past its grace, so a scheduled run did not happen --
+        # a statement the hour-count cannot make, because 19 hours stale at
+        # 07:00 on a Tuesday is normal and 19 hours stale at 09:00 on a
+        # Saturday is a missed weekend, and they are the same number.
+        #
+        # Measured: on the five weekends the pipeline ran, Saturday's headline
+        # sat 0.0000-0.0190 from where it settled; on the two it missed it sat
+        # 0.77 off for about 67 hours.
+        st.warning(
+            f"**Today's scheduled run has not happened.** The last recorded run "
+            f"was {stamp} Central, and nothing has been recorded today. The "
+            f"index below is therefore the figure as it stood then: a sale day "
+            f"is normally completed by the FOLLOWING morning's run, which "
+            f"collects the USDA reports that arrive overnight, and that pass "
+            f"has moved the headline by about three quarters of a dollar on the "
+            f"weekends it was missed. Treat the number as provisional until a "
+            f"run completes."
         )
     elif hours >= _STALE_WARN_HOURS:
         st.warning(

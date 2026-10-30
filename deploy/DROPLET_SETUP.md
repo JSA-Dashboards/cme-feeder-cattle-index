@@ -96,6 +96,57 @@ are the live crontab lines; edit them on the box with `crontab -e`:
 check's slug comes from the job name. So keep the names, and if you change a
 time, change that check's schedule too.
 
+### The weekend run, and why the weekday line stays commented out
+
+The morning update line is COMMENTED OUT on the live box, with its reason in
+the crontab: the desktop's `JSA FCI daily update` has `StartWhenAvailable`, so
+when the laptop is asleep at 07:45 the catch-up can land anywhere -- on
+2026-10-06 it fired 08:45:45, 43 seconds after this cron. Both DELETE and
+reload `JSA.CME_FEEDER_CATTLE` and nothing locks across the two machines.
+
+**There is no such race at a weekend**, because the weekends it matters on are
+exactly the weekends the desktop is powered off. Add this line and leave the
+weekday one commented:
+
+```
+45 8 * * 6,0 /opt/alerting/cron-alert "CME feeder index update" "/opt/cme-feeder-cattle-index/logs/update_*.log" /opt/cme-feeder-cattle-index/deploy/run_update.sh
+```
+
+WHY IT IS WORTH A CRON, measured off `fci_snapshots` rather than supposed: on
+the five weekends a run happened, Saturday's published headline sat 0.0000,
+0.0190, 0.0056, 0.0000 and 0.0151 from where the index settled. On the two it
+did not -- 2026-10-03/04 and 10-17/18, the machine shut down on the Friday
+evening both times -- it sat 0.7663 and 0.7599 off, for about 67 hours each.
+The Saturday pass collects the USDA reports that land overnight.
+
+**08:45 and not earlier**, even though there is nothing to wait for at a
+weekend: if the desktop IS on, this still starts after its ~08:00-08:28 push
+window, which is the ordering the weekday line was written for. Keeping one
+time means one thing to reason about.
+
+**The same job name on purpose.** `cron-alert` derives its healthchecks.io slug
+from the name and pings with `?create=1`, so a NEW name auto-creates a check
+with the default daily period and goes red every weekday. Reusing the name
+means failure emails work, but the dead-man's switch will NOT notice a missed
+weekend run until that check's own cron is widened to `45 8 * * *` in the
+healthchecks.io UI. That cannot be done from the repo: `HEALTHCHECK_API_KEY` is
+not in `.env` on either machine.
+
+### What a FULL move off the desktop still needs
+
+The code is already here and current; the blocker is email. `run_update.sh`
+sends none -- the morning estimate goes out from the desktop via
+`scripts/send_email.ps1`, a OneDrive drop that Power Automate picks up, which
+is desktop-bound by construction. So disabling the desktop job to end the race
+would silently stop the daily estimate mail. Either that delivery moves to
+something the droplet can drive, or the desktop keeps running for the mail
+alone. Not decided here.
+
+Two deploy scripts are also **100644 in git** -- `run_imports.sh` and
+`install_imports_cron.sh` -- which fails under cron with exit 126 before it
+writes a log. Fix with `git update-index --chmod=+x deploy/<script>.sh` before
+cronning either.
+
 - **8:45 AM Central, Mon–Fri** — `run_update.sh`: official CME files (Step 0) +
   full MARS/Direct/Video reconstruction (Step 1). Moved from 8:15 on
   2026-10-05. Ross's desktop job (07:45) pushes to the same

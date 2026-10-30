@@ -356,6 +356,70 @@ def render_basis_study(bundle):
         "counts every time basis crossed a threshold and measures what futures "
         "did over the following 5, 10 and 20 trading sessions."
     )
+    _disc = [c for c in study["cells"] if c["sign"] == -1]
+    _prem = [c for c in study["cells"] if c["sign"] == 1]
+    _b5, _b10 = study["baseline"][5], study["baseline"][10]
+
+    def _rng(vals, fmt="%.0f"):
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            return "\u2014"
+        lo, hi = min(vals), max(vals)
+        return (fmt % lo) if abs(hi - lo) < 0.5 else "%s to %s" % (fmt % lo, fmt % hi)
+
+    _d5 = _rng([c["horizons"][5]["up_pct"] / 10.0 for c in _disc], "%.0f")
+    _d10 = _rng([c["horizons"][10]["up_pct"] / 10.0 for c in _disc], "%.0f")
+    _dmove = _rng([c["horizons"][5]["fut_median"] for c in _disc], "%.1f")
+    _pidx = _rng([c["horizons"][5]["idx_median"] for c in _prem], "%.1f")
+    _eps = _rng([c["episodes"] for c in _disc + _prem], "%.0f")
+
+    with st.expander("In plain terms \u2014 what this has looked like so far",
+                     expanded=True):
+        st.markdown(
+            f"**What basis is.** Futures are the market's bet on what feeder "
+            f"cattle will be worth when the contract settles. The index is what "
+            f"they are worth right now, averaged across the real auctions. "
+            f"Basis is just the gap between the two: futures minus index. A "
+            f"positive gap means futures are priced above today's cash market; "
+            f"a negative gap means below.\n\n"
+            f"**The question.** When that gap gets unusually wide, has it told "
+            f"you anything about what futures did next? Over "
+            f"{study['sessions']:,} trading sessions the answer has been "
+            f"lopsided \u2014 and not in the symmetrical way you might expect."
+        )
+        st.markdown(
+            f"**When futures were trading BELOW the index** \u2014 the market "
+            f"pricing cattle cheaper later than they are fetching today \u2014 "
+            f"futures were higher a week later on about **{_d5} occasions in "
+            f"ten**, and higher two weeks later on about **{_d10} in ten**. For "
+            f"comparison, across all days in this period futures were higher a "
+            f"week later about {_b5['up_pct'] / 10.0:.0f} in ten. The typical "
+            f"gain was {_dmove} dollars per hundredweight. That pattern held at "
+            f"every size of gap tested, which matters more than any single row "
+            f"in the tables below."
+        )
+        st.markdown(
+            f"**When futures were trading ABOVE the index, it was not the "
+            f"mirror image.** The gap still closed \u2014 but mostly because the "
+            f"cash index came UP to meet the futures, typically by {_pidx} "
+            f"dollars per hundredweight within a week, rather than because "
+            f"futures fell. Futures themselves were close to a coin flip. So a "
+            f"wide premium has historically said more about where cash was "
+            f"heading than about where futures were."
+        )
+        st.markdown(
+            f"**What this is not.** These are counts of separate episodes, not "
+            f"of days \u2014 {_eps} separate occasions at each size, which is a "
+            f"small number however it is dressed up. The whole period has been a "
+            f"rising market, which is why the everyday rate is already around "
+            f"{_b5['up_pct'] / 10.0:.0f} in ten rather than five. Some of the "
+            f"narrowing is automatic rather than a market view: the contract is "
+            f"settled against this very index, so the two are obliged to meet at "
+            f"expiry. And this describes what HAS happened \u2014 it is not a "
+            f"forecast, it carries no trading costs, and it has never been "
+            f"tested in a falling market."
+        )
+
     st.markdown(
         "**Read the baseline first.** Over this whole window futures rose on "
         "most horizons anyway \u2014 it has been a rising market. A cell below is "

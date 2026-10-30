@@ -891,3 +891,61 @@ def test_that_banner_wording_guard_can_fail():
     grab = lambda tree: [ast.unparse(n) for n in ast.walk(tree)
                          if isinstance(n, ast.Call) and ast.unparse(n.func) == "st.warning"]
     assert grab(a) != grab(b)
+
+
+# ── The conditional study is STAFF-ONLY, and asymmetrically so ──────────────
+#
+# A probability table reads as a trading signal rather than as market analysis,
+# which is a different thing from the basis chart beside it. The portal copy
+# therefore hides it behind portal_view.staff_expander, which does not draw,
+# compute or EMIT the body for a client -- it is not in the page source. The
+# standalone repo has no portal_view and no client build, so a plain expander
+# is its equivalent.
+#
+# Asserted in BOTH directions, like the six_state written-cause box, so the
+# difference stays a decision somebody made rather than a drift nobody saw.
+
+def test_the_conditional_study_is_staff_gated_in_the_portal():
+    src = (PORTAL / "app.py").read_text(encoding="utf-8")
+    assert "def render_basis_study(" in src, "the portal lost the study"
+    assert "portal_view.staff_expander(STUDY_LABEL)" in src, (
+        "the portal's conditional study is no longer behind staff_expander -- "
+        "a client build would render a probability table")
+    assert "with st.expander(STUDY_LABEL)" not in src, (
+        "the portal uses a plain expander for the study; a client would see it")
+
+
+def test_the_conditional_study_is_a_plain_expander_in_the_standalone():
+    src = (HERE / "app.py").read_text(encoding="utf-8")
+    assert "def render_basis_study(" in src, "the standalone lost the study"
+    assert "with st.expander(STUDY_LABEL)" in src
+    assert "portal_view" not in src, (
+        "the standalone imported portal_view; it has no client build and no "
+        "copy of that module, so this would be an ImportError on load")
+
+
+def test_both_copies_compute_the_study_in_the_shared_module():
+    """
+    Neither page may do the arithmetic itself. feeder_futures.py is
+    byte-identical and under SHARED above; a page-local calculation would be a
+    second implementation of a number two dashboards quote.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert "feeder_futures.conditional_study(" in src, app
+        tree = ast.parse(src)
+        fn = [n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "render_basis_study"]
+        assert fn, app
+        body = ast.unparse(fn[0])
+        for banned in ("episode_starts(", "forward_move("):
+            assert banned not in body, (
+                "%s: render_basis_study reimplements %s instead of reading the "
+                "study dict" % (app, banned))
+
+
+def test_that_staff_gate_check_can_fail():
+    """A page that swapped the gate for a plain expander must be rejected."""
+    bad = "def render_basis_study(b):\n    pass\nwith st.expander(STUDY_LABEL):\n    render_basis_study(b)\n"
+    assert "portal_view.staff_expander(STUDY_LABEL)" not in bad
+    assert "with st.expander(STUDY_LABEL)" in bad

@@ -320,6 +320,132 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
+STUDY_LABEL = "Conditional study \u2014 what futures did after a wide basis (JSA internal)"
+
+
+def render_basis_study(bundle):
+    """What followed a wide basis, by episode. Staff only -- see the call sites.
+
+    Every figure here comes from feeder_futures.conditional_study(), which is
+    byte-identical in both repos and under the drift test. Nothing is computed
+    on the page.
+    """
+    study = feeder_futures.conditional_study(bundle["rows"])
+    if not study:
+        st.info("Not enough overlap to run the study.")
+        return
+
+    st.markdown(
+        "**The question.** When front-month futures run a long way from the "
+        "index they settle against, does anything reliably happen next? This "
+        "counts every time basis crossed a threshold and measures what futures "
+        "did over the following 5, 10 and 20 trading sessions."
+    )
+    st.markdown(
+        "**Read the baseline first.** Over this whole window futures rose on "
+        "most horizons anyway \u2014 it has been a rising market. A cell below is "
+        "only interesting if it beats these numbers; a 64% up-rate against a "
+        "64% baseline is not a signal, it is the market."
+    )
+
+    base = study["baseline"]
+    bt = pd.DataFrame([{
+        "Horizon": "%d sessions" % h,
+        "Windows measured": base[h]["usable"],
+        "Futures rose": base[h]["up_pct"],
+        "Median futures move": base[h]["fut_median"],
+        "Median index move": base[h]["idx_median"],
+    } for h in sorted(base)]).set_index("Horizon")
+    st.dataframe(bt.style.format({"Futures rose": "{:.1f}%",
+                                  "Median futures move": "{:+.2f}",
+                                  "Median index move": "{:+.2f}"}),
+                 use_container_width=True)
+
+    for sign, title, blurb in (
+        (-1, "Discount \u2014 futures BELOW the index",
+         "Futures trading under the cash index they settle against."),
+        (1, "Premium \u2014 futures ABOVE the index",
+         "Futures trading over the cash index they settle against."),
+    ):
+        st.markdown("**%s.** %s" % (title, blurb))
+        cells = [c for c in study["cells"] if c["sign"] == sign]
+        frame = pd.DataFrame([{
+            "Basis beyond": "%+d" % (sign * c["threshold"]),
+            "Episodes": c["episodes"],
+            "Days": c["days"],
+            "Median sessions to expiry": c["median_dte"],
+            "5d move": c["horizons"][5]["fut_median"],
+            "5d rose": c["horizons"][5]["up_pct"],
+            "10d move": c["horizons"][10]["fut_median"],
+            "10d rose": c["horizons"][10]["up_pct"],
+            "20d move": c["horizons"][20]["fut_median"],
+            "20d rose": c["horizons"][20]["up_pct"],
+            "10d index move": c["horizons"][10]["idx_median"],
+            "20d windows usable": "%d of %d" % (c["horizons"][20]["usable"],
+                                                c["horizons"][20]["attempted"]),
+        } for c in cells]).set_index("Basis beyond")
+        st.dataframe(frame.style.format({
+            "Median sessions to expiry": "{:.0f}",
+            "5d move": "{:+.2f}", "10d move": "{:+.2f}", "20d move": "{:+.2f}",
+            "5d rose": "{:.0f}%", "10d rose": "{:.0f}%", "20d rose": "{:.0f}%",
+            "10d index move": "{:+.2f}",
+        }, na_rep="\u2014"), use_container_width=True)
+
+    st.markdown("---")
+    st.markdown(
+        "**What every column means.**\n"
+        "- **Basis beyond** \u2014 the threshold, in dollars per hundredweight. "
+        "`-8` means futures were at least 8.00 under the index.\n"
+        "- **Episodes** \u2014 how many separate times basis crossed that line. "
+        "**This is the sample size.**\n"
+        "- **Days** \u2014 how many individual sessions were past it. Always larger, "
+        "because a single stretch spans many days. It is shown so the gap "
+        "between the two is visible; it is NOT the sample size.\n"
+        "- **Median sessions to expiry** \u2014 how much contract life remained when "
+        "each episode began.\n"
+        "- **5d / 10d / 20d move** \u2014 the median change in the FUTURES price over "
+        "that many trading sessions, in dollars per hundredweight.\n"
+        "- **5d / 10d / 20d rose** \u2014 the share of episodes where futures were "
+        "higher at the end of that window.\n"
+        "- **10d index move** \u2014 the same horizon for the CASH INDEX. This is the "
+        "other leg: a gap can close because futures moved, because cash moved, "
+        "or both, and those are different worlds.\n"
+        "- **20d windows usable** \u2014 how many episodes had a full 20 sessions left "
+        "on the SAME contract."
+    )
+    st.markdown(
+        "**Four things that would make these numbers lie, and what is done "
+        "about each.**\n"
+        "1. **Overlapping observations.** Thirty consecutive days past a "
+        "threshold are one event, not thirty. Counting days would report a "
+        "sample of fifteen as three hundred. Everything here is measured once "
+        "per episode, from its first day.\n"
+        "2. **The roll.** A nearby series switches contract at every expiry, so "
+        "a move measured across one books the gap between two different "
+        "contracts as a price change \u2014 median 4.36 on this series. Every move "
+        "here stays inside ONE contract. That necessarily drops episodes "
+        "starting too near expiry, which is why the usable count is shown: at "
+        "20 sessions a good share of episodes cannot be measured at all, and "
+        "the ones that survive skew toward early in a contract's life.\n"
+        "3. **Convergence is mechanical.** A cash-settled contract MUST meet "
+        "the index at expiry. So part of any narrowing is the contract "
+        "specification rather than the market, which is what the sessions-to-"
+        "expiry column is for \u2014 an episode starting 5 sessions out is a much "
+        "weaker claim than one starting 35 out.\n"
+        "4. **No baseline, no meaning.** Every up-rate is only readable against "
+        "the unconditional table above."
+    )
+    st.markdown(
+        "**Limits worth saying plainly.** One contract, one market, "
+        "%d sessions from %s to %s, and a window that trended up throughout. "
+        "The episode counts at the widest thresholds are small. This is a "
+        "description of what has happened, not a backtest and not a forecast: "
+        "it carries no transaction costs, no slippage, no position sizing and "
+        "no test against a falling market."
+        % (study["sessions"], study["start"].strftime("%b %Y"),
+           study["end"].strftime("%b %Y"))
+    )
+
 def render_futures_tab():
     """The Futures Basis tab: the two series, then the basis between them.
 
@@ -370,6 +496,12 @@ def render_futures_tab():
     st.plotly_chart(fig, use_container_width=True)
 
     render_futures_basis(bundle)
+
+    # STAFF ONLY in the deployed twin; this repo has no client build, so a
+    # plain expander is the equivalent. tests/test_no_drift.py asserts the
+    # asymmetry in both directions so it stays a decision rather than a drift.
+    with st.expander(STUDY_LABEL):
+        render_basis_study(bundle)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

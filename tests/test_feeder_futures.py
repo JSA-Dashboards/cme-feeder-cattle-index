@@ -45,16 +45,35 @@ def test_the_module_stays_self_contained():
     an import of anything repo-local would have to be byte-identical there too
     -- a second file under the drift test, bought for nothing. It talks to
     Massive directly for that reason.
+
+    PARSED WITH ast, NOT BY SCANNING LINES. The line scanner this replaced
+    matched any stripped line beginning "import ", which meant a COMMENT could
+    fail it -- a sentence wrapping onto a line that happened to start with the
+    word made the module look like it imported `set`. That is the failure
+    CLAUDE.md names: a guard that reads prose instead of code. It also missed
+    imports nested inside functions, which are exactly the ones a reader
+    skimming the header would not see.
     """
+    import ast as _ast
     source = (APP_DIR / "feeder_futures.py").read_text(encoding="utf-8")
     imported = set()
-    for line in source.splitlines():
-        line = line.strip()
-        if line.startswith("import "):
-            imported.add(line[len("import "):].split()[0].split(".")[0])
-        elif line.startswith("from ") and " import " in line:
-            imported.add(line[len("from "):].split()[0].split(".")[0])
+    for node in _ast.walk(_ast.parse(source)):
+        if isinstance(node, _ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, _ast.ImportFrom) and node.level == 0:
+            imported.add((node.module or "").split(".")[0])
     assert imported == {"concurrent", "datetime", "requests"}, imported
+
+
+def test_that_import_pin_can_actually_fail():
+    """Plant a nested import the old line scanner would also have missed."""
+    import ast as _ast
+    bad = "import requests\ndef f():\n    import statistics\n    return statistics\n"
+    found = set()
+    for node in _ast.walk(_ast.parse(bad)):
+        if isinstance(node, _ast.Import):
+            found.update(a.name.split(".")[0] for a in node.names)
+    assert found == {"requests", "statistics"}
 
 
 # -- the splice -------------------------------------------------------------
@@ -176,6 +195,104 @@ def test_that_convergence_check_can_actually_fail():
 def test_convergence_is_none_rather_than_zero_when_nothing_qualifies():
     """None says "not measured"; 0.0 would say "measured, and perfect"."""
     assert ff.convergence([]) is None
+
+
+# -- the conditional study, and the four ways it could lie ------------------
+
+def _contract_span(start, n, contract, basis_at, index=300.0):
+    from datetime import timedelta as _td
+    rows = [{"date": start + _td(days=i), "settle": index + basis_at(i),
+             "contract": contract} for i in range(n)]
+    return rows
+
+
+def test_a_forward_move_across_a_roll_is_refused():
+    """
+    THE ROLL IS NOT A RETURN. Differencing a nearby series across an expiry
+    books the gap between two different contracts as a price move. Here the
+    back month sits 20 higher; a careless window would report +20.
+    """
+    rows = (_contract_span(date(2026, 1, 1), 3, "GFV6", lambda i: 0.0)
+            + _contract_span(date(2026, 1, 4), 3, "GFX6", lambda i: 20.0))
+    joined = ff.with_basis(rows, {r["date"]: 300.0 for r in rows})
+    assert ff.forward_move(joined, 0, 1) is not None      # inside GFV6
+    assert ff.forward_move(joined, 0, 3) is None          # would cross the roll
+    assert ff.forward_move(joined, 3, 2) is not None      # inside GFX6
+
+
+def test_that_roll_refusal_can_fail():
+    """Ignore the contract and the same window returns the gap as a move."""
+    rows = (_contract_span(date(2026, 1, 1), 3, "GFV6", lambda i: 0.0)
+            + _contract_span(date(2026, 1, 4), 3, "GFX6", lambda i: 20.0))
+    joined = ff.with_basis(rows, {r["date"]: 300.0 for r in rows})
+    naive = joined[0 + 3]["settle"] - joined[0]["settle"]
+    assert naive == pytest.approx(20.0)
+    assert ff.forward_move(joined, 0, 3) is None
+
+
+def test_episodes_collapse_a_run_into_one_event():
+    """
+    Thirty consecutive days over a threshold are ONE thing that happened.
+    Counting days is how a sample of three reports itself as twenty-two.
+    """
+    flags = [False, True, True, True, False, False, True, True, False, True]
+    assert ff.episode_starts(flags) == [1, 6, 9]
+    assert sum(flags) == 6          # the day count a careless study would use
+
+
+def test_an_episode_that_starts_on_day_zero_still_counts(self=None):
+    assert ff.episode_starts([True, True, False]) == [0]
+
+
+def test_premium_and_discount_are_kept_apart():
+    """They are not mirror images, so pooling |basis| would average a real
+    signal against a non-signal and report neither."""
+    rows = _contract_span(date(2026, 1, 1), 40,
+                          "GFV6", lambda i: 9.0 if i < 10 else -9.0)
+    joined = ff.with_basis(rows, {r["date"]: 300.0 for r in rows})
+    study = ff.conditional_study(joined, thresholds=(8,), horizons=(5,))
+    signs = {c["sign"]: c for c in study["cells"]}
+    assert signs[1]["episodes"] == 1
+    assert signs[-1]["episodes"] == 1
+    assert signs[1]["days"] == 10
+    assert signs[-1]["days"] == 30
+
+
+def test_the_study_reports_a_baseline_to_read_the_cells_against():
+    """A 70% up-rate is not a finding if the unconditional rate is 70%."""
+    rows = _contract_span(date(2026, 1, 1), 40, "GFV6", lambda i: 0.0)
+    for i, r in enumerate(rows):
+        r["settle"] = 300.0 + i            # a series that only ever rises
+    joined = ff.with_basis(rows, {r["date"]: 300.0 for r in rows})
+    study = ff.conditional_study(joined, thresholds=(8,), horizons=(5,))
+    assert study["baseline"][5]["up_pct"] == pytest.approx(100.0)
+
+
+def test_usable_and_attempted_are_both_reported():
+    """Dropping roll-crossing windows selects for early-in-contract entries,
+    so the share dropped has to be visible rather than silently absorbed."""
+    rows = _contract_span(date(2026, 1, 1), 12, "GFV6", lambda i: -9.0)
+    joined = ff.with_basis(rows, {r["date"]: 300.0 for r in rows})
+    study = ff.conditional_study(joined, thresholds=(8,), horizons=(20,))
+    cell = [c for c in study["cells"] if c["sign"] == -1][0]
+    h = cell["horizons"][20]
+    assert h["attempted"] == 1 and h["usable"] == 0
+    assert h["up_pct"] is None, "an unmeasurable cell must not report a rate"
+
+
+def test_median_dte_is_carried_so_convergence_is_visible():
+    """A cash-settled contract must converge, so an entry 2 sessions from
+    expiry is a different claim from one 40 sessions out."""
+    rows = _contract_span(date(2026, 1, 1), 30, "GFV6", lambda i: -9.0)
+    joined = ff.with_basis(rows, {r["date"]: 300.0 for r in rows})
+    cell = [c for c in ff.conditional_study(joined, thresholds=(8,),
+                                            horizons=(5,))["cells"]
+            if c["sign"] == -1][0]
+    assert cell["median_dte"] == 29        # first day of a 30-session contract
+
+
+def test_the_study_is_empty_rather_than_fabricated_on_no_rows():
+    assert ff.conditional_study([]) == {}
 
 
 # -- the summary ------------------------------------------------------------

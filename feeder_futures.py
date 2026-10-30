@@ -290,6 +290,130 @@ def window_table(rows: list, spans: tuple = BASIS_WINDOWS,
     return out
 
 
+# ── What follows a wide basis ────────────────────────────────────────────────
+#
+# Four things will each produce a confident wrong number here, and every one of
+# them is handled below rather than assumed away. They are the whole reason
+# this is in a tested module instead of a dataframe expression on a page.
+#
+# 1. OVERLAPPING OBSERVATIONS. Consecutive days over a threshold are ONE event,
+#    not thirty. Counting days would report a sample of fifteen as three
+#    hundred, and a probability computed off it as though it had that much
+#    behind it. Every figure below is per EPISODE -- the first day of each run
+#    -- with the raw day count carried alongside so the inflation is visible.
+#
+# 2. ROLL CONTAMINATION. A forward return spanning a roll includes the contract
+#    gap, median 4.36 on this series, which is not a move anybody could have
+#    captured. Forward moves here are SAME-CONTRACT ONLY. That necessarily
+#    drops entries too close to expiry to have the horizon left, which is a
+#    selection effect of its own, so `usable` and `attempted` are both returned
+#    and the page prints the ratio.
+#
+# 3. MECHANICAL CONVERGENCE. A cash-settled contract MUST converge on the index
+#    by expiry; that is what settlement means. So "a wide basis narrows" is
+#    partly the contract spec rather than a market fact, and a study that
+#    ignores sessions-to-expiry merely rediscovers it. `median_dte` is returned
+#    for every cell so a reader can see how much room the trade had.
+#
+# 4. NO BASELINE, NO MEANING. "68% rose" is not a finding if futures rose 64%
+#    of the time unconditionally. `baseline` is the same horizons measured over
+#    every session, and it is returned first because every other number is only
+#    readable against it.
+CONDITIONAL_THRESHOLDS = (5, 7, 8, 10, 12)
+CONDITIONAL_HORIZONS = (5, 10, 20)
+
+
+def _median(xs):
+    """Written out rather than imported from statistics, so the module's
+    import set stays {concurrent, datetime, requests} and its test can pin it.
+    Same reasoning as six_state._median."""
+    s = sorted(xs)
+    n = len(s)
+    if not n:
+        return None
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def forward_move(rows: list, i: int, horizon: int):
+    """(futures, index, basis) change `horizon` sessions on, or None.
+
+    NONE WHEN THE WINDOW CROSSES A ROLL. A nearby series changes contract at
+    every expiry, so differencing across one measures the contract switching,
+    not the price moving -- it would book the roll gap as a return.
+    """
+    j = i + horizon
+    if j >= len(rows) or rows[j]["contract"] != rows[i]["contract"]:
+        return None
+    return (rows[j]["settle"] - rows[i]["settle"],
+            rows[j]["fci_value"] - rows[i]["fci_value"],
+            rows[j]["basis"] - rows[i]["basis"])
+
+
+def episode_starts(flags: list) -> list:
+    """The first index of each run of True -- one entry per episode.
+
+    A thirty-day stretch over the threshold is one thing that happened, and
+    counting it thirty times is how a study reports certainty it has not got.
+    """
+    return [i for i, f in enumerate(flags) if f and (i == 0 or not flags[i - 1])]
+
+
+def _horizon_stats(rows, entries, horizon):
+    moves = [forward_move(rows, i, horizon) for i in entries]
+    usable = [m for m in moves if m]
+    if not usable:
+        return {"usable": 0, "attempted": len(moves), "up_pct": None,
+                "fut_median": None, "idx_median": None, "basis_median": None}
+    return {
+        "usable": len(usable),
+        "attempted": len(moves),
+        "up_pct": 100.0 * sum(1 for m in usable if m[0] > 0) / len(usable),
+        "fut_median": _median([m[0] for m in usable]),
+        "idx_median": _median([m[1] for m in usable]),
+        "basis_median": _median([m[2] for m in usable]),
+    }
+
+
+def conditional_study(rows: list, thresholds: tuple = CONDITIONAL_THRESHOLDS,
+                      horizons: tuple = CONDITIONAL_HORIZONS) -> dict:
+    """What futures did after basis ran past each threshold, by episode.
+
+    Returns {} on an empty series. `cells` carries one entry per
+    (sign, threshold); sign +1 is futures OVER the index (premium) and -1 is
+    UNDER (discount), and they are kept apart because they are not mirror
+    images -- a premium has historically closed by the INDEX rising rather
+    than futures falling, which the idx_median figures show.
+    """
+    if not rows:
+        return {}
+
+    out = {
+        "sessions": len(rows),
+        "start": rows[0]["date"],
+        "end": rows[-1]["date"],
+        "baseline": {h: _horizon_stats(rows, list(range(len(rows))), h)
+                     for h in horizons},
+        "cells": [],
+    }
+    for sign in (1, -1):
+        for t in thresholds:
+            flags = [(r["basis"] >= t) if sign > 0 else (r["basis"] <= -t)
+                     for r in rows]
+            entries = episode_starts(flags)
+            out["cells"].append({
+                "sign": sign,
+                "threshold": t,
+                "days": sum(flags),
+                "episodes": len(entries),
+                "median_dte": _median([rows[i]["sessions_to_expiry"]
+                                       for i in entries]),
+                "horizons": {h: _horizon_stats(rows, entries, h)
+                             for h in horizons},
+            })
+    return out
+
+
 def summary(rows: list) -> dict:
     """Headline figures for the panel. Returns {} on an empty series."""
     if not rows:

@@ -90,6 +90,20 @@ MARS_DB_PATH = Path(__file__).parent / "data" / "mars_history.db"
 FUT_LINE = "#e8833a"
 FUT_PREMIUM = "#e8833a"
 FUT_DISCOUNT = "#0693e3"
+# Plotly axis styling for the panels below, MODULE LEVEL ON PURPOSE.
+#
+# The page's own AXIS dict is assigned inside `with tab_index:`. A `with` block
+# creates no scope, so in this repo's copy that lands in module globals and
+# reads fine from anywhere -- but the portal copy guards the same body with
+# `if tab_index.open:`, and the tabs are lazy, so opening any OTHER tab skips
+# the assignment entirely and `**AXIS` raises NameError. Same two palette
+# tokens, no dependency on which tab a reader happened to open.
+FUT_AXIS = dict(
+    gridcolor=BORDER, linecolor=BORDER, showgrid=True,
+    tickfont=dict(color=MUTED, size=11),
+    title_font=dict(color=MUTED, size=11),
+    zeroline=False,
+)
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading front-month futures…")
@@ -165,8 +179,8 @@ def render_futures_basis(bundle):
     bars.update_layout(
         margin=dict(l=0, r=0, t=6, b=0), height=240,
         paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-        xaxis=dict(**AXIS, type="date"),
-        yaxis=dict(**AXIS, title="Futures − Index ($/cwt)"),
+        xaxis=dict(**FUT_AXIS, type="date"),
+        yaxis=dict(**FUT_AXIS, title="Futures − Index ($/cwt)"),
         showlegend=False,
     )
     st.plotly_chart(bars, use_container_width=True)
@@ -187,6 +201,35 @@ def render_futures_basis(bundle):
         )
     _bits.append("Hover any bar for its contract and sessions remaining.")
     st.caption(" ".join(_bits))
+
+    _wins = feeder_futures.window_table(rows)
+
+    def _excursion(row):
+        """A deviation is shown WITH ITS DATE. The number alone is not
+        checkable, and the use of an extreme is that somebody can go and look
+        at the day it happened."""
+        if row is None:
+            return "—"
+        return f"{row['basis']:+.2f} on {row['date']:%b %d, %Y}"
+
+    _wt = pd.DataFrame([{
+        "Window": w["label"],
+        "Sessions": w["sessions"],
+        "Mean basis": w["mean"],
+        "Widest premium": _excursion(w["high"]),
+        "Widest discount": _excursion(w["low"]),
+    } for w in _wins]).set_index("Window")
+    st.dataframe(_wt.style.format({"Mean basis": "{:+.2f}"}),
+                 use_container_width=True)
+    st.caption(
+        "Trailing **calendar** days, anchored on the last session carrying both "
+        "a settle and a published index rather than on today — CME prints on a "
+        "lag and neither side trades at a weekend, so anchoring on today would "
+        "quietly shorten every window and shorten it further after a holiday. "
+        "Premium is futures **over** the index, discount is **under**; each "
+        "window's extremes are the widest within that window, so a short window "
+        "can repeat a longer one's."
+    )
 
     _years = pd.DataFrame(
         [{"Year": y, "Mean basis": v} for y, v in s["by_year"].items()]
@@ -268,6 +311,55 @@ st.markdown(f"""
   }}
 </style>
 """, unsafe_allow_html=True)
+
+def render_futures_tab():
+    """The Futures Basis tab: the two series, then the basis between them.
+
+    Plots the bundle's OWN index column rather than fci_df, so the lines above
+    and the bars below are guaranteed to be the same pair of numbers. That also
+    starts the index line where the futures start instead of running it back to
+    2015 against nothing -- on this tab the overlap is the subject.
+    """
+    bundle = load_futures_basis()
+    if bundle.get("error"):
+        st.info("Futures basis unavailable — " + bundle["error"])
+        return
+    rows, s = bundle["rows"], bundle["summary"]
+
+    st.caption(
+        "CME's front-month Feeder Cattle future against the index it settles "
+        "against. Both are \\$/cwt — a GF quote of 351.425 ¢/lb **is** "
+        "\\$351.425/cwt — so they share one axis and subtract directly. The "
+        "index here is CME's own published series, not this page's early "
+        "estimate, and the futures are spliced **unadjusted**, so every point "
+        "is a price that traded."
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[r["date"] for r in rows], y=[r["fci_value"] for r in rows],
+        name="CME Feeder Cattle Index (published)", mode="lines",
+        line=dict(color=JPSI_BLUE, width=2),
+        hovertemplate="<b>%{x|%b %d, %Y}</b>: $%{y:.2f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=[r["date"] for r in rows], y=[r["settle"] for r in rows],
+        name="Front-month futures (nearby, unadjusted)", mode="lines",
+        line=dict(color=FUT_LINE, width=1.6),
+        hovertemplate="<b>%{x|%b %d, %Y}</b>: $%{y:.3f}<extra></extra>",
+    ))
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=10, b=0), height=430,
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, font=dict(size=10)),
+        xaxis=dict(**FUT_AXIS, type="date"),
+        yaxis=dict(**FUT_AXIS, title="$/cwt", tickprefix="$"),
+    )
+    add_watermark(fig, size=0.34, opacity=0.055)
+    st.plotly_chart(fig, use_container_width=True)
+
+    render_futures_basis(bundle)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1510,8 +1602,8 @@ _render_census()
 # recompute_fci_daily() reads mars_sales only, and
 # tests/test_index_isolation.py in the cme-feeder-cattle-index repo enforces
 # all of that structurally rather than by convention.
-tab_index, tab_cash, tab_basis, tab_six = st.tabs(
-    ["Index", "Cash Feeder Prices", "Sale Barn Basis",
+tab_index, tab_futures, tab_cash, tab_basis, tab_six = st.tabs(
+    ["Index", "Futures Basis", "Cash Feeder Prices", "Sale Barn Basis",
      "6 State Weekly Feeder Cattle Prices"], on_change="rerun")
 
 with tab_index:
@@ -2326,25 +2418,6 @@ with tab_index:
         yaxis=dict(**AXIS, title="$/cwt", tickprefix="$"),
         height=380,
     )
-    # ONE AXIS. The futures settle and the index are the same unit -- a GF quote of
-    # 351.425 cents per pound IS 351.425 dollars per hundredweight -- so the overlay
-    # shares the index's y-axis. A second y-axis would let an arbitrary alignment
-    # invent a relationship; basis gets its own panel below instead.
-    _fut_on = st.toggle(
-        "Overlay front-month futures", value=False, key="fci_futures_overlay",
-        help="CME feeder futures (GF) against this index, plus the basis between "
-             "them. Futures settles come from Massive and begin 2021-09-02, so the "
-             "overlay is shorter than the index line behind it.",
-    )
-    _fut = load_futures_basis() if _fut_on else None
-    if _fut and not _fut.get("error"):
-        _frows = _fut["rows"]
-        fig.add_trace(go.Scatter(
-            x=[r["date"] for r in _frows], y=[r["settle"] for r in _frows],
-            name="Front-month futures (nearby, unadjusted)", mode="lines",
-            line=dict(color=FUT_LINE, width=1.6),
-            hovertemplate="<b>%{x|%b %d, %Y}</b>: $%{y:.3f}<extra></extra>",
-        ))
     add_watermark(fig, size=0.34, opacity=0.055)
     st.plotly_chart(fig, use_container_width=True)
     caption_bits = [
@@ -2361,11 +2434,6 @@ with tab_index:
             "series moves close to a random walk), but it's still not a trading signal or market forecast."
         )
     st.caption(" ".join(caption_bits))
-    if _fut is not None:
-        if _fut.get("error"):
-            st.info("Futures overlay unavailable — " + _fut["error"])
-        else:
-            render_futures_basis(_fut)
 
 
     # ── Daily Sale Price vs the Index ─────────────────────────────────────────────
@@ -3115,6 +3183,13 @@ with tab_index:
 
 
     # ── Footer ────────────────────────────────────────────────────────────────────
+
+
+with tab_futures:
+    if tab_futures.open:
+        st.markdown('<div class="sec-header">Futures vs the Index</div>',
+                    unsafe_allow_html=True)
+        render_futures_tab()
 
 
 with tab_cash:

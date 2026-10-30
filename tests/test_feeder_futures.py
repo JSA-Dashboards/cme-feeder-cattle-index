@@ -194,6 +194,97 @@ def test_summary_counts_rolls_as_contract_changes():
     assert out["sessions"] == 4
 
 
+# -- the trailing windows and the extremes ---------------------------------
+
+def _span(start, n, basis_at):
+    """n consecutive daily rows from `start`, with basis set by a callable."""
+    from datetime import timedelta as _td
+    rows = []
+    for i in range(n):
+        d = start + _td(days=i)
+        rows.append({"date": d, "settle": 300.0 + basis_at(i), "contract": "GFV6"})
+    index = {r["date"]: 300.0 for r in rows}
+    return ff.with_basis(rows, index)
+
+
+def test_a_trailing_window_is_anchored_on_the_LAST_SESSION_not_today():
+    """The window must not shrink because CME prints on a lag.
+
+    This series ends at the last date with BOTH a settle and a published
+    index, which is routinely days behind today. Anchoring on today would make
+    "the last 30 days" cover fewer and fewer sessions the staler the data got,
+    and cover a different span again after a holiday.
+    """
+    rows = _span(date(2026, 1, 1), 40, lambda i: 1.0)
+    got = ff.trailing(rows, 30)
+    assert len(got) == 30
+    assert got[-1]["date"] == date(2026, 2, 9)      # the last session
+    assert got[0]["date"] == date(2026, 1, 11)      # 30 calendar days inclusive
+
+
+def test_that_anchor_check_can_actually_fail():
+    """Anchor the same data on a later 'today' and the window must shrink --
+    which is exactly the behaviour the default avoids."""
+    rows = _span(date(2026, 1, 1), 40, lambda i: 1.0)
+    stale = ff.trailing(rows, 30, anchor=date(2026, 2, 20))
+    assert len(stale) == 19 < 30
+
+
+def test_excursions_return_the_rows_so_a_deviation_can_be_looked_up():
+    rows = _span(date(2026, 1, 1), 5, lambda i: [0.5, -3.0, 2.0, 7.5, -1.0][i])
+    high, low = ff.excursions(rows)
+    assert high["basis"] == pytest.approx(7.5)
+    assert high["date"] == date(2026, 1, 4)
+    assert low["basis"] == pytest.approx(-3.0)
+    assert low["date"] == date(2026, 1, 2)
+    assert "contract" in high and "contract" in low
+
+
+def test_excursions_on_an_all_positive_series_still_report_a_least_positive_low():
+    """`low` is the MINIMUM, not "the most negative, if any are". A series that
+    never went negative has a smallest value and the table should show it
+    rather than a dash that reads as missing data."""
+    rows = _span(date(2026, 1, 1), 3, lambda i: [2.0, 5.0, 3.0][i])
+    high, low = ff.excursions(rows)
+    assert high["basis"] == pytest.approx(5.0)
+    assert low["basis"] == pytest.approx(2.0)
+
+
+def test_window_table_covers_every_span_and_the_full_series():
+    rows = _span(date(2026, 1, 1), 400, lambda i: 1.0)
+    table = ff.window_table(rows)
+    assert [r["label"] for r in table] == [
+        "Last 30 days", "Last 90 days", "Last 180 days", "Last 365 days",
+        "Full history"]
+    assert [r["sessions"] for r in table] == [30, 90, 180, 365, 400]
+    assert all(r["mean"] == pytest.approx(1.0) for r in table)
+
+
+def test_a_window_longer_than_the_history_reports_what_exists():
+    """Not an error and not a blank: 200 sessions is the honest answer to
+    "the last 365 days" on a 200-session file, and `sessions` says so."""
+    rows = _span(date(2026, 1, 1), 50, lambda i: 2.0)
+    table = {r["label"]: r for r in ff.window_table(rows)}
+    assert table["Last 365 days"]["sessions"] == 50
+    assert table["Last 365 days"]["mean"] == pytest.approx(2.0)
+
+
+def test_an_empty_window_reports_None_rather_than_zero():
+    """"Measured, and flat" and "nothing to measure" are different answers."""
+    table = {r["label"]: r for r in ff.window_table([])}
+    assert table["Last 30 days"]["sessions"] == 0
+    assert table["Last 30 days"]["mean"] is None
+    assert table["Last 30 days"]["high"] is None
+
+
+def test_window_means_actually_differ_when_the_recent_period_differs():
+    """The guard that the windows are not all quietly reading the same rows."""
+    rows = _span(date(2026, 1, 1), 200, lambda i: 10.0 if i >= 180 else 0.0)
+    table = {r["label"]: r for r in ff.window_table(rows)}
+    assert table["Last 30 days"]["mean"] > table["Last 180 days"]["mean"]
+    assert table["Last 180 days"]["mean"] > table["Full history"]["mean"]
+
+
 def test_summary_year_means_are_per_year_not_cumulative():
     rows = _rows((date(2025, 9, 1), 310.0, "GFU5"), (date(2025, 9, 2), 290.0, "GFU5"),
                  (date(2026, 9, 1), 305.0, "GFU6"))

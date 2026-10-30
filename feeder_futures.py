@@ -59,7 +59,7 @@ and it did in every year measured (0.41 to 0.99).
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -217,6 +217,77 @@ def convergence(rows: list) -> float:
     """
     at_expiry = [abs(r["basis"]) for r in rows if r["sessions_to_expiry"] <= EXPIRY_SESSIONS]
     return sum(at_expiry) / len(at_expiry) if at_expiry else None
+
+
+#: Trailing windows for the basis table, in CALENDAR days. 365 rather than
+#: year-to-date so the four read as one ladder: mixing three trailing windows
+#: with a calendar-year figure would make the last column answer a different
+#: question from the other three, and on 2 January it would answer almost none.
+BASIS_WINDOWS = (30, 90, 180, 365)
+
+
+def trailing(rows: list, days: int, anchor: date = None) -> list:
+    """The rows within `days` calendar days of the anchor, inclusive.
+
+    THE ANCHOR IS THE LAST SESSION, NOT TODAY, unless one is passed. This
+    series ends at the last date carrying BOTH a settle and a published index,
+    and that is routinely a day or three behind today -- CME prints on a lag,
+    and neither side trades at a weekend. Anchoring on today would quietly
+    shorten every window by that gap, and shorten it further after a holiday,
+    so "the 30-day average" would mean something slightly different each time
+    anyone read it.
+    """
+    if not rows:
+        return []
+    end = anchor or rows[-1]["date"]
+    start = end - timedelta(days=days - 1)
+    return [r for r in rows if start <= r["date"] <= end]
+
+
+def excursions(rows: list) -> tuple:
+    """The widest basis each way, as (most positive row, most negative row).
+
+    Returns the ROWS, not bare numbers. A deviation without its date and
+    contract is not checkable, and the entire use of an extreme is that
+    somebody can go and look at the day it happened.
+    """
+    if not rows:
+        return None, None
+    return (max(rows, key=lambda r: r["basis"]),
+            min(rows, key=lambda r: r["basis"]))
+
+
+def window_table(rows: list, spans: tuple = BASIS_WINDOWS,
+                 anchor: date = None) -> list:
+    """Mean basis and both extremes per trailing window, plus the full series.
+
+    A window with no sessions in it reports mean None and no extremes rather
+    than 0.0 -- "measured, and flat" and "nothing to measure" are different
+    answers and a zero would merge them.
+    """
+    out = []
+    for days in spans:
+        segment = trailing(rows, days, anchor)
+        high, low = excursions(segment)
+        out.append({
+            "label": f"Last {days} days",
+            "days": days,
+            "sessions": len(segment),
+            "mean": (sum(r["basis"] for r in segment) / len(segment)
+                     if segment else None),
+            "high": high,
+            "low": low,
+        })
+    high, low = excursions(rows)
+    out.append({
+        "label": "Full history",
+        "days": None,
+        "sessions": len(rows),
+        "mean": sum(r["basis"] for r in rows) / len(rows) if rows else None,
+        "high": high,
+        "low": low,
+    })
+    return out
 
 
 def summary(rows: list) -> dict:

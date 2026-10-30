@@ -742,3 +742,114 @@ def test_the_note_key_guard_can_actually_fail():
     for src, expect in ((good, True), (bad, False)):
         args = src.split("_six_draft_store.store(")[1]
         assert ("_six_note_key" in args) is expect, src
+
+
+# ── The futures panels may not borrow a name a lazy tab defines ──────────────
+#
+# AXIS is assigned inside `with tab_index:`. A `with` block creates no scope, so
+# in THIS repo's copy -- whose Index body always runs -- the assignment lands in
+# module globals and `**AXIS` reads fine from anywhere. The portal copy guards
+# the same body with `if tab_index.open:` and the tabs are lazy, so opening any
+# other tab skips the assignment and a module-level function that reads AXIS
+# raises NameError.
+#
+# It cost a working standalone page and a broken deployed one on 2026-10-30,
+# from one insertion, and neither py_compile nor 918 tests saw it. What found it
+# was opening the OTHER copy in a browser.
+
+FUTURES_RENDERERS = ("render_futures_basis", "render_futures_tab")
+
+
+def _names_only_a_nested_block_defines(src, func_names):
+    """Names a module-level function loads that nothing at column 0 defines.
+
+    A name assigned only at an indent is a name whose existence depends on some
+    block having executed. For a function called from a DIFFERENT tab than the
+    one that assigns it, that is a NameError waiting for a reader to click.
+    """
+    import builtins
+    tree = ast.parse(src)
+
+    module_level = set(dir(builtins))
+    nested = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            (module_level if node.col_offset == 0 else nested).add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                (module_level if node.col_offset == 0 else nested).add(
+                    (alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                for sub in ast.walk(t):
+                    if isinstance(sub, ast.Name):
+                        (module_level if node.col_offset == 0 else nested).add(sub.id)
+        elif isinstance(node, (ast.For, ast.comprehension, ast.With, ast.withitem)):
+            pass
+
+    offenders = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in func_names:
+            continue
+        local = {a.arg for a in node.args.args}
+        for sub in ast.walk(node):
+            if isinstance(sub, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                tg = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+                for t in tg:
+                    for nm in ast.walk(t):
+                        if isinstance(nm, ast.Name):
+                            local.add(nm.id)
+            elif isinstance(sub, (ast.FunctionDef, ast.Lambda)):
+                local.update(a.arg for a in sub.args.args)
+                if isinstance(sub, ast.FunctionDef):
+                    local.add(sub.name)
+            elif isinstance(sub, ast.comprehension):
+                for nm in ast.walk(sub.target):
+                    if isinstance(nm, ast.Name):
+                        local.add(nm.id)
+            elif isinstance(sub, ast.For):
+                for nm in ast.walk(sub.target):
+                    if isinstance(nm, ast.Name):
+                        local.add(nm.id)
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
+                    and sub.id not in local and sub.id not in module_level
+                    and sub.id in nested):
+                offenders.setdefault(node.name, set()).add(sub.id)
+    return offenders
+
+
+@pytest.mark.parametrize("which", ["standalone", "portal"])
+def test_the_futures_panels_depend_on_nothing_a_lazy_tab_defines(which):
+    app = (HERE / "app.py") if which == "standalone" else (PORTAL / "app.py")
+    src = app.read_text(encoding="utf-8")
+    present = [f for f in FUTURES_RENDERERS if f"def {f}(" in src]
+    assert present, f"{app} defines neither futures renderer"
+    offenders = _names_only_a_nested_block_defines(src, FUTURES_RENDERERS)
+    assert not offenders, (
+        f"{app}: {offenders} are assigned only inside an indented block, so a "
+        f"reader who opens the Futures Basis tab without the Index tab having "
+        f"rendered gets NameError. Define them at column 0.")
+
+
+def test_that_lazy_name_check_can_actually_fail():
+    """Plant the exact bug and the checker must name it."""
+    bad = (
+        "import plotly.graph_objects as go\n"
+        "def render_futures_tab():\n"
+        "    fig = go.Figure()\n"
+        "    fig.update_layout(xaxis=dict(**AXIS))\n"
+        "with tab_index:\n"
+        "    AXIS = dict(gridcolor='#eee')\n"
+    )
+    found = _names_only_a_nested_block_defines(bad, FUTURES_RENDERERS)
+    assert found == {"render_futures_tab": {"AXIS"}}, found
+
+    good = bad.replace("with tab_index:\n    AXIS", "if True:\n    pass\nAXIS")
+    good = ("AXIS = dict(gridcolor='#eee')\n"
+            "import plotly.graph_objects as go\n"
+            "def render_futures_tab():\n"
+            "    fig = go.Figure()\n"
+            "    fig.update_layout(xaxis=dict(**AXIS))\n")
+    assert _names_only_a_nested_block_defines(good, FUTURES_RENDERERS) == {}

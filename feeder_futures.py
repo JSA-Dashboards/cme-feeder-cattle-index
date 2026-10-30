@@ -414,6 +414,62 @@ def conditional_study(rows: list, thresholds: tuple = CONDITIONAL_THRESHOLDS,
     return out
 
 
+def live_basis(rows: list, published: dict, estimate: dict = None) -> dict:
+    """Where basis sits on the NEWEST session, and which index that used.
+
+    Returns {} when nothing can be measured.
+
+    PREFERS CME'S PUBLISHED INDEX AND SAYS SO WHEN IT FALLS BACK. The study is
+    built on the published series, so a live reading taken against something
+    else is not strictly the same measurement -- but CME prints on a lag, and
+    on the two or three days before a print the published series has nothing to
+    offer. Refusing to read at all for those days would blank the panel exactly
+    when the market has moved, so the local estimate is used and the row says
+    `source`. The caller shows it.
+
+    The substitution is small on this data -- the estimate has matched CME to
+    the cent on the days both exist -- but "small" is not "none", and a panel
+    that silently swapped series would be the drift this repo keeps a rule
+    about.
+    """
+    if not rows:
+        return {}
+    estimate = estimate or {}
+    for row in reversed(rows):
+        for source, table in (("CME published", published), ("JSA estimate", estimate)):
+            value = table.get(row["date"])
+            if value is None:
+                continue
+            return {
+                "date": row["date"],
+                "contract": row["contract"],
+                "settle": row["settle"],
+                "index": value,
+                "basis": row["settle"] - value,
+                "source": source,
+            }
+    return {}
+
+
+def bucket_for(study: dict, basis: float):
+    """The WIDEST threshold this basis clears, or None if it clears none.
+
+    None is the common answer and the panel must say so plainly: only 3.5% of
+    sessions measured to 2026-10-30 sat at 12 or wider in either direction. A
+    reading that always lands in some bucket is one nobody should trust, so
+    this returns nothing rather than reaching for the nearest row.
+
+    Widest, not nearest: a basis of -13 clears -5, -7, -8, -10 and -12, and the
+    -12 row is the one whose episodes actually resemble it.
+    """
+    if not study or basis is None:
+        return None
+    sign = 1 if basis > 0 else -1
+    clears = [c for c in study.get("cells", [])
+              if c["sign"] == sign and abs(basis) >= c["threshold"]]
+    return max(clears, key=lambda c: c["threshold"]) if clears else None
+
+
 def summary(rows: list) -> dict:
     """Headline figures for the panel. Returns {} on an empty series."""
     if not rows:

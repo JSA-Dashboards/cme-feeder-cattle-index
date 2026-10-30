@@ -295,6 +295,89 @@ def test_the_study_is_empty_rather_than_fabricated_on_no_rows():
     assert ff.conditional_study([]) == {}
 
 
+# -- the live reading, and the bucket it does or does not fall in -----------
+
+def test_the_live_reading_prefers_CMEs_published_index():
+    rows = _contract_span(date(2026, 1, 1), 3, "GFX6", lambda i: 0.0)
+    pub = {r["date"]: 300.0 for r in rows}
+    est = {r["date"]: 999.0 for r in rows}
+    got = ff.live_basis(rows, pub, est)
+    assert got["source"] == "CME published"
+    assert got["index"] == pytest.approx(300.0)
+
+
+def test_it_falls_back_to_the_estimate_and_SAYS_SO():
+    """
+    CME prints on a lag, so the newest sessions routinely have no published
+    index. Refusing to read would blank the panel exactly when the market has
+    moved -- but the swap has to be visible, not silent.
+    """
+    rows = _contract_span(date(2026, 1, 1), 3, "GFX6", lambda i: -12.0)
+    pub = {}                                   # CME has not printed yet
+    est = {rows[-1]["date"]: 350.0}
+    got = ff.live_basis(rows, pub, est)
+    assert got["source"] == "JSA estimate"
+    assert got["date"] == rows[-1]["date"]
+    assert got["basis"] == pytest.approx(rows[-1]["settle"] - 350.0)
+
+
+def test_it_walks_back_to_the_newest_session_that_can_be_measured():
+    rows = _contract_span(date(2026, 1, 1), 4, "GFX6", lambda i: 0.0)
+    got = ff.live_basis(rows, {rows[1]["date"]: 300.0}, {})
+    assert got["date"] == rows[1]["date"], "took a session with no index at all"
+
+
+def test_it_is_empty_rather_than_guessing_when_no_index_exists():
+    rows = _contract_span(date(2026, 1, 1), 3, "GFX6", lambda i: 0.0)
+    assert ff.live_basis(rows, {}, {}) == {}
+    assert ff.live_basis([], {1: 2}) == {}
+
+
+def _study():
+    rows = _contract_span(date(2026, 1, 1), 60,
+                          "GFX6", lambda i: -13.0 if i < 30 else 13.0)
+    return ff.conditional_study(ff.with_basis(
+        rows, {r["date"]: 300.0 for r in rows}))
+
+
+def test_an_ordinary_basis_falls_in_NO_bucket():
+    """
+    The common case, and the one the panel must handle loudly. Measured to
+    2026-10-30 only 3.5% of sessions sat at 12 or wider either way; a reading
+    that always finds a bucket is a panel that always has a view.
+    """
+    s = _study()
+    for quiet in (0.0, 1.5, -2.0, 4.9, -4.9):
+        assert ff.bucket_for(s, quiet) is None, quiet
+
+
+def test_it_picks_the_WIDEST_threshold_cleared_not_the_nearest():
+    """-13 clears -5, -7, -8, -10 and -12; the -12 episodes are the ones that
+    resemble it."""
+    s = _study()
+    got = ff.bucket_for(s, -13.0)
+    assert got["sign"] == -1 and got["threshold"] == 12
+
+
+def test_the_sign_decides_which_side_is_read():
+    s = _study()
+    assert ff.bucket_for(s, 9.0)["sign"] == 1
+    assert ff.bucket_for(s, -9.0)["sign"] == -1
+    assert ff.bucket_for(s, 9.0)["threshold"] == 8
+    assert ff.bucket_for(s, -9.0)["threshold"] == 8
+
+
+def test_a_basis_exactly_on_a_threshold_counts():
+    s = _study()
+    assert ff.bucket_for(s, -8.0)["threshold"] == 8
+    assert ff.bucket_for(s, -7.999)["threshold"] == 7
+
+
+def test_bucket_for_degrades_rather_than_raising():
+    assert ff.bucket_for({}, -13.0) is None
+    assert ff.bucket_for(_study(), None) is None
+
+
 # -- the summary ------------------------------------------------------------
 
 def test_summary_is_empty_on_an_empty_series_rather_than_raising():

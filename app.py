@@ -146,10 +146,31 @@ def load_futures_basis():
         rows = feeder_futures.nearby(key, datetime.today().date())
     except feeder_futures.FuturesError as exc:
         return {"error": str(exc)}
+    # OUR OWN estimate as well, for the live reading only. The newest futures
+    # session routinely has no CME print yet, and a panel that went blank for
+    # the two or three days before each print would be blank exactly when the
+    # market had moved. feeder_futures.live_basis prefers the published figure
+    # and reports which one it used.
+    estimate_by_date = {}
+    try:
+        conn = db.get_conn()
+        try:
+            est = db.read_sql_lower(
+                "SELECT report_date AS date, fci_value FROM fci_daily", conn)
+        finally:
+            conn.close()
+        for _d, _v in zip(est["date"], est["fci_value"]):
+            if _v is not None and not pd.isna(_v):
+                estimate_by_date[pd.Timestamp(_d).date()] = float(_v)
+    except Exception:
+        pass            # the live reading degrades to the published series
+
     joined = feeder_futures.with_basis(rows, index_by_date)
     if not joined:
         return {"error": "no session has both a settle and a published index."}
-    return {"rows": joined, "summary": feeder_futures.summary(joined)}
+    return {"rows": joined, "summary": feeder_futures.summary(joined),
+            "nearby": rows, "published": index_by_date,
+            "estimate": estimate_by_date}
 
 
 def render_futures_basis(bundle):
@@ -356,6 +377,9 @@ def render_basis_study(bundle):
         "counts every time basis crossed a threshold and measures what futures "
         "did over the following 5, 10 and 20 trading sessions."
     )
+    render_current_reading(bundle, study)
+    st.markdown("---")
+
     _disc = [c for c in study["cells"] if c["sign"] == -1]
     _prem = [c for c in study["cells"] if c["sign"] == 1]
     _b5, _b10 = study["baseline"][5], study["baseline"][10]
@@ -524,6 +548,89 @@ def render_basis_study(bundle):
         "no test against a falling market."
         % (study["sessions"], study["start"].strftime("%b %Y"),
            study["end"].strftime("%b %Y"))
+    )
+
+def render_current_reading(bundle, study):
+    """Where basis sits today, and which historical bucket that is -- if any.
+
+    All arithmetic is feeder_futures'; this only arranges it.
+    """
+    live = feeder_futures.live_basis(bundle.get("nearby") or bundle["rows"],
+                                     bundle.get("published") or {},
+                                     bundle.get("estimate") or {})
+    if not live:
+        st.info("No session yet carries both a settle and an index.")
+        return
+
+    cell = feeder_futures.bucket_for(study, live["basis"])
+    widest = max(c["threshold"] for c in study["cells"])
+    at_widest = sum(c["days"] for c in study["cells"]
+                    if c["threshold"] == widest)
+    share = 100.0 * at_widest / study["sessions"] if study["sessions"] else 0.0
+
+    word = "premium" if live["basis"] > 0 else "discount"
+    st.markdown(
+        f"#### Where we are now\n"
+        f"Front month **{live['contract']}** settled **{live['settle']:.3f}** on "
+        f"**{live['date']:%b %d, %Y}** against an index of **{live['index']:.2f}** "
+        f"\u2014 a basis of **{live['basis']:+.2f}**, measured against the "
+        f"**{live['source']}** figure."
+    )
+    if live["source"] != "CME published":
+        st.caption(
+            "CME has not printed that date yet, so this uses JSA's own estimate. "
+            "The tables below are built on CME's published series; on the days "
+            "both exist the two have agreed to the cent, but they are not the "
+            "same measurement and this reading is the looser of the two."
+        )
+
+    if cell is None:
+        st.success(
+            f"**That is an ordinary basis, and this study says nothing about "
+            f"it.** It clears none of the thresholds below, which is the usual "
+            f"answer \u2014 only {share:.1f}% of the {study['sessions']:,} sessions "
+            f"measured sat at {widest:.0f} or wider in either direction. The "
+            f"history below describes unusual states; this is not one."
+        )
+        return
+
+    h5, h10, h20 = (cell["horizons"][h] for h in (5, 10, 20))
+    st.warning(
+        f"**That is a {word} wider than {cell['threshold']}**, which has "
+        f"happened on **{cell['episodes']} separate occasions** in the "
+        f"{study['sessions']:,} sessions measured. What followed those episodes:"
+    )
+    base = study["baseline"]
+    frame = pd.DataFrame([{
+        "Then": "%d sessions later" % h,
+        "Futures moved": hz["fut_median"],
+        "Futures higher": hz["up_pct"],
+        "(all days, for comparison)": base[h]["up_pct"],
+        "Index moved": hz["idx_median"],
+        "Episodes measurable": "%d of %d" % (hz["usable"], hz["attempted"]),
+    } for h, hz in ((5, h5), (10, h10), (20, h20))]).set_index("Then")
+    st.dataframe(frame.style.format({
+        "Futures moved": "{:+.2f}", "Index moved": "{:+.2f}",
+        "Futures higher": "{:.0f}%", "(all days, for comparison)": "{:.0f}%",
+    }, na_rep="\u2014"), use_container_width=True)
+
+    _f5 = h5["fut_median"]
+    _i5 = h5["idx_median"]
+    _both = (_f5 is not None and _i5 is not None
+             and ((_f5 > 0) != (_i5 > 0)))
+    st.markdown(
+        ("**Read the index column before the futures one.** " if _both else "")
+        + ("At five sessions the gap closed from BOTH sides \u2014 futures "
+           f"{_f5:+.2f} and the index {_i5:+.2f}. It is not that futures "
+           "rallied to meet cash; they met in the middle, and a reading that "
+           "quotes only the futures move describes half of what happened. "
+           if _both else "")
+        + f"**And this is history, not a forecast.** {cell['episodes']} episodes "
+        f"is a small sample, the whole period trended upward, and part of any "
+        f"narrowing is obliged rather than chosen \u2014 the contract settles "
+        f"against this very index, so the two must meet at expiry. Nothing here "
+        f"carries trading costs, and none of it has been tested in a falling "
+        f"market."
     )
 
 def render_futures_tab():

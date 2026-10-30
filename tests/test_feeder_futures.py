@@ -491,3 +491,59 @@ def test_summary_year_means_are_per_year_not_cumulative():
     out = ff.summary(ff.with_basis(rows, {r["date"]: 300.0 for r in rows}))
     assert out["by_year"][2025] == pytest.approx(0.0)
     assert out["by_year"][2026] == pytest.approx(5.0)
+
+
+# -- the out-of-sample verdict, and that the page cannot quietly drop it ----
+
+def test_the_walk_forward_result_is_recorded_with_its_provenance():
+    """
+    A measured fact with no date and no sample size is a rumour. This one
+    unflatters the study's headline, which is exactly the kind of finding that
+    gets quietly dropped, so it is pinned.
+    """
+    wf = ff.WALK_FORWARD
+    assert wf["run"] and wf["sessions"] > 1000 and wf["draws"] >= 30
+    assert set(wf["horizons"]) == {5, 10, 20}
+    for h, cell in wf["horizons"].items():
+        assert set(cell) == {"mae_gain", "null_max", "beat_draws",
+                             "direction", "trivial"}, h
+
+
+def test_the_recorded_result_still_says_the_threshold_rule_failed():
+    """
+    The honest headline. If someone re-runs the test on more data and it
+    passes, this flips deliberately -- it must not drift by accident.
+    """
+    assert ff.WALK_FORWARD["threshold_rule_holds"] is False
+
+
+def test_direction_is_below_the_trivial_benchmark_at_every_horizon():
+    """
+    THE FINDING THAT MATTERS, asserted rather than left in prose: the model is
+    worse at calling direction than always guessing the majority. A future
+    edit that improved mae_gain while quietly leaving this true would still be
+    reporting an unusable model.
+    """
+    for h, c in ff.WALK_FORWARD["horizons"].items():
+        assert c["direction"] < c["trivial"], (
+            "h=%d now claims directional skill (%.1f%% vs %.1f%% trivial); if "
+            "that is real, the panel's wording has to change with it"
+            % (h, c["direction"], c["trivial"]))
+
+
+def test_the_twenty_session_horizon_is_recorded_as_no_better_than_noise():
+    c = ff.WALK_FORWARD["horizons"][20]
+    assert c["beat_draws"] == 0 and c["mae_gain"] < 0
+
+
+@pytest.mark.parametrize("path", [
+    APP_DIR / "app.py",
+], ids=["app"])
+def test_the_panel_cites_the_walk_forward_rather_than_retyping_it(path):
+    src = path.read_text(encoding="utf-8")
+    assert "feeder_futures.WALK_FORWARD" in src, (
+        "%s stopped citing the recorded result; prose with hand-typed numbers "
+        "is how a page and its measurement drift apart" % path)
+    assert "does NOT hold up" in src, (
+        "%s no longer tells the reader the threshold rule failed out of sample, "
+        "directly under the table whose numbers they might act on" % path)

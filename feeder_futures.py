@@ -414,6 +414,54 @@ def conditional_study(rows: list, thresholds: tuple = CONDITIONAL_THRESHOLDS,
     return out
 
 
+#: WALK-FORWARD OUT-OF-SAMPLE TEST, run 2026-10-30 over the 1,251 sessions to
+#: that date. Recorded rather than recomputed: the run refits a regression on
+#: every session for three horizons and repeats the whole thing against 60
+#: shuffled predictors, which is minutes of work and has no business on a page
+#: load. Re-run scratchpad/walkforward.py and update these if the series grows.
+#:
+#: WHY IT EXISTS. conditional_study() reports what followed a wide basis, and
+#: its headline -- 76% of episodes higher a week after a discount past 12,
+#: against a 58% baseline -- is IN SAMPLE. The thresholds and horizons were
+#: chosen after looking at the data, the episodes overlap inside one rising
+#: regime, and searching a handful of cells turns up a gap like that sometimes
+#: even in noise. This is the test that separates a hypothesis from skill, and
+#: it answers three different questions with three different answers.
+#:
+#:   mae_gain      percent reduction in mean absolute error against naive
+#:                 persistence, scored on NON-OVERLAPPING windows, from a
+#:                 regression refit each session on completed prior examples.
+#:   null_max      the best any of 60 SHUFFLED predictors managed. A shuffled
+#:                 basis carries no information by construction, so this is
+#:                 what "improvement" looks like by chance on this data.
+#:   beat_draws    how many of the 60 the real predictor beat.
+#:   direction     share of windows whose SIGN the model called correctly.
+#:   trivial       share it would have got by always guessing the majority
+#:                 direction. Where direction < trivial the model is worse than
+#:                 not thinking, and that is the case at every horizon.
+WALK_FORWARD = {
+    "run": "2026-10-30",
+    "sessions": 1251,
+    "draws": 60,
+    "horizons": {
+        5: {"mae_gain": 3.1, "null_max": 2.8, "beat_draws": 60,
+            "direction": 56.9, "trivial": 61.9},
+        10: {"mae_gain": 6.6, "null_max": 1.7, "beat_draws": 60,
+             "direction": 60.0, "trivial": 69.2},
+        20: {"mae_gain": -0.2, "null_max": 4.6, "beat_draws": 0,
+             "direction": 52.9, "trivial": 64.7},
+    },
+    #: The THRESHOLD rule -- the one these tables display -- tested separately
+    #: and did not hold: out of sample it ran from +12.7% to -57.0% across
+    #: thresholds and horizons, on 1 to 8 independent observations once
+    #: overlapping windows are removed at T >= 10. The 18 in-sample episodes
+    #: behind the -12 row become 2 to 5 once only what was knowable at the
+    #: time is counted.
+    "threshold_rule_holds": False,
+    "threshold_rule_obs": "1 to 8 independent observations at T >= 10",
+}
+
+
 def live_basis(rows: list, published: dict, estimate: dict = None) -> dict:
     """Where basis sits on the NEWEST session, and which index that used.
 

@@ -614,6 +614,36 @@ def render_current_reading(bundle, study):
         "Futures higher": "{:.0f}%", "(all days, for comparison)": "{:.0f}%",
     }, na_rep="\u2014"), use_container_width=True)
 
+    _wf = feeder_futures.WALK_FORWARD
+    _h5w, _h10w, _h20w = (_wf["horizons"][h] for h in (5, 10, 20))
+    st.error(
+        f"**Tested out of sample on {_wf['run']}, this table does NOT hold up "
+        f"as a rule.** Re-run walking forward \u2014 at each past date using only "
+        f"what was knowable then \u2014 the threshold rule above swung from "
+        f"+12.7% to \u221257.0% depending on threshold and horizon, on "
+        f"{_wf['threshold_rule_obs']} once overlapping windows are removed. The "
+        f"{cell['episodes']} episodes behind this row become 2 to 5 independent "
+        f"observations under that discipline."
+    )
+    st.markdown(
+        f"**What DID survive, and what it is worth.** Conditioning on basis "
+        f"continuously \u2014 rather than on a threshold \u2014 beat naive "
+        f"persistence by {_h5w['mae_gain']:.1f}% at five sessions and "
+        f"{_h10w['mae_gain']:.1f}% at ten, and beat **all {_wf['draws']}** "
+        f"shuffled placebo predictors at both (best shuffle: "
+        f"{_h5w['null_max']:.1f}% and {_h10w['null_max']:.1f}%). So basis does "
+        f"carry real information about the next week or two. At twenty sessions "
+        f"it carried none \u2014 {_h20w['mae_gain']:+.1f}%, beaten by "
+        f"{_wf['draws'] - _h20w['beat_draws']} of {_wf['draws']} shuffles.\n\n"
+        f"**But it gives no directional edge, which is the part that matters.** "
+        f"The model called the sign correctly {_h5w['direction']:.1f}% of the "
+        f"time at five sessions and {_h10w['direction']:.1f}% at ten \u2014 "
+        f"against {_h5w['trivial']:.1f}% and {_h10w['trivial']:.1f}% for simply "
+        f"always guessing the majority direction. **It is worse than not "
+        f"thinking at every horizon.** It shaves average error; it does not tell "
+        f"you which way to lean, and only the second of those is actionable."
+    )
+
     _f5 = h5["fut_median"]
     _i5 = h5["idx_median"]
     _both = (_f5 is not None and _i5 is not None

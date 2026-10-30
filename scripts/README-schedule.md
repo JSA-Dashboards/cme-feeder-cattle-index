@@ -573,8 +573,10 @@ So the crossings were structurally a full day behind: each morning's run
 collected *yesterday's* report. Exactly the shape of the 10:15 pull — it
 exited 0 every time and looked like AMS being slow.
 
-**A third trigger at 21:00 catches 47 of 47.** That is the whole reason for
-the hour, and it is later than it needs to be on purpose:
+**A 21:00 pass catches 47 of 47, AND IT RUNS ON THE DROPLET, NOT HERE.**
+It was briefly a third Task Scheduler trigger on 2026-10-30 and was taken
+back out the same day — see `deploy/run_imports.sh` for why that could not
+stay. The hour is later than it needs to be on purpose:
 
 **THE TIMEZONE OF THE MARS STAMP IS NOT ESTABLISHED.** This file already
 records five hours lost to assuming one on CME's `MDTM`, so it is not assumed
@@ -587,15 +589,25 @@ Settle the timezone and 17:30 becomes defensible; until then the later hour
 costs nothing but a few hours of latency on a page nobody reads at night.
 
 The 07:45 run stays and is now the backstop rather than the primary: it
-guarantees completeness by the next morning if the 21:00 pass is missed.
+guarantees completeness by the next morning if the droplet's 21:00 pass is
+missed. **This desktop's triggers are unchanged at 07:45 and 13:00.**
+
+**THE DESKTOP COULD NOT SIMPLY TAKE THE 21:00 SLOT ITSELF**, which is why this
+moved rather than being scheduled here. Its push DELETEs every row of these
+tables and reloads them from SQLite (`push_verify.py` says so outright), so a
+desktop run at 21:00 and a droplet run at 21:00 are a delete-and-reload racing
+an ingest on the same table, across two machines with nothing locking between
+them — the hazard `deploy/DROPLET_SETUP.md` already records for the 08:45 slot.
+One of them had to own the hour, and the droplet is the one that is awake.
 
 **It needs no new guard against overlap or a sleeping desktop** — the task
 already carries `MultipleInstancesPolicy=IgnoreNew`, `WakeToRun=true` and
 `StartWhenAvailable=true`, so it wakes the machine, skips if a run is in
 flight, and catches up if the box was off.
 
-**The border half of this job runs ONLY from this desktop.** The droplet cron
-(`deploy/run_update.sh`) runs `backfill_ftp.py` and `update_index.py` and does
-not call `update_imports.py` — checked rather than assumed. So a desktop that
-is off all evening still leaves the crossings a day late until morning, and
-moving that ingest to the droplet is the real fix if it ever matters enough.
+**It is NOT exclusive, and that is the design rather than a half-move.**
+Because the desktop's push deletes and reloads these tables, a droplet that
+were the only writer would have its rows destroyed by the next morning's
+reload, from a SQLite that no longer tracked them. So this desktop keeps
+ingesting and keeps pushing; the droplet only gets there first. What the move
+buys is the evening, not ownership — and that is the whole of what was wrong.

@@ -89,6 +89,7 @@ are the live crontab lines; edit them on the box with `crontab -e`:
 ```
 45 8 * * 1-5 /opt/alerting/cron-alert "CME feeder index update" "/opt/cme-feeder-cattle-index/logs/update_*.log" /opt/cme-feeder-cattle-index/deploy/run_update.sh
 0 15 * * 1-5 /opt/alerting/cron-alert "CME FTP check" "/opt/cme-feeder-cattle-index/logs/ftp_check_*.log" /opt/cme-feeder-cattle-index/deploy/run_ftp_check.sh
+0 21 * * 1-5 /opt/alerting/cron-alert "Border reports evening refresh" "/opt/cme-feeder-cattle-index/logs/imports_*.log" /opt/cme-feeder-cattle-index/deploy/run_imports.sh
 ```
 
 `/opt/alerting/cron-alert` emails on failure and pings healthchecks.io, where the
@@ -105,6 +106,24 @@ time, change that check's schedule too.
 - **3:00 PM Central, Mon–Fri** — `run_ftp_check.sh`: official CME files only,
   catches anything CME published since the morning (mid-afternoon is their
   typical publish time)
+- **9:00 PM Central, Mon–Fri** — `run_imports.sh`: `update_imports.py --only
+  ams`, the AMS border reports behind the portal's Mexican Feeder Crossings
+  page. Added 2026-10-30. AMS publishes 3486 the same day it covers — over all
+  47 reports of 2026, earliest 12:34, median 15:21, latest 20:14, never
+  next-day — and the desktop's 07:45 and 13:00 runs caught 0 and 1 of those 47,
+  so the crossings were a full day behind by construction.
+
+  **The hour has to clear the desktop's push windows** (~08:00–08:28 and
+  ~13:00–13:25), for the reason given above the 8:45 entry: that push deletes
+  and reloads these same tables and nothing locks across the two machines.
+  21:00 is clear of both. It is also later than the publication tail strictly
+  needs, because **the timezone of the MARS `published_date` stamp is not
+  established** — 21:00 catches 47/47 whether it is Central or Eastern, where
+  17:30 would be 36/47 or 43/47 depending on the answer.
+
+  Install with `deploy/install_imports_cron.sh` (`--check` reports only). It
+  refuses unless `.env` carries `USE_SNOWFLAKE=1`, since without it the ingest
+  writes a local SQLite nobody reads and exits 0 looking healthy.
 
 Both share one `flock` lock file (`logs/.update.lock`) so they can never
 overlap if one runs long.

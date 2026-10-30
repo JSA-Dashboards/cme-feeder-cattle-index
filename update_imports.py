@@ -33,6 +33,11 @@ load_dotenv()
 
 import snowflake_db as db
 
+class _Skip(Exception):
+    """Raised inside a source block that --only excluded. Caught before the
+    generic handler, so a skip is never reported as a failure."""
+
+
 AMS_LOOKBACK_DAYS = 30
 CENSUS_LOOKBACK_MONTHS = 15
 
@@ -45,11 +50,49 @@ def _months_ago(n: int) -> str:
     return f"{y:04d}-{m:02d}"
 
 
-def main() -> int:
+SOURCES = ("ams", "calf", "corn", "feed", "census")
+
+
+def main(argv=None) -> int:
+    """
+    --only ams[,calf,...] runs a subset. Everything by default, so the
+    desktop's call is unchanged.
+
+    EXISTS SO THE DROPLET CAN TAKE ONE SOURCE WITHOUT TAKING ALL FIVE.
+    deploy/run_imports.sh runs `--only ams`: AMS publishes the border report
+    the same day and the desktop's 07:45/13:00 triggers caught 0 and 1 of 2026's
+    47, so the crossings were a day behind by construction. The other four have
+    the same shape and the same fix available, and widening that job is one word
+    -- but a flag that silently accepted an unknown name would quietly run
+    NOTHING and still exit 0, which is the failure this whole script is about.
+    So an unrecognised source is fatal before any work starts.
+    """
+    only = None
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if "--only" in argv:
+        i = argv.index("--only")
+        if i + 1 >= len(argv):
+            print("--only needs a comma-separated list of: " + ", ".join(SOURCES))
+            return 2
+        only = {w.strip().lower() for w in argv[i + 1].split(",") if w.strip()}
+        unknown = only - set(SOURCES)
+        if unknown:
+            print(f"--only: unknown source(s) {sorted(unknown)}; "
+                  f"known are {', '.join(SOURCES)}")
+            return 2
+
+    def wanted(name: str) -> bool:
+        return only is None or name in only
+
     conn = db.get_conn()
     ok = []
+    skipped = [s for s in SOURCES if not wanted(s)]
+    if skipped:
+        print(f"--only {','.join(sorted(only))} — skipping {', '.join(skipped)}")
 
     try:
+        if not wanted("ams"):
+            raise _Skip()
         import border_reports
         border_reports.init_tables(conn)
         since = date.today() - timedelta(days=AMS_LOOKBACK_DAYS)
@@ -67,11 +110,15 @@ def main() -> int:
         if st and st.get("notes"):
             print(f"    status: {' '.join(str(st['notes']).split())[:120]}")
         ok.append("ams")
+    except _Skip:
+        pass
     except Exception:
         print("[!] AMS border reports FAILED:")
         traceback.print_exc(file=sys.stdout)
 
     try:
+        if not wanted("calf"):
+            raise _Skip()
         import calf_sales
         calf_sales.init_tables(conn)
         since = date.today() - timedelta(days=AMS_LOOKBACK_DAYS)
@@ -79,11 +126,15 @@ def main() -> int:
         n = calf_sales.ingest(conn, since, date.today(), verbose=False)
         print(f"    {n:,} rows")
         ok.append("calf")
+    except _Skip:
+        pass
     except Exception:
         print("[!] calf sales FAILED:")
         traceback.print_exc(file=sys.stdout)
 
     try:
+        if not wanted("corn"):
+            raise _Skip()
         import corn_bids
         corn_bids.init_tables(conn)
         since = date.today() - timedelta(days=AMS_LOOKBACK_DAYS)
@@ -91,11 +142,15 @@ def main() -> int:
         n = corn_bids.ingest(conn, since, date.today(), verbose=False)
         print(f"    {n:,} rows")
         ok.append("corn")
+    except _Skip:
+        pass
     except Exception:
         print("[!] corn bids FAILED:")
         traceback.print_exc(file=sys.stdout)
 
     try:
+        if not wanted("feed"):
+            raise _Skip()
         import feed_bids
         feed_bids.init_tables(conn)
         # 90 days, not 30: Direct Hay is a period report published roughly
@@ -108,11 +163,15 @@ def main() -> int:
         n += feed_bids.ingest_hay(conn, since, date.today(), verbose=False)
         print(f"    {n:,} rows")
         ok.append("feed")
+    except _Skip:
+        pass
     except Exception:
         print("[!] feed prices FAILED:")
         traceback.print_exc(file=sys.stdout)
 
     try:
+        if not wanted("census"):
+            raise _Skip()
         import census_imports
         census_imports.init_tables(conn)
         start = _months_ago(CENSUS_LOOKBACK_MONTHS)
@@ -124,13 +183,18 @@ def main() -> int:
         n = census_imports.ingest(conn, start, end, ports=False, verbose=True)
         print(f"    {n:,} rows")
         ok.append("census")
+    except _Skip:
+        pass
     except Exception:
         print("[!] Census imports FAILED:")
         traceback.print_exc(file=sys.stdout)
 
     conn.close()
     if not ok:
-        print("both import sources failed - check MARS_API_KEY / CENSUS_API_KEY")
+        # NOT "both sources failed" -- with --only there may have been one.
+        asked = ", ".join(sorted(only)) if only else ", ".join(SOURCES)
+        print(f"every requested source failed ({asked}) "
+              f"- check MARS_API_KEY / CENSUS_API_KEY")
         return 1
     print(f"import refresh OK ({', '.join(ok)})")
     return 0

@@ -60,7 +60,16 @@ SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
           # massive_api.py, which exists in only one of the two repos --
           # sharing that as well would put a second file under this test to
           # buy nothing, since feeder_futures.py wants /aggs and nothing else.
-          "feeder_futures.py", "test_feeder_futures.py"]
+          "feeder_futures.py", "test_feeder_futures.py",
+          # The long-history panel. The module reads the two cme_archive_*
+          # tables and returns the restated series and its agreement with
+          # CME's as-printed file as SEPARATE things -- never blended -- and
+          # its test asserts that separation structurally. Both belong here
+          # for the same reason six_state's fixture does: two copies free to
+          # drift would be two suites asserting different things about how
+          # far CME's restatement moved, and a reader of either would have no
+          # way to tell which one had gone stale.
+          "archive_history.py", "test_archive_history.py"]
 
 # Every directory a shared module is allowed to live in. Explicit rather than a
 # recursive glob, because .venv/Lib/site-packages holds files with some of these
@@ -949,3 +958,83 @@ def test_that_staff_gate_check_can_fail():
     bad = "def render_basis_study(b):\n    pass\nwith st.expander(STUDY_LABEL):\n    render_basis_study(b)\n"
     assert "portal_view.staff_expander(STUDY_LABEL)" not in bad
     assert "with st.expander(STUDY_LABEL)" in bad
+
+
+# ── The long-history panel is staff-only on the same terms ─────────────────
+#
+# CME's restated archive is not the index CME printed, and the two differ by
+# up to 2.3374 in the older years. On the staff app that is a labelled
+# reference series somebody can reason about; on the client app it would be a
+# second index line with no owner to ask about it. Same gate as the study
+# above, same assertion in both directions.
+
+def test_the_long_history_is_staff_gated_in_the_portal():
+    src = (PORTAL / "app.py").read_text(encoding="utf-8")
+    assert "def render_archive_history(" in src, "the portal lost the panel"
+    assert "portal_view.staff_expander(ARCHIVE_LABEL)" in src, (
+        "the portal's long-history panel is no longer behind staff_expander "
+        "-- a client build would render CME's restated series")
+    assert "with st.expander(ARCHIVE_LABEL)" not in src, (
+        "the portal uses a plain expander for the panel; a client would see it")
+
+
+def test_the_long_history_is_a_plain_expander_in_the_standalone():
+    src = (HERE / "app.py").read_text(encoding="utf-8")
+    assert "def render_archive_history(" in src, "the standalone lost the panel"
+    assert "with st.expander(ARCHIVE_LABEL)" in src
+
+
+def test_both_copies_compute_the_long_history_in_the_shared_module():
+    """
+    Neither page may derive these numbers itself. The agreement figures are
+    the reader's only basis for deciding whether a 2013 value can be read like
+    a 2025 one, and two pages quoting separately derived versions of that is
+    the drift this whole file exists to prevent.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert "archive_history.load_series(" in src, app
+        assert "archive_history.summary(" in src, app
+        tree = ast.parse(src)
+        fn = [n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "render_archive_history"]
+        assert fn, app
+        body = ast.unparse(fn[0])
+        for banned in ("rounding_era_from(", "holes_in_printed(", "printed_span("):
+            assert banned not in body, (
+                "%s: render_archive_history recomputes %s instead of reading "
+                "the summary dict" % (app, banned))
+        # NOT a ban on the identifier. The caption deliberately says "nothing
+        # in these tables is named fci_value", which is the warning doing its
+        # job, and a guard that rejected that would punish the documentation
+        # -- the same trap tests/test_cme_archive.py already records falling
+        # into once. What must never appear is a QUERY: the renderer arranges
+        # what the loader handed it, so any SQL at all is it reaching past the
+        # shared module for a column of its own.
+        assert "SELECT" not in body.upper(), (
+            "%s: render_archive_history issues its own query instead of "
+            "arranging the bundle it was given" % app)
+
+
+def test_that_the_long_history_gate_check_can_fail():
+    bad = ("def render_archive_history(b):\n    pass\n"
+           "with st.expander(ARCHIVE_LABEL):\n    render_archive_history(b)\n")
+    assert "portal_view.staff_expander(ARCHIVE_LABEL)" not in bad
+    assert "with st.expander(ARCHIVE_LABEL)" in bad
+
+
+def test_that_the_no_SQL_rule_can_fail_and_spares_the_warning():
+    """
+    Both halves, or the rule above is asserting nothing. A renderer that
+    queries must be caught; a caption that NAMES fci_value in order to warn
+    about it must not be -- that is the documentation doing its job, and a
+    guard that rejected it would be deleted along with the real protection it
+    carries. tests/test_cme_archive.py records this exact trap being fallen
+    into once already.
+    """
+    queries = "x = conn.execute('SELECT fci_value FROM cme_ftp_daily')"
+    assert "SELECT" in queries.upper()
+
+    warns = "st.caption('Nothing in these tables is named fci_value.')"
+    assert "SELECT" not in warns.upper(), (
+        "the rule rejects the warning too, so it will not survive")

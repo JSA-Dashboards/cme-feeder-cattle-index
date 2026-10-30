@@ -168,8 +168,42 @@ to 2dp rounding from 2021 on. Nothing in it is named `fci_value`, by design,
 so no query can quietly average the two series together. It is worth having
 for 2013–14, which exist in no other source: CME's as-printed daily files
 floor at 2015. Loaded by `backfill_cme_archive.py` (manual, needs `xlrd`
-via `uv run --with`), pushed to Snowflake as the last two OPTIONAL tables,
-and read by nothing on either dashboard.
+via `uv run --with`), pushed to Snowflake as the last two OPTIONAL tables.
+
+### The Long History panel — STAFF ONLY, and the one rule it runs on
+
+Added 2026-10-30, after Ross asked whether the archive could be seen on the
+dashboard. It sits on the Index tab between Volume vs Seasonal Norm and
+Weekly Rundown, behind `portal_view.staff_expander(ARCHIVE_LABEL)` in the
+portal and a plain `st.expander` here. `tests/test_no_drift.py` asserts that
+asymmetry in both directions, as it does for the conditional study.
+
+**`archive_history.py` NEVER RETURNS A BLENDED SERIES**, and that is the
+whole design rather than a style note. It returns the restated series and
+its agreement with CME's as-printed file as two separate things, and
+`tests/test_archive_history.py` asserts the separation structurally — the
+guard is on the SELECT list, not the identifier, because the caption
+deliberately says "nothing in these tables is named fci_value" and a guard
+that banned the word would punish the warning for doing its job.
+
+Three different reasons a date can be missing, and **adding them together is
+how the panel would be wrong**:
+
+- **Before the as-printed era** (523 dates, 2012-12-31..2014-12-31) — no
+  collection could have them. This is the orange segment on the chart.
+- **A hole inside the era** (9 on file) — a gap in OUR copy of CME's files,
+  not in CME's publishing. Worth a `backfill_ftp` re-pull.
+- **After the last as-printed date** — today's print, not fetched yet. Not a
+  gap, and counting it as one would fire the warning every afternoon.
+
+`rounding_era_from()` derives the 2021 boundary rather than hard-coding it:
+that is a fact about CME's restating practice, not a constant of this repo,
+and a literal would quietly over-claim if 2020 were ever reissued cleanly.
+
+Chart colours were validated, not eyed — `#0693e3`/`#e8833a`, ΔE 31.3 normal
+and 24.2 protan. 2015-onward keeps JPSI_BLUE because that is the colour the
+same era already wears on Index Trend; a period that changed colour between
+two charts on one page would read as two different series.
 
 ## Two copies of the dashboard
 

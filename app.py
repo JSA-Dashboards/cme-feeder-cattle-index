@@ -46,6 +46,7 @@ import cash_calves
 import barn_basis
 import six_state
 import feeder_futures
+import archive_history
 from index_dates import headline_index_date
 # A SECOND import line from the same module, deliberately. tests/test_no_drift.py
 # pins the literal string above as proof both copies use the tested headline
@@ -792,6 +793,150 @@ def _six_esc(s) -> str:
     """
     import html as _html_mod
     return _html_mod.escape(str(s or ""))
+
+
+ARCHIVE_LABEL = "Long history — CME's restated archive, back to 2013 (JSA internal)"
+
+# The two eras of the archive line. 2015-onward keeps JPSI_BLUE because that
+# is the colour the SAME era already wears on Index Trend above -- a period
+# that changed colour between two charts on one page would read as two
+# different series. The earlier years take FUT_LINE's orange because they are
+# the part a reader does not already have.
+#
+# Validated rather than chosen by eye: adjacent-pair separation is 31.3 normal
+# and 24.2 protan (OKLab x100), comfortably past the 15 and 8 floors. The
+# orange sits below 3:1 against a white card, which obligates relief -- met by
+# the always-on legend and the agreement table underneath, not waived.
+ARCH_EARLY = FUT_LINE
+ARCH_LATER = JPSI_BLUE
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading the long history…")
+def load_archive_history():
+    """
+    CME's restated workbook series, or {"error": why}.
+
+    SEPARATE FROM EVERY OTHER LOADER ON THIS PAGE ON PURPOSE. Nothing here
+    feeds a tile, a scorecard or the estimate -- it is reference history, and
+    an outage in it must leave the published index untouched rather than
+    taking a panel down with it.
+    """
+    try:
+        conn = db.get_conn()
+    except Exception as exc:
+        return {"error": f"could not open the index database: {exc}"}
+    try:
+        series = archive_history.load_series(conn)
+        agreement = archive_history.agreement_by_year(conn)
+    except Exception as exc:
+        # The archive is a MANUAL backfill. A machine that has never run it
+        # has no such table, which is an empty panel and not a page error.
+        return {"error": f"the archive is not loaded here: {exc}"}
+    finally:
+        conn.close()
+    summary = archive_history.summary(series, agreement)
+    if summary is None:
+        return {"error": "the archive tables are empty here."}
+    return {"series": series, "agreement": agreement, "summary": summary}
+
+
+def render_archive_history(bundle):
+    """The long-history chart, its agreement table, and what both mean.
+
+    All arithmetic is archive_history's; this only arranges it.
+    """
+    if "error" in bundle:
+        st.caption(bundle["error"])
+        return
+    series = bundle["series"]
+    agreement = bundle["agreement"]
+    summary = bundle["summary"]
+
+    cut = summary["printed_from"]
+    early = [(d, v) for d, v, _o in series if cut is None or d <= cut]
+    later = [(d, v) for d, v, _o in series if cut is not None and d >= cut]
+
+    fig = go.Figure()
+    # Drawn later-first so the short early segment sits ON TOP where the two
+    # meet at the boundary date they share.
+    for rows, name, colour in (
+            (later, f"{cut[:4]} onward — CME also published these", ARCH_LATER),
+            (early, f"{summary['first'][:4]}–{summary['archive_only_last'][:4]}"
+                    " — exists in no other source", ARCH_EARLY)):
+        if not rows:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[pd.Timestamp(d) for d, _v in rows],
+            y=[v for _d, v in rows],
+            name=name, mode="lines",
+            line=dict(color=colour, width=2),
+            hovertemplate="%{x|%Y-%m-%d}: $%{y:.2f}<extra></extra>",
+        ))
+    fig.update_layout(
+        paper_bgcolor=BG, plot_bgcolor=BG,
+        font=dict(color=TEXT, size=11),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    font=dict(color=MUTED, size=10), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=55, r=20, t=15, b=40),
+        xaxis=dict(**FUT_AXIS),
+        yaxis=dict(**FUT_AXIS, title="$/cwt", tickprefix="$"),
+        height=380,
+    )
+    add_watermark(fig, size=0.3, opacity=0.06)
+    st.plotly_chart(fig, use_container_width=True)
+
+    era = summary["rounding_era_from"]
+    # No dollar signs in this sentence. Streamlit reads a pair of them as
+    # LaTeX and eats everything between, which has already cost this page a
+    # vanished caption once.
+    st.caption(
+        f"CME's own yearly workbooks, {summary['first']} to {summary['last']}. "
+        f"**This is not the index CME printed.** It is a weighted average CME "
+        f"recomputed later, and the two differ — by as much as "
+        f"{summary['older_worst']:.2f} per cwt in {summary['older_worst_year']}"
+        + (f", though from {era} on they agree to "
+           f"{summary['recent_worst']:.4f}, which is pure two-decimal rounding"
+           if era else "")
+        + f". The {summary['archive_only_dates']} dates before "
+        f"{cut} are the reason it is here: CME's as-printed daily files floor "
+        f"there, so those years exist in no other source. Nothing in these "
+        f"tables is named fci_value, so no query can quietly average the two "
+        f"series together."
+    )
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.markdown("**How far apart the two series run, by year**")
+        tbl = pd.DataFrame(agreement)
+        tbl = tbl.rename(columns={
+            "year": "Year", "shared_dates": "Dates",
+            "worst_gap": "Worst gap", "head_mismatches": "Head rows off"})
+        tbl["Worst gap"] = tbl["Worst gap"].map(lambda v: f"{v:.4f}")
+        st.dataframe(tbl.sort_values("Year", ascending=False),
+                     use_container_width=True, hide_index=True, height=260)
+        st.caption(
+            "Measured against CME's as-printed file on every date both hold. "
+            "A year is only as readable as its worst gap."
+        )
+    with c2:
+        holes = summary["holes"]
+        st.markdown("**Gaps this fills in our own collection**")
+        if holes:
+            st.caption(
+                f"{len(holes)} date(s) inside the as-printed era that "
+                f"cme_ftp_daily does not hold, but the workbooks do. These are "
+                f"holes in OUR collection of CME's files, not in CME's "
+                f"publishing — worth a backfill_ftp re-pull."
+            )
+            st.code("\n".join(holes), language=None)
+        else:
+            st.caption(
+                "None — every date in the as-printed era is already held "
+                "locally. Dates before that era, and today's print if CME has "
+                "not been pulled yet, are not counted here: they are missing "
+                "for reasons that are not gaps."
+            )
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading the six state summaries…")
@@ -3038,6 +3183,17 @@ with tab_index:
             )
 
 
+
+    # ── Long history — CME's restated archive ────────────────────────────────
+    #
+    # STAFF ONLY, and the placement is the argument: a restated weighted
+    # average sitting beside the scorecard is the single confusion these
+    # tables were built to prevent. It is reference history -- nothing above
+    # reads it, and nothing in it is named fci_value.
+
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    with st.expander(ARCHIVE_LABEL):
+        render_archive_history(load_archive_history())
 
     # ── Weekly Rundown ────────────────────────────────────────────────────────────
 

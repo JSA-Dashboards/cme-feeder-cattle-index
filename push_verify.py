@@ -43,15 +43,17 @@ Snowflake parallelises the aggregation across micro-partitions while SQLite
 does not, and that the two would therefore differ in the last bits on every
 run and the check would cry wolf forever. That came from the design brief and
 was never checked. IT IS NOT WHAT EITHER ENGINE DOES. Measured live,
-read-only, 2026-09-30, over all 35 float columns in the schema:
+read-only, first on 2026-09-30 and re-run 2026-10-30 when the cme_archive
+pair took the schema from 35 float columns to 46, over all 46 float columns
+in the schema:
 
     SQLite's SUM did not move when the scan was reversed --
     SELECT SUM(x) FROM (SELECT c AS x FROM t ORDER BY rowid DESC) matched the
-    forward sum on 35 of 35 columns, bit for bit.
+    forward sum on 46 of 46 columns, bit for bit.
 
     Snowflake's SUM did not move when the ADDITION WAS RE-ASSOCIATED --
     SELECT SUM(s) FROM (SELECT SUM(c) s FROM t GROUP BY MOD(ABS(HASH(c)), 97))
-    matched the flat sum on 35 of 35. That is the probe that matters: repeating
+    matched the flat sum on 46 of 46. That is the probe that matters: repeating
     the same query only shows the result cache working, whereas summing 97
     partial sums genuinely changes the grouping the addition happens in, which
     is the thing order-dependence would show up in.
@@ -74,8 +76,8 @@ truncates toward zero; Snowflake rounds half-away-from-zero:
 
 The cleanest way to say what the outer ROUND does, and the form to re-measure
 if this is ever doubted: ROUND IS A NO-OP ON SNOWFLAKE AND LOAD-BEARING ON
-SQLITE. Adding it changed Snowflake's scaled sum on 0 of 35 columns -- its CAST
-was already rounding -- and changed SQLite's on 21 of 35. The ROUND is there to
+SQLITE. Adding it changed Snowflake's scaled sum on 0 of 46 columns -- its CAST
+was already rounding -- and changed SQLite's on 29 of 46. The ROUND is there to
 drag SQLite onto Snowflake's behaviour, not to meet it in the middle.
 
 PROBE THAT WITH TO_DOUBLE, NOT A BARE LITERAL. A decimal literal in Snowflake
@@ -116,10 +118,10 @@ to show the shape, not as constants to check against; the two regimes are the
 durable part.
 
 WHAT THE "SIMPLIFICATION" COSTS, AND WHICH WAY IT LEANS. Dropping the outer
-ROUND to leave CAST(col * 10000 AS INT) breaks 21 of the 35 float columns
+ROUND to leave CAST(col * 10000 AS INT) breaks 29 of the 46 float columns
 immediately. It does NOT always make Snowflake read higher, which this
 paragraph used to claim: truncation moves toward zero, so the sign of the data
-decides the sign of the error. Snowflake reads higher on 20 of the 21 and LOWER
+decides the sign of the error. Snowflake reads higher on 28 of the 29 and LOWER
 on one -- cme_ftp_daily.reported_change, the only float column in the schema
 that holds negative values (1,240 of them). Its diverging rows split 37
 positive against 39 negative and the errors partly cancel, so the column's
@@ -135,7 +137,7 @@ alarm on most of the schema and a confusing one on the rest.
 
 And ROUND(col, 4) * 10000 is NOT a substitute either. It rounds in the wrong
 place -- to four decimals of the UNSCALED value, then multiplies the residue
-back up -- and it leaves the same 21 columns disagreeing. Scale first, round
+back up -- and it leaves the same 29 columns disagreeing. Scale first, round
 once.
 
 The scale itself, 1e-4, is finer than the index is quoted to (fci_value is
@@ -243,11 +245,14 @@ of completeness, so:
     0.49999999999999994 + 0.5 is exactly 1.0 as a double, so SQLite's
     ROUND(0.49999999999999994) is 1.0 where Snowflake's, on a FLOAT, is 0.0.
 
-    MEASURED EXPOSURE IN THE REAL DATA, re-derived read-only 2026-10-26 over
-    all 35 float columns: the two engines were asked for the pushed expression
-    CAST(ROUND(v * 10000) AS INTEGER) on every one of the 879,309 non-null
+    MEASURED EXPOSURE IN THE REAL DATA, re-derived read-only 2026-10-30 over
+    all 46 float columns: the two engines were asked for the pushed expression
+    CAST(ROUND(v * 10000) AS INTEGER) on every one of the 1,084,781 non-null
     values -- the real SQLite for its side, half-away-from-zero for
-    Snowflake's -- and they agree on all of them. ZERO divergences.
+    Snowflake's -- and they agree on all of them. ZERO divergences. The
+    previous run, 2026-10-26, covered 879,309 values over 35 columns; the
+    cme_archive pair added the other 11 columns and contributed no
+    divergence of its own.
 
     THAT IS A DIFFERENT CLAIM FROM THE ONE THIS PARAGRAPH USED TO MAKE, and
     the swap is the point. It used to say that ZERO values sit within 1e-6 of
@@ -487,19 +492,19 @@ def _int_cast(expr: str, dialect: str) -> str:
     Snowflake is NUMBER and rounds exactly, which makes a literal probe answer
     a question nobody asked.
 
-    So the ROUND is a NO-OP on Snowflake (measured: it moves 0 of the 35 float
-    columns' sums) and LOAD-BEARING on SQLite (it moves 21 of the 35). It is
+    So the ROUND is a NO-OP on Snowflake (measured: it moves 0 of the 46 float
+    columns' sums) and LOAD-BEARING on SQLite (it moves 29 of the 46). It is
     here to pull SQLite onto Snowflake's behaviour.
 
     The trigger is not .5 values, which are almost nonexistent in this data --
     it is that a two-decimal price times 10000 lands an ULP off an integer.
     340.28 * 10000 is 3402799.9999999995, which truncates to 3402799 here and
     casts to 3402800 there. Truncation moves toward ZERO, so the error's sign
-    follows the data's: Snowflake reads higher on 20 of the 21 columns and
+    follows the data's: Snowflake reads higher on 28 of the 29 columns and
     LOWER on cme_ftp_daily.reported_change, the one column holding negatives.
 
     ROUND(col, 4) * 10000 is NOT the same thing -- it rounds the unscaled
-    value and leaves the same 21 columns disagreeing. Scale first, round once.
+    value and leaves the same 29 columns disagreeing. Scale first, round once.
     The module docstring has the full derivation and the re-measurement
     recipe; tests/test_push_verify_claims.py re-derives these counts from the
     live database and fails if this docstring drifts from them.

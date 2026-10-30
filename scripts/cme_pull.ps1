@@ -152,10 +152,11 @@ if ($code -ne 0) {
 }
 
 # Push only the three tables this job can have changed. A bare run pushes all
-# TWENTY-ONE (8 CRITICAL + 13 OPTIONAL in 02_migrate_data.py -- this comment
-# said "thirteen", which is the optional count alone, and then "twenty" before
-# pipeline_stamp joined CRITICAL), taking a minute to land two tables' worth of
-# new rows, and would also republish the border and replacement data
+# TWENTY-THREE (8 CRITICAL + 15 OPTIONAL in 02_migrate_data.py -- this comment
+# said "thirteen", which is the optional count alone, then "twenty" before
+# pipeline_stamp joined CRITICAL, then "twenty-one" before the cme_archive
+# pair joined OPTIONAL), taking a minute to land two tables' worth of new
+# rows, and would also republish the border, replacement and archive data
 # mid-morning for no reason.
 #
 # NOTE pipeline_stamp is deliberately NOT in the --tables list below. It is the

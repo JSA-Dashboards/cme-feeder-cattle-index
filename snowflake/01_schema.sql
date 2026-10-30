@@ -199,6 +199,91 @@ CREATE TABLE IF NOT EXISTS cme_ftp_locations (
 );
 
 -- ---------------------------------------------------------------------------
+-- CME's yearly index workbooks: a RESTATED archive. NOT the scorecard.
+--
+-- READ THIS BEFORE JOINING ANYTHING BELOW TO cme_ftp_daily. That table's
+-- fci_value is the REPORTED INDEX CME printed on the day -- the independent
+-- number this project's estimate is graded against, and its entire value is
+-- that nobody here computed it. These two tables carry something else: a
+-- weighted average CME recomputed later, published in its FC<year>.ZIP
+-- workbooks. On 2015, a year held both ways, head counts agree on 261 of 261
+-- dates and the index value differs by up to 0.5382 -- and CME's reported
+-- figure appears nowhere in the workbook at all. Measured across every year
+-- both exist: 0.0049 in 2021-2026 (pure 2dp rounding), 0.1612 in 2020,
+-- 0.4921 in 2019, 2.3374 in 2018, 0.4041 in 2017, 0.5382/0.8710 in 2015-16.
+--
+-- So nothing here is called fci_value, by design: the column is
+-- seven_day_wtd_price because that is what it is, and no query can average
+-- the two series together by picking a familiar column name out of the wrong
+-- table. tests/test_cme_archive.py asserts the name never appears in either
+-- DDL -- this file's and backfill_cme_archive.py's.
+--
+-- WORTH HAVING ANYWAY: CME's as-printed daily files floor at 2015, so the 523
+-- dates in 2013 and 2014 exist in no other source, and recent years can be
+-- read interchangeably with the as-printed ones.
+--
+-- Upsert (mirrors "INSERT OR REPLACE"), loaded by backfill_cme_archive.py --
+-- a manual backfill, not part of the daily job. source_year records which
+-- workbook each row came from: two dates are published in the wrong year's
+-- file (FC2018 carries 2019-04-01, FC2022 carries 2023-04-03), and running
+-- the years in order lets the date's own workbook win.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS cme_archive_daily (
+    report_date DATE PRIMARY KEY,
+    daily_head FLOAT,
+    daily_weight FLOAT,
+    daily_wtd_price FLOAT,
+    seven_day_head FLOAT,
+    seven_day_weight FLOAT,
+    seven_day_wtd_price FLOAT,
+    seven_day_wtd_weight FLOAT,
+    source_year INTEGER NOT NULL
+);
+
+-- The per-barn detail behind the aggregates above. Barns with no qualifying
+-- head are not stored -- most rows on most days are a zero for a barn that
+-- sold nothing in the 700-899 lb bracket, and keeping them would quadruple
+-- the table to say nothing.
+CREATE TABLE IF NOT EXISTS cme_archive_locations (
+    report_date DATE NOT NULL,
+    location VARCHAR NOT NULL,
+    state VARCHAR,
+    head FLOAT,
+    weight FLOAT,
+    wtd_price FLOAT,
+    wtd_weight FLOAT,
+    source_year INTEGER NOT NULL,
+    PRIMARY KEY (report_date, location)
+);
+
+-- AMS feeder-cattle receipts by sex, the steer share behind feeder_sex_mix.py
+-- (herd.py reads it). NOT an index feed: it counts head by week and channel
+-- and carries no price at all.
+--
+-- RECORDED HERE AFTER THE FACT. This table has been pushed daily since it was
+-- created by feeder_sex_mix.py's init_tables(), and was the one name in
+-- 02_migrate_data.py's TABLES with no CREATE TABLE in this file -- found by
+-- tests/test_cme_archive.py::test_every_pushed_table_has_DDL_in_the_snowflake_schema
+-- when that guard was written for the archive pair. The columns below match
+-- the local SQLite table, which is this file's stated contract. Two things
+-- about the LIVE table in JSA.CME_FEEDER_CATTLE differ and are recorded rather
+-- than quietly fixed, since Snowflake treats both as metadata and enforces
+-- neither: it carries no PRIMARY KEY, and CHANNEL is nullable there because it
+-- was added to an existing table. Running this file against a fresh account
+-- would therefore build a slightly stricter table than the one in use.
+CREATE TABLE IF NOT EXISTS feeder_receipts (
+    week_start DATE NOT NULL,
+    source VARCHAR NOT NULL,
+    channel VARCHAR NOT NULL,
+    slug_id INTEGER NOT NULL,
+    state VARCHAR,
+    steers INTEGER NOT NULL,
+    heifers INTEGER NOT NULL,
+    PRIMARY KEY (week_start, source, channel, slug_id, state)
+);
+
+-- ---------------------------------------------------------------------------
 -- Mexican feeder imports. Two sources because neither is sufficient alone:
 -- AMS carries the trade STATUS with no numbers, Census carries the numbers
 -- about six weeks late. Added 2026-09-10.

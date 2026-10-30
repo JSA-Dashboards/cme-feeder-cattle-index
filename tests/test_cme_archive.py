@@ -23,6 +23,7 @@ OFFLINE. The parser is exercised against hand-built sheets; nothing here
 touches CME's FTP.
 """
 
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -189,3 +190,70 @@ def test_the_archive_tables_do_not_carry_the_scorecard_column_name():
     for ddl in (bf.DAILY_DDL, bf.LOC_DDL):
         assert "cme_ftp_daily" not in ddl
         assert "cme_ftp_locations" not in ddl
+
+
+def _schema_sql():
+    return (Path(__file__).resolve().parent.parent
+            / "snowflake" / "01_schema.sql").read_text(encoding="utf-8")
+
+
+def _migrate():
+    """snowflake/02_migrate_data.py, loaded without running its __main__."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_archive_migrate",
+        Path(__file__).resolve().parent.parent / "snowflake" / "02_migrate_data.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_snowflake_ddl_carries_the_same_guarantee_as_the_sqlite_one():
+    """
+    THE SECOND SCHEMA IS THE ONE PRODUCTION ACTUALLY READS, and the test above
+    only ever looked at the first. backfill_cme_archive.py's DDL builds the
+    local table; snowflake/01_schema.sql builds the one the dashboards query.
+    A column named fci_value could appear in either and the harm is the same
+    -- the restated average one careless join away from the published index --
+    so both are asserted, and the one that matters more was the one missing.
+    """
+    sql = _schema_sql()
+    for name in ("cme_archive_daily", "cme_archive_locations"):
+        pat = r"CREATE TABLE IF NOT EXISTS %s \((.*?)\);" % name
+        m = re.search(pat, sql, re.S)
+        assert m, "no DDL for %s in 01_schema.sql" % name
+        assert "fci_value" not in m.group(1).lower(), m.group(1)
+    assert "seven_day_wtd_price" in sql, (
+        "the archive's own column name is gone from the Snowflake schema")
+
+
+def test_the_archive_is_pushed_as_OPTIONAL_and_never_as_CRITICAL():
+    """
+    CRITICAL means "if this fails the index is stale and somebody is paged
+    tonight". These two tables are a manual backfill nothing on either
+    dashboard reads, so listing them there would let a workbook parse put the
+    index push into a failure state -- and, being last, would also let 43k
+    rows of analysis data sit between a finished index and its stamp.
+    """
+    m = _migrate()
+    for name in ("cme_archive_daily", "cme_archive_locations"):
+        assert name in m.OPTIONAL_TABLES, name
+        assert name not in m.CRITICAL_TABLES, name
+    # Last, so a failure here delays no table anybody is looking at.
+    assert m.OPTIONAL_TABLES[-2:] == ["cme_archive_daily", "cme_archive_locations"]
+    # pipeline_stamp's position is the index's own guarantee and the archive
+    # must not have displaced it off the end of the critical list.
+    assert m.CRITICAL_TABLES[-1] == "pipeline_stamp"
+
+
+def test_every_pushed_table_has_DDL_in_the_snowflake_schema():
+    """
+    A name in TABLES with no CREATE TABLE behind it is the failure
+    02_migrate_data.py's own comment warns about: DESC TABLE runs outside the
+    per-table try, so one absent name takes down every table after it. The
+    schema file is where that gets caught before a 13:00 run finds it.
+    """
+    sql = _schema_sql()
+    missing = [t for t in _migrate().TABLES
+               if "CREATE TABLE IF NOT EXISTS %s (" % t not in sql]
+    assert not missing, missing

@@ -338,7 +338,8 @@ def test_the_comment_counts_the_tables_a_bare_push_would_send():
         assert m, f"cannot find {listname}"
         total += len(re.findall(r'"([a-z_]+)"', m.group(1)))
 
-    words = {13: "THIRTEEN", 20: "TWENTY", 21: "TWENTY-ONE", 19: "NINETEEN"}
+    words = {13: "THIRTEEN", 19: "NINETEEN", 20: "TWENTY",
+             21: "TWENTY-ONE", 22: "TWENTY-TWO", 23: "TWENTY-THREE"}
     src = SCRIPT.read_text(encoding="utf-8").upper()
     assert words.get(total, str(total)) in src, (
         f"a bare push now sends {total} tables; cme_pull.ps1's comment does "

@@ -47,7 +47,8 @@ right. Those figures are dated in the prose instead.
 NOTHING HERE WRITES ANYTHING. SQLite is opened mode=ro and Snowflake is not
 contacted at all: the float classification is taken from SQLite's own REAL
 declared types, which was verified against Snowflake's DESC TABLE on
-2026-09-30 to select the identical 35 columns. That keeps the suite runnable
+2026-09-30 to select the identical 35 columns, and again on 2026-10-30 at 46
+after the cme_archive pair joined the push. That keeps the suite runnable
 with no credentials and off the index's critical path.
 """
 import math
@@ -99,7 +100,11 @@ def float_columns(conn):
 
     Classified from SQLite's REAL declared type. push_verify classifies from
     Snowflake's DESC TABLE instead, and the two agree on the whole schema --
-    verified live 2026-09-30, both selecting the same 35 columns.
+    verified live 2026-09-30, both selecting the same 35 columns, and again
+    2026-10-30 at 46. The count is NOT pinned in this docstring on purpose:
+    the tests below re-derive it from this fixture and then look for it in
+    push_verify.py's prose, so a schema that grows fails the docstring that
+    makes a claim about it rather than this sentence.
     """
     out = []
     for t in pushed_tables():
@@ -121,7 +126,10 @@ def half_away(x: float) -> int:
     Modelled rather than queried so the suite needs no credentials. Verified
     against the live engine on 2026-09-30 -- CAST(TO_DOUBLE(2.9) AS BIGINT) is
     3, CAST(TO_DOUBLE(-2.9) AS BIGINT) is -3 -- and the model reproduces the
-    live per-column results exactly (21 affected columns, 20 up and 1 down).
+    live per-column results exactly: 21 affected columns, 20 up and 1 down
+    on 2026-09-30's 35, and 29 affected, 28 up and 1 down on 2026-10-30's 46.
+    The one leaning down is cme_ftp_daily.reported_change in both runs -- it
+    is the only float column in the schema that holds negative values.
     """
     return int(Decimal(x).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
@@ -202,8 +210,8 @@ def sqlite_pushed_int(conn, table, column):
 
     Not modelled. push_verify builds CAST(ROUND(v * FLOAT_SCALE) AS INTEGER)
     for this side, so that is what is asked, in one query per column rather
-    than one per value -- 879,309 values in about 1.4s, which is cheap enough
-    that the check can cover the whole schema instead of a sample.
+    than one per value -- 1,084,781 values in about 1.7s, which is cheap
+    enough that the check can cover the whole schema instead of a sample.
     """
     return conn.execute(
         f'SELECT "{column}", '

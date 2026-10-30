@@ -153,11 +153,23 @@ asserting it contains no write verb and never names `calf_sales` and
 Production reads **Snowflake** — `JSA.CME_FEEDER_CATTLE`. The local
 `data/mars_history.db` is the working copy the pipeline builds and pushes.
 
-Local tables, approximate sizes:
+Local tables, re-measured 2026-10-30 — every one of these had drifted since
+it was written, `calf_sales` by 7x, so **re-measure rather than quote**:
 
-    mars_sales 32.7k   fci_daily 941   cme_ftp_daily 3k   cme_ftp_brackets 72k
-    replacement_sales 73k   calf_sales 7.8k   hay_bids 2.5k   corn_bids 1.8k
-    border_* / census_cattle_imports   distillers_bids 221
+    mars_sales 34.7k   fci_daily 985   cme_ftp_daily 3.1k  cme_ftp_brackets 73.8k
+    replacement_sales 103k  calf_sales 56k   hay_bids 3.6k   corn_bids 3.6k
+    border_* / census_cattle_imports   distillers_bids 323
+    cme_archive_daily 3.6k   cme_archive_locations 43.4k
+
+**`cme_archive_*` IS NOT THE SCORECARD.** It is CME's own yearly workbooks —
+a weighted average CME recomputed later, which differs from the reported
+index in `cme_ftp_daily` by up to 2.3374 in the older years and is identical
+to 2dp rounding from 2021 on. Nothing in it is named `fci_value`, by design,
+so no query can quietly average the two series together. It is worth having
+for 2013–14, which exist in no other source: CME's as-printed daily files
+floor at 2015. Loaded by `backfill_cme_archive.py` (manual, needs `xlrd`
+via `uv run --with`), pushed to Snowflake as the last two OPTIONAL tables,
+and read by nothing on either dashboard.
 
 ## Two copies of the dashboard
 

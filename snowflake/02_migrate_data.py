@@ -67,11 +67,35 @@ CRITICAL_TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily",
 # runs DESC TABLE outside its try, so a name listed here that does not exist
 # there raises straight out of the loop and fails the ENTIRE optional push --
 # every dashboard table after it goes stale, for a diagnostic.
+#
+# THE ARCHIVE PAIR IS LAST ON PURPOSE, and for the opposite reason to
+# pipeline_stamp's position. Nothing on either dashboard reads them -- they
+# are a manual backfill for analysis, loaded by backfill_cme_archive.py and
+# never touched by the daily job -- so a failure there must not delay or
+# endanger a table somebody is actually looking at. cme_archive_locations is
+# also the THIRD LARGEST optional table, measured rather than assumed --
+# 43,441 rows, behind only replacement_sales at 103,461 and calf_sales at
+# 55,945 -- so putting it ahead of the dashboard tables would delay every one
+# of them to land something nothing reads.
+#
+# THEY ARE RE-UPLOADED EVERY RUN THOUGH NOTHING CHANGES THEM, which is the
+# obvious objection and is answered by measuring it rather than arguing: both
+# tables together push and fingerprint in 14s INCLUDING the login, against a
+# 900s whole-push budget. The alternative -- leaving them out of the lists and
+# pushing by hand -- buys those seconds back by making the two backends free
+# to disagree with nobody watching, which is the failure this file's whole
+# second half exists to catch.
 OPTIONAL_TABLES = ["mars_census", "mars_census_runs",
                    "replacement_sales", "feeder_receipts", "border_reports",
                    "census_cattle_imports", "border_receipts",
                    "border_volumes", "border_prices",
-                   "calf_sales", "corn_bids", "distillers_bids", "hay_bids"]
+                   "calf_sales", "corn_bids", "distillers_bids", "hay_bids",
+                   # NOT THE SCORECARD. cme_archive_* carry a weighted average
+                   # CME recomputed later, which differs from the reported
+                   # index in cme_ftp_daily by up to 2.3374 in the older
+                   # years. Neither has an fci_value column, by design -- see
+                   # snowflake/01_schema.sql and cme_archive.py.
+                   "cme_archive_daily", "cme_archive_locations"]
 
 TABLES = CRITICAL_TABLES + OPTIONAL_TABLES
 

@@ -27,6 +27,12 @@ try:
         # this app needs the secret in its own secrets console; locally
         # load_dotenv() above has already taken it from .env.
         "MARS_API_KEY",
+        # The futures overlay on the index chart is the first thing in this
+        # process to read MASSIVE_API_KEY. Deployed, this app needs the secret
+        # in its own secrets console; locally load_dotenv() above took it from
+        # .env. Without it the toggle renders and says what is missing, and
+        # nothing else on the page is affected.
+        "MASSIVE_API_KEY",
     ):
         if _secret_key in st.secrets and not os.environ.get(_secret_key):
             os.environ[_secret_key] = str(st.secrets[_secret_key])
@@ -39,6 +45,7 @@ import mars_census_view
 import cash_calves
 import barn_basis
 import six_state
+import feeder_futures
 from index_dates import headline_index_date
 # A SECOND import line from the same module, deliberately. tests/test_no_drift.py
 # pins the literal string above as proof both copies use the tested headline
@@ -71,6 +78,125 @@ JSA_LOGO = "https://www.jpsi.com/wp-content/themes/gate39media/img/logo-full.png
 FAVICON_PATH = Path(__file__).parent / "assets" / "jsa_favicon.png"
 DATA_PATH = Path(__file__).parent / "data" / "Feeder Cattle Info Ross.xlsx"
 MARS_DB_PATH = Path(__file__).parent / "data" / "mars_history.db"
+
+
+# ── Front-month futures, for the basis overlay on the index chart ────────────
+#
+# Massive's daily settlement history starts 2021-09-02, so the overlay reaches
+# about five years back and no further. The index line behind it reaches 2015,
+# which is why the futures trace simply starts later rather than the chart being
+# clipped to match -- truncating eleven years of published index to flatter a
+# five-year overlay would be the tail wagging the dog.
+FUT_LINE = "#e8833a"
+FUT_PREMIUM = "#e8833a"
+FUT_DISCOUNT = "#0693e3"
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading front-month futures…")
+def load_futures_basis():
+    """Nearby GF settles joined to CME's published index, or {"error": why}.
+
+    RETURNS RATHER THAN RAISES. This feeds an optional overlay on a page whose
+    own number is the product; a dead futures feed must not blank the index.
+    """
+    key = os.environ.get("MASSIVE_API_KEY", "")
+    if not key:
+        return {"error": "MASSIVE_API_KEY is not set for this deployment."}
+    if not db.use_snowflake() and not MARS_DB_PATH.exists():
+        return {"error": "no index database is available here."}
+    try:
+        conn = db.get_conn()
+    except Exception as exc:
+        return {"error": f"could not open the index database: {exc}"}
+    try:
+        raw = db.read_sql_lower(
+            "SELECT report_date AS date, fci_value FROM cme_ftp_daily", conn)
+    except Exception as exc:
+        return {"error": f"could not read the published index: {exc}"}
+    finally:
+        conn.close()
+
+    # CME'S OWN PUBLISHED SERIES, not fci_daily. The reconstruction exists to
+    # publish before CME does and starts 2024-02-08; basis measured against an
+    # estimate of the index is not basis.
+    index_by_date = {}
+    for _d, _v in zip(raw["date"], raw["fci_value"]):
+        if _v is None or pd.isna(_v):
+            continue
+        index_by_date[pd.Timestamp(_d).date()] = float(_v)
+    if not index_by_date:
+        return {"error": "the published index table is empty."}
+
+    try:
+        rows = feeder_futures.nearby(key, datetime.today().date())
+    except feeder_futures.FuturesError as exc:
+        return {"error": str(exc)}
+    joined = feeder_futures.with_basis(rows, index_by_date)
+    if not joined:
+        return {"error": "no session has both a settle and a published index."}
+    return {"rows": joined, "summary": feeder_futures.summary(joined)}
+
+
+def render_futures_basis(bundle):
+    """The basis panel that sits under the index chart when the toggle is on."""
+    rows, s = bundle["rows"], bundle["summary"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"Basis, {s['end']:%b %d}", f"{s['latest']:+.2f}")
+    c2.metric(f"Mean, {s['start']:%Y}–{s['end']:%Y}", f"{s['mean']:+.2f}")
+    _this = [r["basis"] for r in rows if r["date"].year == s["end"].year]
+    c3.metric(f"Mean, {s['end']:%Y}", f"{sum(_this) / len(_this):+.2f}" if _this else "—")
+    c4.metric("At expiry", f"{s['convergence']:.2f}" if s["convergence"] is not None else "—",
+              help="Mean absolute basis in each contract's final sessions. A "
+                   "cash-settled contract must converge on the index, so this "
+                   "sitting near zero is the check that both series are on the "
+                   "same footing.")
+
+    bars = go.Figure()
+    bars.add_trace(go.Bar(
+        x=[r["date"] for r in rows], y=[r["basis"] for r in rows],
+        marker=dict(color=[FUT_PREMIUM if r["basis"] >= 0 else FUT_DISCOUNT for r in rows]),
+        name="Basis", showlegend=False,
+        customdata=[(r["contract"], r["sessions_to_expiry"]) for r in rows],
+        hovertemplate=("<b>%{x|%b %d, %Y}</b>: %{y:+.2f}"
+                       "<br>%{customdata[0]}, %{customdata[1]} sessions to expiry"
+                       "<extra></extra>"),
+    ))
+    bars.add_hline(y=0, line_width=1, line_color=MUTED)
+    bars.update_layout(
+        margin=dict(l=0, r=0, t=6, b=0), height=240,
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        xaxis=dict(**AXIS, type="date"),
+        yaxis=dict(**AXIS, title="Futures − Index ($/cwt)"),
+        showlegend=False,
+    )
+    st.plotly_chart(bars, use_container_width=True)
+
+    _near = [abs(r["basis"]) for r in rows if r["sessions_to_expiry"] <= 4]
+    _far = [abs(r["basis"]) for r in rows if r["sessions_to_expiry"] >= 30]
+    _bits = [
+        "Orange is futures **over** the index, blue **under**.",
+        "The sawtooth is partly the calendar rather than the market: a cash-settled "
+        "contract must converge at expiry, so basis is widest just after a roll and "
+        "near zero at the end of one.",
+    ]
+    if _near and _far:
+        _bits.append(
+            f"Over this span mean absolute basis runs {sum(_near) / len(_near):.2f} "
+            f"within four sessions of expiry against {sum(_far) / len(_far):.2f} at "
+            f"thirty or more sessions out, across {s['rolls']} rolls."
+        )
+    _bits.append("Hover any bar for its contract and sessions remaining.")
+    st.caption(" ".join(_bits))
+
+    _years = pd.DataFrame(
+        [{"Year": y, "Mean basis": v} for y, v in s["by_year"].items()]
+    ).set_index("Year")
+    st.dataframe(_years.style.format({"Mean basis": "{:+.2f}"}),
+                 use_container_width=True)
+    st.caption(
+        "A partial year at either end covers only the sessions in it, so its mean is "
+        "not comparable with a full year's."
+    )
 
 VALID_STATES = {"CO", "IA", "KS", "MO", "MT", "NE", "NM", "ND", "OK", "SD", "TX", "WY"}
 # Video-auction rows are tagged with a sale region ("North Central"/"South
@@ -2200,6 +2326,25 @@ with tab_index:
         yaxis=dict(**AXIS, title="$/cwt", tickprefix="$"),
         height=380,
     )
+    # ONE AXIS. The futures settle and the index are the same unit -- a GF quote of
+    # 351.425 cents per pound IS 351.425 dollars per hundredweight -- so the overlay
+    # shares the index's y-axis. A second y-axis would let an arbitrary alignment
+    # invent a relationship; basis gets its own panel below instead.
+    _fut_on = st.toggle(
+        "Overlay front-month futures", value=False, key="fci_futures_overlay",
+        help="CME feeder futures (GF) against this index, plus the basis between "
+             "them. Futures settles come from Massive and begin 2021-09-02, so the "
+             "overlay is shorter than the index line behind it.",
+    )
+    _fut = load_futures_basis() if _fut_on else None
+    if _fut and not _fut.get("error"):
+        _frows = _fut["rows"]
+        fig.add_trace(go.Scatter(
+            x=[r["date"] for r in _frows], y=[r["settle"] for r in _frows],
+            name="Front-month futures (nearby, unadjusted)", mode="lines",
+            line=dict(color=FUT_LINE, width=1.6),
+            hovertemplate="<b>%{x|%b %d, %Y}</b>: $%{y:.3f}<extra></extra>",
+        ))
     add_watermark(fig, size=0.34, opacity=0.055)
     st.plotly_chart(fig, use_container_width=True)
     caption_bits = [
@@ -2216,6 +2361,11 @@ with tab_index:
             "series moves close to a random walk), but it's still not a trading signal or market forecast."
         )
     st.caption(" ".join(caption_bits))
+    if _fut is not None:
+        if _fut.get("error"):
+            st.info("Futures overlay unavailable — " + _fut["error"])
+        else:
+            render_futures_basis(_fut)
 
 
     # ── Daily Sale Price vs the Index ─────────────────────────────────────────────

@@ -54,7 +54,13 @@ SHARED = ["index_dates.py", "snowflake_db.py", "bucketing.py",
           # real AMS payload, so two fixtures free to drift would be two
           # suites quietly asserting different numbers about the same week --
           # both green, and neither able to say the other had moved.
-          "six_state.py", "test_six_state.py", "six_state_ams.json"]
+          "six_state.py", "test_six_state.py", "six_state_ams.json",
+          # The futures-basis toggle on the index chart. The module talks to
+          # Massive itself rather than importing the seasonal page's
+          # massive_api.py, which exists in only one of the two repos --
+          # sharing that as well would put a second file under this test to
+          # buy nothing, since feeder_futures.py wants /aggs and nothing else.
+          "feeder_futures.py", "test_feeder_futures.py"]
 
 # Every directory a shared module is allowed to live in. Explicit rather than a
 # recursive glob, because .venv/Lib/site-packages holds files with some of these

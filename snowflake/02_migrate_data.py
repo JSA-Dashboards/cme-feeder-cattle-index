@@ -78,13 +78,18 @@ CRITICAL_TABLES = ["fci_daily", "mars_sales", "cme_ftp_daily",
 # 55,945 -- so putting it ahead of the dashboard tables would delay every one
 # of them to land something nothing reads.
 #
-# THEY ARE RE-UPLOADED EVERY RUN THOUGH NOTHING CHANGES THEM, which is the
-# obvious objection and is answered by measuring it rather than arguing: both
-# tables together push and fingerprint in 14s INCLUDING the login, against a
-# 900s whole-push budget. The alternative -- leaving them out of the lists and
-# pushing by hand -- buys those seconds back by making the two backends free
-# to disagree with nobody watching, which is the failure this file's whole
-# second half exists to catch.
+# THEY ARE RE-UPLOADED EVERY RUN THOUGH NOTHING CHANGES THEM. That is the
+# obvious objection, it was put to Ross, and he decided 2026-10-30 to LEAVE
+# THEM IN THE DAILY PUSH -- so this is a decision, not a default, and removing
+# them is a change to it rather than a tidy-up.
+#
+# The cost was measured before the decision rather than argued: the whole
+# --optional-only push, all fifteen tables with these two in it, runs 53s
+# against the 900s budget -- 6% of it -- and the pair alone is 14s including
+# the login. The alternative, leaving them out of the lists and pushing by
+# hand, buys those seconds back by making the two backends free to disagree
+# with nobody watching, which is the failure this file's whole second half
+# exists to catch.
 OPTIONAL_TABLES = ["mars_census", "mars_census_runs",
                    "replacement_sales", "feeder_receipts", "border_reports",
                    "census_cattle_imports", "border_receipts",

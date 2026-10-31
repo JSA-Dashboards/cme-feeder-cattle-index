@@ -61,9 +61,11 @@ class FakeConn:
     Most specific needle first.
     """
 
-    def __init__(self, archive, printed):
-        # Canonical rows: archive (date, price, head); printed (date, value, head).
+    def __init__(self, archive, printed, locations=()):
+        # Canonical rows: archive (date, price, head); printed (date, value,
+        # head); locations (date, name, state, head, weight, price).
         self._plans = [
+            ("cme_archive_locations", lambda: [tuple(r) for r in locations]),
             ("seven_day_head", lambda: [tuple(r) for r in archive]),
             ("cme_archive_daily", lambda: [(r[0], r[1]) for r in archive]),
             ("fci_value, total_head", lambda: [tuple(r) for r in printed]),
@@ -74,8 +76,8 @@ class FakeConn:
         return FakeCursor(self._plans)
 
 
-def _conn(archive, printed):
-    return FakeConn(archive, printed)
+def _conn(archive, printed, locations=()):
+    return FakeConn(archive, printed, locations)
 
 
 def _select_lists(code):
@@ -313,3 +315,106 @@ def test_the_snowflake_backend_date_type_is_handled():
     rows = ah.load_series(_conn(archive, printed))
     assert rows == [("2015-01-02", 170.0, False)], (
         "a date object leaked through; every date would read as archive-only")
+
+
+# ---------------------------------------------------------------------------
+# The barn roster. The whole hazard is one barn read as several.
+# ---------------------------------------------------------------------------
+
+#  (date, name, state, head, weight, price)
+BARNS = [
+    ("2013-01-02", "ABERDEEN",      "SD", 100, 750.0, 150.0),
+    ("2014-06-02", "aberdeen",      "SD", 120, 760.0, 160.0),   # same barn, lower case
+    ("2015-01-02", "Aberdeen",      "SD", 140, 770.0, 170.0),   # same barn again
+    ("2015-01-02", "APACHE  VIDEO", "OK",  50, 800.0, 171.0),   # two inner spaces
+    ("2016-01-04", "APACHE VIDEO",  "OK",  60, 810.0, 180.0),   # one inner space
+    ("2013-02-02", "GONEVILLE",     "KS", 900, 740.0, 140.0),   # stops early
+]
+
+
+def test_barn_key_folds_case_and_inner_whitespace():
+    assert ah.barn_key("aberdeen") == ah.barn_key("ABERDEEN") == "ABERDEEN"
+    assert ah.barn_key("APACHE  VIDEO") == ah.barn_key("apache video") == "APACHE VIDEO"
+    assert ah.barn_key("  Tina  ") == "TINA"
+
+
+def test_the_roster_groups_spelling_variants_into_one_barn():
+    roster = ah.barn_roster(_conn([], [], BARNS))
+    keys = sorted(b["key"] for b in roster)
+    assert keys == ["ABERDEEN", "APACHE VIDEO", "GONEVILLE"], keys
+    ab = next(b for b in roster if b["key"] == "ABERDEEN")
+    assert ab["dates"] == 3 and ab["head"] == 360
+    assert ab["first"] == "2013-01-02" and ab["last"] == "2015-01-02"
+
+
+def test_that_the_name_grouping_can_fail():
+    """
+    Keyed raw, this fixture is SIX barns rather than three, and each fragment
+    carries its own first and last date -- so two of them read as barns that
+    appeared and vanished. That is the exact finding the roster exists to
+    report, arriving as an artefact of not normalising, which is why the test
+    above is not decoration.
+    """
+    raw = {name for _d, name, _s, _h, _w, _p in BARNS}
+    assert len(raw) == 6
+    assert len({ah.barn_key(n) for n in raw}) == 3
+
+
+def test_gone_is_measured_from_the_archives_last_date_not_today():
+    """
+    The archive is a manual backfill. Measured against the wall clock, running
+    this a year after the last backfill would declare every barn on file gone
+    at once -- a banner that is wrong about all 279 of them.
+    """
+    roster = ah.barn_roster(_conn([], [], BARNS))
+    gone = {b["key"] for b in roster if b["gone"]}
+    # Last date in the fixture is 2016-01-04; GONEVILLE stopped in 2013 and
+    # ABERDEEN in 2015-01, both more than a year before it. APACHE VIDEO
+    # reported ON the last date, so it is active -- even though every one of
+    # these dates is a decade in the past.
+    assert gone == {"GONEVILLE", "ABERDEEN"}, gone
+    assert all(b["last"] < "2017-01-01" for b in roster), (
+        "fixture must be entirely historic, or this proves nothing")
+
+
+def test_share_sums_to_one_and_head_is_lifetime():
+    roster = ah.barn_roster(_conn([], [], BARNS))
+    assert sum(b["share"] for b in roster) == pytest.approx(1.0)
+    assert sum(b["head"] for b in roster) == 1370
+
+
+def test_the_state_is_the_one_the_barn_last_filed_under():
+    rows = [("2013-01-02", "DRIFTER", "KS", 10, 700.0, 100.0),
+            ("2016-01-04", "DRIFTER", "MO", 10, 700.0, 100.0)]
+    roster = ah.barn_roster(_conn([], [], rows))
+    assert roster[0]["state"] == "MO"
+
+
+def test_barn_series_matches_on_the_normalised_key():
+    got = ah.barn_series(_conn([], [], BARNS), "aberdeen")
+    assert [r[0] for r in got] == ["2013-01-02", "2014-06-02", "2015-01-02"]
+    assert got[0][1] == 100 and got[0][3] == 150.0
+    # and the caller may pass any spelling
+    assert ah.barn_series(_conn([], [], BARNS), "  ABERDEEN ") == got
+
+
+def test_barn_series_drops_rows_with_no_price():
+    rows = [("2015-01-02", "X", "KS", 10, 700.0, None),
+            ("2015-01-05", "X", "KS", 10, 700.0, 150.0)]
+    assert [r[0] for r in ah.barn_series(_conn([], [], rows), "X")] == ["2015-01-05"]
+
+
+def test_roster_summary_counts_the_barns_that_left():
+    roster = ah.barn_roster(_conn([], [], BARNS))
+    s = ah.roster_summary(roster, printed_from="2015-01-01")
+    assert s["barns"] == 3
+    assert s["gone"] == 2
+    assert s["gone_head"] == 1260          # GONEVILLE 900 + ABERDEEN 360
+    assert s["biggest_gone"]["key"] == "GONEVILLE"
+    # Only GONEVILLE's whole life predates the as-printed era.
+    assert s["pre_era_only"] == 1
+
+
+def test_an_empty_location_table_summarises_to_None():
+    assert ah.barn_roster(_conn([], [], [])) == []
+    assert ah.roster_summary([], None) is None

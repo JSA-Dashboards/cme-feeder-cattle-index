@@ -25,7 +25,7 @@ so each page draws its own chart from these numbers -- the same split
 feeder_futures.py already runs on.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 import snowflake_db as db
 
@@ -98,6 +98,108 @@ def agreement_by_year(conn):
         if ph is not None and head is not None and abs(float(head) - float(ph)) > 0.5:
             slot["head_mismatches"] += 1
     return [years[y] for y in sorted(years)]
+
+
+#: A barn silent for this long, measured from the ARCHIVE'S OWN last date and
+#: not from today, has left the index. Measured from the data's last date
+#: because the archive is a manual backfill: run it in six months' time and a
+#: "today" rule would declare every barn gone at once.
+GONE_AFTER_DAYS = 365
+
+
+def barn_key(name):
+    """
+    One barn, one key. Upper-cased with internal whitespace collapsed.
+
+    THE WORKBOOKS SPELL THE SAME BARN SEVERAL WAYS -- 'ABERDEEN' and
+    'aberdeen', three spellings of 'billings pays', 'APACHE  VIDEO' with two
+    spaces. 352 raw names in cme_archive_locations are 280 barns. Keyed raw, a
+    barn's fourteen-year history splits into fragments and each fragment reads
+    as a barn that appeared and vanished -- which is precisely the thing the
+    roster below is for, so the error would arrive disguised as the finding.
+
+    Normalisation lives HERE, in Python, and the callers group on its output
+    rather than on a TRIM(UPPER(...)) written into SQL. Two normalisations
+    that can drift apart is the same bug one level up.
+    """
+    return " ".join(str(name).upper().split())
+
+
+def _barn_rows(conn):
+    for rd, loc, st, head, wt, px in conn.cursor().execute(
+            "SELECT report_date, location, state, head, wtd_weight, wtd_price "
+            "FROM cme_archive_locations WHERE head IS NOT NULL").fetchall():
+        yield str(db.iso(rd)), barn_key(loc), st, float(head), wt, px
+
+
+def barn_roster(conn):
+    """
+    [{key, state, first, last, dates, head, share, gone}], biggest first.
+
+    `gone` is the finding this exists for: a barn that reported for years and
+    then stopped. CARTHAGE-JOPLIN ran 2013-01-03 to 2024-05-20 across 364
+    dates and 299,783 head, and nothing else in this project would say so.
+    """
+    acc, total = {}, 0.0
+    last_seen = None
+    for iso, key, state, head, _wt, _px in _barn_rows(conn):
+        slot = acc.setdefault(key, {"key": key, "state": state,
+                                    "first": iso, "last": iso,
+                                    "dates": 0, "head": 0.0})
+        slot["first"] = min(slot["first"], iso)
+        if iso >= slot["last"]:
+            slot["last"] = iso
+            # The state as the barn was last filed under, not as first filed:
+            # AMS has moved a barn's state label before now.
+            slot["state"] = state or slot["state"]
+        slot["dates"] += 1
+        slot["head"] += head
+        total += head
+        last_seen = iso if last_seen is None else max(last_seen, iso)
+
+    if last_seen is None:
+        return []
+    cutoff = (date.fromisoformat(last_seen)
+              - timedelta(days=GONE_AFTER_DAYS)).isoformat()
+    out = []
+    for slot in acc.values():
+        slot["share"] = slot["head"] / total if total else 0.0
+        slot["gone"] = slot["last"] < cutoff
+        out.append(slot)
+    out.sort(key=lambda s: -s["head"])
+    return out
+
+
+def barn_series(conn, key):
+    """[(iso, head, weight, price)] for one barn, oldest first."""
+    want = barn_key(key)
+    rows = [(iso, head, wt, px)
+            for iso, k, _st, head, wt, px in _barn_rows(conn)
+            if k == want and px is not None]
+    rows.sort()
+    return rows
+
+
+def roster_summary(roster, printed_from=None):
+    """
+    The handful of figures the barn panel quotes, so neither page derives them.
+
+    `printed_from` is the first date CME's as-printed table covers, from
+    summary(); barns whose whole life predates it are ones no other source in
+    this project has ever held.
+    """
+    if not roster:
+        return None
+    gone = [b for b in roster if b["gone"]]
+    return {
+        "barns": len(roster),
+        "gone": len(gone),
+        "gone_head": sum(b["head"] for b in gone),
+        "gone_share": sum(b["share"] for b in gone),
+        "biggest_gone": max(gone, key=lambda b: b["head"]) if gone else None,
+        "pre_era_only": len([b for b in roster if printed_from
+                             and b["last"] < printed_from]),
+    }
 
 
 def printed_span(series):

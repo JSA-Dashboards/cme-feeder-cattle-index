@@ -205,6 +205,45 @@ and 24.2 protan. 2015-onward keeps JPSI_BLUE because that is the colour the
 same era already wears on Index Trend; a period that changed colour between
 two charts on one page would read as two different series.
 
+### The Barn History panel, and the one thing it can get wrong
+
+Added 2026-10-31, directly below Long History and gated the same way. A roster
+of every barn in `cme_archive_locations` with first/last seen, lifetime head
+and share, plus one barn's own price and head back to 2013.
+
+**ONE BARN READ AS SEVERAL IS THE ENTIRE HAZARD**, and it arrives disguised as
+the panel's own finding. The workbooks spell the same barn several ways —
+`ABERDEEN` and `aberdeen`, three spellings of `billings pays`, `APACHE  VIDEO`
+with two spaces. **352 raw names are 279 barns.** Keyed raw, a barn's
+fourteen-year history splits into fragments and each fragment reads as a barn
+that appeared and vanished, which is exactly what the roster exists to report.
+`archive_history.barn_key()` is the single normalisation, in Python rather
+than as a `TRIM(UPPER(...))` in SQL, and `tests/test_no_drift.py` forbids
+either page calling `.upper()` or `.strip()` on a barn name.
+
+This also corrected two figures quoted earlier in the work: **82** archive
+barns never appear in `cme_ftp_locations` (not 88) and **122** barns reported
+before 2015 (not 149). Both were inflated by case duplicates.
+
+`GONE_AFTER_DAYS = 365` is measured from the **archive's own last date, not
+today**. The backfill is manual, so a wall-clock rule would declare all 279
+barns gone at once the first time nobody ran it for a year.
+
+What it says today: 279 barns, 157 stopped, 1,767,007 head between them —
+9.3% of every head on file. Biggest exit is Carthage-Joplin, 2013-01-03 to
+2024-05-20, 364 dates and 299,783 head. Note `CARTHAGE` starts 2020-01-27,
+so that pair is a rename or split and not two unrelated barns.
+
+### A guard that rejects correct code gets deleted, so prove both halves
+
+Three times in this work a guard was written as a substring ban and caught
+legitimate code: `fci_value` in a correct `WHERE ... IS NOT NULL`, `fci_value`
+in the caption that **warns** about it, and `SELECT` inside `st.selectbox`.
+Each is now a precise match — the SELECT list, SQL in the renderer, and
+`SELECT\s...\sFROM\s` respectively — and each is paired with a test asserting
+it still catches the real violation **and** spares the legitimate use. A guard
+with only the first half is one somebody deletes the first time it blocks them.
+
 ## Two copies of the dashboard
 
 `app.py` here is the standalone twin. The DEPLOYED one is

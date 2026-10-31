@@ -27,6 +27,7 @@ Two structural traps this file has fallen into once each:
   case: it lives in livestock-portal and beef-weight-dashboard only.
 """
 import ast
+import re
 import os
 from pathlib import Path
 
@@ -968,6 +969,19 @@ def test_that_staff_gate_check_can_fail():
 # second index line with no owner to ask about it. Same gate as the study
 # above, same assertion in both directions.
 
+def _issues_sql(body):
+    """
+    True if `body` contains an actual SQL query.
+
+    NOT a substring test for "SELECT". `st.selectbox` contains it, so a naive
+    check rejected a page for offering a barn picker -- the third time in this
+    work a guard has punished correct code, and the reason each one is now
+    paired with a test proving it still catches the real thing.
+    """
+    return re.search(r"SELECT\s.*?\sFROM\s", body, re.S | re.I) is not None
+
+
+
 def test_the_long_history_is_staff_gated_in_the_portal():
     src = (PORTAL / "app.py").read_text(encoding="utf-8")
     assert "def render_archive_history(" in src, "the portal lost the panel"
@@ -1011,7 +1025,7 @@ def test_both_copies_compute_the_long_history_in_the_shared_module():
         # into once. What must never appear is a QUERY: the renderer arranges
         # what the loader handed it, so any SQL at all is it reaching past the
         # shared module for a column of its own.
-        assert "SELECT" not in body.upper(), (
+        assert not _issues_sql(body), (
             "%s: render_archive_history issues its own query instead of "
             "arranging the bundle it was given" % app)
 
@@ -1021,6 +1035,55 @@ def test_that_the_long_history_gate_check_can_fail():
            "with st.expander(ARCHIVE_LABEL):\n    render_archive_history(b)\n")
     assert "portal_view.staff_expander(ARCHIVE_LABEL)" not in bad
     assert "with st.expander(ARCHIVE_LABEL)" in bad
+
+
+def test_the_barn_archive_is_staff_gated_in_the_portal():
+    src = (PORTAL / "app.py").read_text(encoding="utf-8")
+    assert "def render_barn_archive(" in src, "the portal lost the barn panel"
+    assert "portal_view.staff_expander(BARN_LABEL)" in src, (
+        "the portal's barn archive is no longer behind staff_expander")
+    assert "with st.expander(BARN_LABEL)" not in src, (
+        "the portal uses a plain expander for the barn panel")
+
+
+def test_the_barn_archive_is_a_plain_expander_in_the_standalone():
+    src = (HERE / "app.py").read_text(encoding="utf-8")
+    assert "def render_barn_archive(" in src, "the standalone lost the barn panel"
+    assert "with st.expander(BARN_LABEL)" in src
+
+
+def test_both_copies_group_barns_in_the_shared_module():
+    """
+    THE ONE THING THIS PANEL CAN GET WRONG IS ONE BARN READ AS SEVERAL. The
+    workbooks spell the same barn several ways, so the normalisation is the
+    load-bearing part, and a page doing its own .upper() would be a second
+    implementation of it -- free to drift, and wrong in a way that looks
+    exactly like the roster's own finding.
+    """
+    for app in (HERE / "app.py", PORTAL / "app.py"):
+        src = app.read_text(encoding="utf-8")
+        assert "archive_history.barn_roster(" in src, app
+        assert "archive_history.roster_summary(" in src, app
+        tree = ast.parse(src)
+        for fn_name in ("render_barn_archive", "load_barn_archive"):
+            fn = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == fn_name]
+            assert fn, "%s: %s missing" % (app, fn_name)
+            body = ast.unparse(fn[0])
+            assert not _issues_sql(body), (
+                "%s: %s issues its own query" % (app, fn_name))
+            for banned in (".upper()", ".strip()", "barn_key("):
+                assert banned not in body, (
+                    "%s: %s normalises barn names itself instead of leaving it "
+                    "to archive_history.barn_key" % (app, fn_name))
+
+
+def test_that_the_barn_normalisation_rule_can_fail():
+    """A page folding case on its own must be caught."""
+    bad = "def render_barn_archive(b):\n    k = name.upper()\n"
+    assert ".upper()" in bad
+    good = "def render_barn_archive(b):\n    rows = bundle['roster']\n"
+    assert ".upper()" not in good
 
 
 def test_that_the_no_SQL_rule_can_fail_and_spares_the_warning():
@@ -1033,8 +1096,14 @@ def test_that_the_no_SQL_rule_can_fail_and_spares_the_warning():
     into once already.
     """
     queries = "x = conn.execute('SELECT fci_value FROM cme_ftp_daily')"
-    assert "SELECT" in queries.upper()
+    assert _issues_sql(queries)
 
     warns = "st.caption('Nothing in these tables is named fci_value.')"
-    assert "SELECT" not in warns.upper(), (
+    assert not _issues_sql(warns), (
         "the rule rejects the warning too, so it will not survive")
+
+    # And the one that actually bit: a barn picker is not a query.
+    picker = "pick = st.selectbox('Barn history', names)"
+    assert not _issues_sql(picker), (
+        "st.selectbox reads as SQL; the guard rejects a page for offering a "
+        "dropdown")

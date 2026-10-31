@@ -939,6 +939,161 @@ def render_archive_history(bundle):
             )
 
 
+BARN_LABEL = "Barn history — every barn in the archive, back to 2013 (JSA internal)"
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading the barn archive…")
+def load_barn_archive():
+    """The archive's barn roster, or {"error": why}."""
+    try:
+        conn = db.get_conn()
+    except Exception as exc:
+        return {"error": f"could not open the index database: {exc}"}
+    try:
+        roster = archive_history.barn_roster(conn)
+        series = archive_history.load_series(conn)
+    except Exception as exc:
+        return {"error": f"the archive is not loaded here: {exc}"}
+    finally:
+        conn.close()
+    if not roster:
+        return {"error": "the archive location table is empty here."}
+    printed_from, _printed_to = archive_history.printed_span(series)
+    return {"roster": roster, "printed_from": printed_from,
+            "summary": archive_history.roster_summary(roster, printed_from)}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_barn_series(key):
+    """One barn's own history. Keyed on the barn so switching barns is cheap."""
+    try:
+        conn = db.get_conn()
+    except Exception:
+        return []
+    try:
+        return archive_history.barn_series(conn, key)
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def render_barn_archive(bundle):
+    """The roster, and one barn's fourteen years.
+
+    All arithmetic is archive_history's; this only arranges it.
+    """
+    if "error" in bundle:
+        st.caption(bundle["error"])
+        return
+    roster = bundle["roster"]
+    summary = bundle["summary"]
+    cut = bundle["printed_from"]
+
+    big = summary["biggest_gone"]
+    # No dollar signs in this sentence -- Streamlit reads a pair of them as
+    # LaTeX and eats what is between.
+    st.caption(
+        f"**{summary['barns']} barns** have reported into the index since "
+        f"2013. **{summary['gone']} of them have stopped** — no report in "
+        f"the year to the archive's last date — and between them they sold "
+        f"{summary['gone_head']:,.0f} head, {summary['gone_share']:.1%} of "
+        f"every head in the file."
+        + (f" The largest is **{big['key'].title()}**, which ran from "
+           f"{big['first']} to {big['last']} across {big['dates']} index dates "
+           f"and {big['head']:,.0f} head." if big else "")
+        + (f" {summary['pre_era_only']} barn(s) stopped before {cut}, so this "
+           f"is the only table in the project that has ever held them."
+           if summary["pre_era_only"] else "")
+    )
+
+    # ── the roster ──────────────────────────────────────────────────────────
+    only_gone = st.checkbox("Show only barns that have stopped reporting",
+                            key="arch_barn_gone")
+    rows = [b for b in roster if b["gone"]] if only_gone else roster
+    tbl = pd.DataFrame([{
+        "Barn": b["key"].title(),
+        "St": b["state"] or "—",
+        "First": b["first"],
+        "Last": b["last"],
+        "Dates": b["dates"],
+        "Head": f"{b['head']:,.0f}",
+        "Share": f"{b['share']:.2%}",
+        "Status": "stopped" if b["gone"] else "active",
+    } for b in rows])
+    with st.container(key="wm-arch-barns"):
+        st.dataframe(tbl, use_container_width=True, hide_index=True, height=300)
+    st.caption(
+        "Lifetime head across every date the workbooks carry, biggest first. "
+        "**Share** is of all head in the archive, not of any one year. Barn "
+        "names are normalised before grouping: the workbooks spell the same "
+        "barn several ways, and keyed raw a barn's history splits into "
+        "fragments that each read as a barn which came and went — the very "
+        "thing this table is for."
+    )
+
+    # ── one barn's own history ──────────────────────────────────────────────
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    names = [b["key"] for b in roster]
+    pick = st.selectbox("Barn history", names,
+                        format_func=lambda k: k.title(), key="arch_barn_pick")
+    hist = load_barn_series(pick)
+    if not hist:
+        st.caption("No priced rows for that barn.")
+        return
+
+    early = [(d, h, w, p) for d, h, w, p in hist if cut is None or d <= cut]
+    later = [(d, h, w, p) for d, h, w, p in hist if cut is not None and d >= cut]
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.68, 0.32], vertical_spacing=0.07)
+    for rows_, name, colour in (
+            (later, f"{cut[:4]} onward", ARCH_LATER),
+            (early, f"{hist[0][0][:4]}–{cut[:4]}" if cut else "archive",
+             ARCH_EARLY)):
+        if not rows_:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[pd.Timestamp(d) for d, _h, _w, _p in rows_],
+            y=[p for _d, _h, _w, p in rows_],
+            name=name, mode="lines+markers",
+            line=dict(color=colour, width=1.5), marker=dict(size=3),
+            hovertemplate="%{x|%Y-%m-%d}: $%{y:.2f}<extra></extra>",
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=[pd.Timestamp(d) for d, _h, _w, _p in rows_],
+            y=[h for _d, h, _w, _p in rows_],
+            name=name, mode="lines", showlegend=False,
+            line=dict(color=colour, width=1), opacity=0.7,
+            hovertemplate="%{y:,.0f} head<extra></extra>",
+        ), row=2, col=1)
+    fig.update_yaxes(title="$/cwt", tickprefix="$", row=1, col=1, **FUT_AXIS)
+    fig.update_yaxes(title="head", row=2, col=1, **FUT_AXIS)
+    fig.update_xaxes(row=1, col=1, **FUT_AXIS)
+    fig.update_xaxes(row=2, col=1, **FUT_AXIS)
+    fig.update_layout(
+        paper_bgcolor=BG, plot_bgcolor=BG,
+        font=dict(color=TEXT, size=11),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right",
+                    x=1, font=dict(color=MUTED, size=10),
+                    bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=55, r=20, t=15, b=40),
+        height=420,
+    )
+    add_watermark(fig, size=0.3, opacity=0.06)
+    st.plotly_chart(fig, use_container_width=True)
+
+    me = next(b for b in roster if b["key"] == pick)
+    st.caption(
+        f"{pick.title()} — {me['dates']} index dates, {me['first']} to "
+        f"{me['last']}, {me['head']:,.0f} head. Prices are the barn's own "
+        f"pound-weighted average for that date, as CME restated it. "
+        + ("This barn has stopped reporting."
+           if me["gone"] else "This barn is still reporting.")
+    )
+
+
 @st.cache_data(ttl=3600, show_spinner="Loading the six state summaries…")
 def fetch_six_state(key: str, schema: int):
     """
@@ -3194,6 +3349,10 @@ with tab_index:
     st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
     with st.expander(ARCHIVE_LABEL):
         render_archive_history(load_archive_history())
+
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    with st.expander(BARN_LABEL):
+        render_barn_archive(load_barn_archive())
 
     # ── Weekly Rundown ────────────────────────────────────────────────────────────
 
